@@ -2,8 +2,8 @@ import CoreGraphics
 import Foundation
 
 /// Layout metrics for a Launchpad-style icon grid.
-/// Icons use 4x source textures: 128pt layouts render at 512px and the
-/// 256pt layout renders at 1024px.
+/// Icon texture pixel size is `iconPointSize * IconRenderQuality.current.rasterScale`
+/// (2× performance or 4× quality).
 enum GridLayoutPreset: String, CaseIterable, Identifiable {
     case fourByTwo = "4x2-256"
     case fiveByFour = "5x4-128"

@@ -303,6 +303,80 @@ enum LaunchpadPresentation: Equatable {
     case dismissing
 }
 
+/// Icon raster + Metal filter + residency profile for Launchpad sprites.
+enum IconRenderQuality: String, CaseIterable, Identifiable {
+    /// 4× float16 + binomial; full catalog resident for max smoothness.
+    case quality
+    /// 2× 8-bit linear; full catalog resident for smooth paging.
+    case performance
+    /// Same bake as performance, but page-window lazy load / prune for low RAM.
+    case lowMemory
+
+    static let defaultsKey = "iconRenderQuality"
+    static let defaultQuality: Self = .performance
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .quality: "画质优先"
+        case .performance: "性能优先"
+        case .lowMemory: "低内存占用"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .quality:
+            "最高画质渲染，内存消耗更高"
+        case .performance:
+            "常规画质，与系统显示效果相当"
+        case .lowMemory:
+            "减小内存消耗，但图标加载会更慢"
+        }
+    }
+
+    /// Source pixels per layout point when baking icon textures.
+    var rasterScale: CGFloat {
+        switch self {
+        case .quality: 4
+        case .performance, .lowMemory: 2
+        }
+    }
+
+    /// `true` when icons use the linear float16 bake path (quality only).
+    var usesLinearFloat16Textures: Bool {
+        switch self {
+        case .quality: true
+        case .performance, .lowMemory: false
+        }
+    }
+
+    /// `true` = page-window cache + async miss; `false` = full-catalog resident.
+    var usesLazyTextureLoading: Bool {
+        switch self {
+        case .quality, .performance: false
+        case .lowMemory: true
+        }
+    }
+
+    /// Fragment path: 1 = binomial (quality), 0 = bilinear (performance / low memory).
+    var shaderQualityMode: Float {
+        switch self {
+        case .quality: 1
+        case .performance, .lowMemory: 0
+        }
+    }
+
+    static var current: Self {
+        guard let rawValue = UserDefaults.standard.string(forKey: defaultsKey),
+              let quality = Self(rawValue: rawValue) else {
+            return defaultQuality
+        }
+        return quality
+    }
+}
+
 enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
     case fly
     case zoom

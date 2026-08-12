@@ -81,6 +81,8 @@ private struct GeneralSettingsView: View {
     @AppStorage("showLabels") private var showLabels = true
     @AppStorage(GridLayoutPreset.defaultsKey)
     private var gridLayoutPreset = GridLayoutPreset.defaultPreset.rawValue
+    @AppStorage(IconRenderQuality.defaultsKey)
+    private var iconRenderQuality = IconRenderQuality.defaultQuality.rawValue
     @AppStorage(LaunchpadAnimationStyle.defaultsKey)
     private var presentationAnimationStyle = LaunchpadAnimationStyle.fly.rawValue
     @State private var didClearCache = false
@@ -122,6 +124,29 @@ private struct GeneralSettingsView: View {
                 .pickerStyle(.menu)
                 .onChange(of: gridLayoutPreset) { _, _ in
                     NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
+                }
+
+                Picker("渲染质量", selection: $iconRenderQuality) {
+                    ForEach(IconRenderQuality.allCases) { quality in
+                        Text(quality.title).tag(quality.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: iconRenderQuality) { _, newValue in
+                    // Explicit notification so Metal rebuilds immediately;
+                    // UserDefaults.didChangeNotification alone can lag behind
+                    // @AppStorage or coalesce with other preference writes.
+                    UserDefaults.standard.set(newValue, forKey: IconRenderQuality.defaultsKey)
+                    NotificationCenter.default.post(
+                        name: .qlaunchpadRenderQualityChanged,
+                        object: nil
+                    )
+                }
+                if let quality = IconRenderQuality(rawValue: iconRenderQuality) {
+                    Text(quality.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 

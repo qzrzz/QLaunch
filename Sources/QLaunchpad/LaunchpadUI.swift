@@ -9,6 +9,9 @@ extension Notification.Name {
     static let qlaunchpadFocusSearch = Notification.Name("QLaunchpadFocusSearch")
     static let qlaunchpadGridLayoutChanged = Notification.Name("QLaunchpadGridLayoutChanged")
     static let qlaunchpadCacheClearRequested = Notification.Name("QLaunchpadCacheClearRequested")
+    static let qlaunchpadRenderQualityChanged = Notification.Name("QLaunchpadRenderQualityChanged")
+    /// Posted when a background icon bake finishes (may batch multiple).
+    static let qlaunchpadIconTexturesUpdated = Notification.Name("QLaunchpadIconTexturesUpdated")
 }
 
 /// Overlay hosting view that only intercepts hits in the search / chrome regions.
