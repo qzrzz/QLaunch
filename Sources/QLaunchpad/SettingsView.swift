@@ -88,7 +88,7 @@ private struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section("启动") {
-                Toggle("登录时启动 QLaunchpad", isOn: $launchAtLogin)
+                Toggle("登录时启动 QLaunch", isOn: $launchAtLogin)
                     .disabled(true)
 
                 Toggle(isOn: $showDockIcon) {
@@ -497,7 +497,7 @@ private struct AboutSettingsView: View {
                 // Optical size: system icons already include margin + soft shadow.
                 .frame(width: 96, height: 96)
 
-            Text("QLaunchpad")
+            Text("QLaunch")
                 .font(.title.weight(.bold))
 
             Text("高性能、原生 Metal 渲染的 macOS 应用启动器。")

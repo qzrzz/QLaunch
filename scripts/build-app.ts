@@ -49,8 +49,8 @@ const ICON_COMPOSER_CANDIDATES = [
   join(ROOT_DIR, "icons/AppIcon.icon"),
   join(ROOT_DIR, "icons/QLaunchpad.icon"),
 ].filter((value): value is string => Boolean(value));
-/** Bundle icon base name → `QLaunchpad.icns` + `CFBundleIconName`. */
-const BUNDLE_ICON_NAME = "QLaunchpad";
+/** Bundle icon base name → `QLaunch.icns` + `CFBundleIconName`. */
+const BUNDLE_ICON_NAME = "QLaunch";
 /** Compiled icon artifacts reused across `bun run dev` until the source changes. */
 const ICON_CACHE_DIR = join(ROOT_DIR, "build/icon-cache");
 const ICON_CACHE_MANIFEST = join(ICON_CACHE_DIR, "manifest.json");
@@ -126,7 +126,7 @@ function productDirectory(configuration: BuildConfiguration): string {
 }
 
 function appName(configuration: BuildConfiguration): string {
-  return configuration === "debug" ? "QLaunchpad Dev.app" : "QLaunchpad.app";
+  return configuration === "debug" ? "QLaunch Dev.app" : "QLaunch.app";
 }
 
 function assertNumericBuildNumber(buildNumber: string): void {
@@ -452,7 +452,7 @@ async function createICNSFromPNG(destination: string): Promise<void> {
     throw new Error("未找到应用图标 PNG: " + ICON_PNG_SOURCE);
   }
 
-  const iconset = join(dirname(destination), "QLaunchpad.iconset");
+  const iconset = join(dirname(destination), "QLaunch.iconset");
   rmSync(iconset, { recursive: true, force: true });
   mkdirSync(iconset, { recursive: true });
 
@@ -606,7 +606,7 @@ export async function buildApp(options: AppBuildOptions): Promise<AppBuildResult
   assertNumericBuildNumber(options.buildNumber);
 
   const configuration = options.configuration;
-  const productName = options.productName ?? (configuration === "debug" ? "QLaunchpad Dev" : "QLaunchpad");
+  const productName = options.productName ?? (configuration === "debug" ? "QLaunch Dev" : "QLaunch");
   const bundleIdentifier = options.bundleIdentifier ?? (
     configuration === "debug" ? "com.qzrzz.qlaunchpad.dev" : "com.qzrzz.qlaunchpad"
   );

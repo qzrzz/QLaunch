@@ -384,9 +384,14 @@ final class AppStore: ObservableObject {
         presentation == .visible || presentation == .presenting
     }
 
-    var focusedApp: AppInfo? {
+    var focusedItem: LaunchpadItem? {
         guard let keyboardFocusID else { return nil }
-        return activeAppsForNavigation.first { $0.id == keyboardFocusID }
+        return activeDisplayItems.first { $0.id == keyboardFocusID }
+    }
+
+    var focusedApp: AppInfo? {
+        guard case .app(let app) = focusedItem else { return nil }
+        return app
     }
 
     var hiddenApps: [AppInfo] {
@@ -422,14 +427,6 @@ final class AppStore: ObservableObject {
     var orderedFolders: [AppFolder] {
         launchpadItems.compactMap { item in
             if case .folder(let folder) = item { return folder }
-            return nil
-        }
-    }
-
-    private var activeAppsForNavigation: [AppInfo] {
-        guard openedFolderID != nil else { return filteredApps }
-        return activeDisplayItems.compactMap { item in
-            if case .app(let app) = item { return app }
             return nil
         }
     }
@@ -576,28 +573,43 @@ final class AppStore: ObservableObject {
     // MARK: Keyboard focus
 
     func focusApp(id: String) {
-        guard activeAppsForNavigation.contains(where: { $0.id == id }) else { return }
+        guard activeDisplayItems.contains(where: { $0.id == id }) else { return }
         keyboardFocusID = id
         isKeyboardNavigationActive = false
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
     func focusFirstAppOnCurrentPage() {
-        let apps = activeAppsForNavigation
-        guard !apps.isEmpty else {
+        let items = activeDisplayItems
+        guard !items.isEmpty else {
             keyboardFocusID = nil
             return
         }
-        let start = min(currentPage * pageCapacity, apps.count - 1)
-        keyboardFocusID = apps[start].id
+        let start = min(currentPage * pageCapacity, items.count - 1)
+        keyboardFocusID = items[start].id
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
     func moveKeyboardFocus(_ direction: GridNavigationDirection) {
-        let apps = activeAppsForNavigation
-        guard !apps.isEmpty else {
+        let items = activeDisplayItems
+        guard !items.isEmpty else {
             keyboardFocusID = nil
             isKeyboardNavigationActive = false
+            return
+        }
+
+        // A page gesture can finish visually before the page-settle callback
+        // updates the focus item. Do not let an arrow key move that stale item
+        // on the previous page; switch the focus to the page now on screen
+        // first, and consume this key press.
+        let displayedPage = currentPage
+        let focusIsOnDisplayedPage = keyboardFocusID.flatMap { id in
+            items.firstIndex { $0.id == id }
+        }.map { $0 / pageCapacity == displayedPage } ?? false
+        if isKeyboardNavigationActive && !focusIsOnDisplayedPage {
+            let start = min(displayedPage * pageCapacity, items.count - 1)
+            keyboardFocusID = items[start].id
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
             return
         }
 
@@ -605,19 +617,25 @@ final class AppStore: ObservableObject {
         // Until then the implicit candidate remains invisible.
         if !isKeyboardNavigationActive {
             isKeyboardNavigationActive = true
-            let start = min(currentPage * pageCapacity, apps.count - 1)
-            keyboardFocusID = apps[start].id
+            let start = min(currentPage * pageCapacity, items.count - 1)
+            keyboardFocusID = items[start].id
             NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
             return
         }
 
-        let fallback = min(currentPage * pageCapacity, apps.count - 1)
-        let current = keyboardFocusID.flatMap { id in
-            apps.firstIndex { $0.id == id }
-        } ?? fallback
-        let page = current / pageCapacity
+        // Always navigate from the page currently shown on screen. A page can
+        // be changed by a trackpad/mouse gesture while the old keyboard focus
+        // is still settling; using the focus item's page here would make the
+        // next arrow key operate on the page that is no longer visible.
+        let page = currentPage
         let pageStart = page * pageCapacity
-        let pageEnd = min(pageStart + pageCapacity, apps.count)
+        let fallback = min(pageStart, items.count - 1)
+        let current = keyboardFocusID.flatMap { id in
+            items.firstIndex { $0.id == id }
+        }.flatMap { index in
+            index / pageCapacity == page ? index : nil
+        } ?? fallback
+        let pageEnd = min(pageStart + pageCapacity, items.count)
         let local = current - pageStart
         let row = local / GridMetrics.columns
         let column = local % GridMetrics.columns
@@ -629,7 +647,7 @@ final class AppStore: ObservableObject {
                 destination = current - 1
             } else if page > 0 {
                 let previousStart = (page - 1) * pageCapacity
-                let previousEnd = min(previousStart + pageCapacity, apps.count)
+                let previousEnd = min(previousStart + pageCapacity, items.count)
                 destination = min(previousStart + row * GridMetrics.columns + GridMetrics.columns - 1,
                                   previousEnd - 1)
             }
@@ -638,7 +656,7 @@ final class AppStore: ObservableObject {
                 destination = current + 1
             } else if page + 1 < pageCount {
                 let nextStart = (page + 1) * pageCapacity
-                destination = min(nextStart + row * GridMetrics.columns, apps.count - 1)
+                destination = min(nextStart + row * GridMetrics.columns, items.count - 1)
             }
         case .up:
             if row > 0 {
@@ -650,7 +668,7 @@ final class AppStore: ObservableObject {
             }
         }
 
-        keyboardFocusID = apps[destination].id
+        keyboardFocusID = items[destination].id
         let destinationPage = destination / pageCapacity
         if destinationPage != currentPage {
             goToPage(destinationPage)
@@ -832,18 +850,18 @@ final class AppStore: ObservableObject {
     }
 
     private func ensureKeyboardFocus(onPage page: Int) {
-        let apps = activeAppsForNavigation
-        guard !apps.isEmpty else {
+        let items = activeDisplayItems
+        guard !items.isEmpty else {
             keyboardFocusID = nil
             return
         }
         if let id = keyboardFocusID,
-           let index = apps.firstIndex(where: { $0.id == id }),
+           let index = items.firstIndex(where: { $0.id == id }),
            index / pageCapacity == page {
             return
         }
-        let start = min(page * pageCapacity, apps.count - 1)
-        keyboardFocusID = apps[start].id
+        let start = min(page * pageCapacity, items.count - 1)
+        keyboardFocusID = items[start].id
     }
 
     // MARK: Reorder
@@ -876,6 +894,47 @@ final class AppStore: ObservableObject {
         persistFolders()
         reconcileLaunchpadItems()
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// Merge the source folder into the target. The target remains the owning
+    /// folder and keeps its root-grid position and name.
+    @discardableResult
+    func mergeFolder(sourceID: String, into targetID: String) -> Bool {
+        guard sourceID != targetID,
+              let source = folders.first(where: { $0.id == sourceID }),
+              let targetIndex = folders.firstIndex(where: { $0.id == targetID }) else {
+            return false
+        }
+
+        var existing = Set(folders[targetIndex].appIDs)
+        folders[targetIndex].appIDs.append(contentsOf: source.appIDs.filter { existing.insert($0).inserted })
+        folders.removeAll { $0.id == sourceID }
+        itemOrderIDs.removeAll { $0 == sourceID }
+        if openedFolderID == sourceID { openedFolderID = nil }
+        persistFolders()
+        persistItemOrder()
+        reconcileLaunchpadItems()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return true
+    }
+
+    /// Replace a folder at its current root position with its member apps.
+    @discardableResult
+    func dissolveFolder(_ folderID: String) -> [String]? {
+        guard let folderIndex = folders.firstIndex(where: { $0.id == folderID }) else { return nil }
+        let members = folders[folderIndex].appIDs
+        let rootIndex = itemOrderIDs.firstIndex(of: folderID)
+            ?? launchpadItems.firstIndex(where: { $0.id == folderID })
+            ?? itemOrderIDs.endIndex
+        folders.remove(at: folderIndex)
+        itemOrderIDs.removeAll { $0 == folderID || members.contains($0) }
+        itemOrderIDs.insert(contentsOf: members, at: min(rootIndex, itemOrderIDs.endIndex))
+        if openedFolderID == folderID { openedFolderID = nil }
+        persistFolders()
+        persistItemOrder()
+        reconcileLaunchpadItems()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return members
     }
 
     /// Move an app from its current location into a folder. This supports both
@@ -1053,7 +1112,7 @@ final class AppStore: ObservableObject {
             pageOffset = min(pageOffset, lastPage)
             targetPage = min(targetPage, lastPage)
         }
-        keyboardFocusID = filteredApps.first?.id
+        keyboardFocusID = activeDisplayItems.first?.id
     }
 
     private func persistHiddenApps() {
