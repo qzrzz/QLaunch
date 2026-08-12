@@ -52,16 +52,11 @@ final class TextAtlas {
         let padX = Int(ceil(2 + abs(shadowOffsetPx.width) + shadowBlurPx))
         let padY = Int(ceil(2 + abs(shadowOffsetPx.height) + shadowBlurPx))
 
-        let uiFont: CTFont = {
-            if let font = CTFontCreateUIFontForLanguage(.system, pixelFontSize, nil) {
-                return font
-            }
-            return CTFontCreateWithName(
-                NSFont.systemFont(ofSize: pixelFontSize, weight: .regular).fontName as CFString,
-                pixelFontSize,
-                nil
-            )
-        }()
+        let uiFont = CTFontCreateWithName(
+            NSFont.systemFont(ofSize: pixelFontSize, weight: .medium).fontName as CFString,
+            pixelFontSize,
+            nil
+        )
 
         let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
         let textColor = CGColor(colorSpace: colorSpace, components: [1, 1, 1, 1])!

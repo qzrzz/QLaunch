@@ -240,7 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func openAppFromLaunchpad(_ app: AppInfo) {
         beginDismissal(openingAppID: app.id)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            NSWorkspace.shared.open(app.url)
+            QLaunchAppLauncher.open(app)
         }
     }
 
@@ -478,15 +478,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             userInfo: presentationInfo
         )
 
-        let finishDismissal: @Sendable () -> Void = { [weak self] in
-            Task { @MainActor in
-                guard let self, generation == self.presentationGeneration else { return }
-                self.launchpadPanel.orderOut(nil)
-                self.launchpadPanel.alphaValue = 0
-                self.store.markHidden()
-                self.isAnimating = false
-                self.updateStatusMenu()
-            }
+        let finishDismissal: () -> Void = { [weak self] in
+            guard let self, generation == self.presentationGeneration else { return }
+            self.containerView.hideImmediately()
+            self.launchpadPanel.animationBehavior = .none
+            self.launchpadPanel.alphaValue = 0
+            self.launchpadPanel.orderOut(nil)
+            self.store.markHidden()
+            self.isAnimating = false
+            self.updateStatusMenu()
         }
         if dismissalDuration <= 0.0001 {
             finishDismissal()

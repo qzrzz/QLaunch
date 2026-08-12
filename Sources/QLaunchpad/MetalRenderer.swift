@@ -1985,7 +1985,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             userInfo: ["openingAppID": app.id]
         )
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            NSWorkspace.shared.open(app.url)
+            QLaunchAppLauncher.open(app)
         }
     }
 
@@ -2162,7 +2162,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 userInfo: ["openingAppID": app.id]
             )
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                NSWorkspace.shared.open(app.url)
+                QLaunchAppLauncher.open(app)
             }
             return
         }
@@ -2215,7 +2215,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 userInfo: ["openingAppID": app.id]
             )
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                NSWorkspace.shared.open(app.url)
+                QLaunchAppLauncher.open(app)
             }
         }
     }

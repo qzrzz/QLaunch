@@ -114,6 +114,21 @@ struct AppInfo: Identifiable, Hashable {
     }
 }
 
+enum QLaunchAppLauncher {
+    static func open(_ app: AppInfo) {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        // Multiple copies can share a bundle identifier. Always launch the
+        // selected bundle instead of substituting another running copy.
+        configuration.allowsRunningApplicationSubstitution = false
+        NSWorkspace.shared.openApplication(
+            at: app.url,
+            configuration: configuration,
+            completionHandler: nil
+        )
+    }
+}
+
 /// A user-created group of applications. Folder membership is stored by the
 /// stable bundle identifier used by `AppInfo`, so rescanning applications does
 /// not invalidate folders.
@@ -186,6 +201,13 @@ struct AppIconCache {
 
 enum AppScanner {
     static func scan(additionalRoots: [URL] = []) -> [AppInfo] {
+        struct Candidate {
+            let url: URL
+            let bundleIdentifier: String
+            let displayName: String
+            let fileName: String
+        }
+
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser
         let roots = [
@@ -195,8 +217,8 @@ enum AppScanner {
             home.appendingPathComponent("Applications")
         ] + additionalRoots
 
-        var apps: [AppInfo] = []
-        var seen = Set<String>()
+        var candidates: [Candidate] = []
+        var seenPaths = Set<String>()
         let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .localizedNameKey]
 
         for root in roots where fileManager.fileExists(atPath: root.path) {
@@ -208,9 +230,10 @@ enum AppScanner {
 
             for case let url as URL in enumerator {
                 guard url.pathExtension == "app" else { continue }
+                let standardizedPath = url.standardizedFileURL.path
+                guard seenPaths.insert(standardizedPath).inserted else { continue }
                 guard let bundle = Bundle(url: url),
-                      let identifier = bundle.bundleIdentifier,
-                      !seen.contains(identifier) else { continue }
+                      let identifier = bundle.bundleIdentifier else { continue }
                 // Skip background-only / agent helpers without a UI when possible.
                 if let bgOnly = bundle.object(forInfoDictionaryKey: "LSBackgroundOnly") as? Bool, bgOnly {
                     continue
@@ -218,16 +241,55 @@ enum AppScanner {
                 if let uiElement = bundle.object(forInfoDictionaryKey: "LSUIElement") as? Bool, uiElement {
                     // Still allow menu-bar apps that users expect to launch.
                 }
-                let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                let fileName = url.deletingPathExtension().lastPathComponent
+                let displayName = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
                     ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-                    ?? url.deletingPathExtension().lastPathComponent
-                seen.insert(identifier)
-                apps.append(AppInfo(id: identifier, name: name, url: url, bundleIdentifier: identifier))
+                    ?? fileName
+                candidates.append(
+                    Candidate(
+                        url: url,
+                        bundleIdentifier: identifier,
+                        displayName: displayName,
+                        fileName: fileName
+                    )
+                )
             }
         }
 
+        let candidatesByIdentifier = Dictionary(grouping: candidates, by: \.bundleIdentifier)
+        let apps = candidates.map { candidate -> AppInfo in
+            let siblings = candidatesByIdentifier[candidate.bundleIdentifier] ?? [candidate]
+            let sameNameSiblings = siblings.filter { $0.displayName == candidate.displayName }
+            let useFileName = sameNameSiblings.count > 1
+                && Set(sameNameSiblings.map(\.fileName)).count > 1
+
+            // Keep the old bundle ID for the first path so existing hidden-app
+            // and folder preferences continue to resolve after an extra copy
+            // of the app is discovered.
+            let primaryPath = siblings.min {
+                $0.url.standardizedFileURL.path < $1.url.standardizedFileURL.path
+            }?.url.standardizedFileURL.path
+            let id: String
+            if siblings.count == 1 || candidate.url.standardizedFileURL.path == primaryPath {
+                id = candidate.bundleIdentifier
+            } else {
+                id = "\(candidate.bundleIdentifier)#\(candidate.url.standardizedFileURL.path)"
+            }
+
+            return AppInfo(
+                id: id,
+                name: useFileName ? candidate.fileName : candidate.displayName,
+                url: candidate.url,
+                bundleIdentifier: candidate.bundleIdentifier
+            )
+        }
+
         return apps.sorted {
-            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            let nameOrder = $0.name.localizedCaseInsensitiveCompare($1.name)
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+            return $0.url.path < $1.url.path
         }
     }
 }
@@ -466,7 +528,10 @@ final class AppStore: ObservableObject {
             guard let self else { return }
             apps = result
             reconcileLaunchpadItems()
-            refreshFilteredApps(resetPage: true)
+            // A scan also runs when the Launchpad is shown again. Keep the
+            // current page while refreshing the catalog; the non-reset path
+            // still clamps it if the refreshed catalog has fewer pages.
+            refreshFilteredApps(resetPage: false)
             isLoading = false
             scanTask = nil
             NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
