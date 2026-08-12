@@ -200,20 +200,110 @@ struct LaunchpadOverlayView: View {
 
     var body: some View {
         GeometryReader { _ in
-            VStack(spacing: 0) {
-                SearchField(store: store)
+            ZStack {
+                VStack(spacing: 0) {
+                    Group {
+                        if let folder = store.openedFolder {
+                            FolderTitleField(store: store, folder: folder)
+                        } else {
+                            SearchField(store: store)
+                        }
+                    }
                     .padding(.top, 36)
-                Spacer(minLength: 0)
-                PageIndicator(store: store)
-                    .padding(.bottom, 36)
+                    Spacer(minLength: 0)
+                    PageIndicator(store: store)
+                        .padding(.bottom, 36)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if store.isDraggingFolderApp {
+                    FolderRemovalDropZone(isTargeted: store.isFolderRemovalTargeted)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 76)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.easeOut(duration: 0.18), value: store.isDraggingFolderApp)
+            .animation(.easeOut(duration: 0.14), value: store.isFolderRemovalTargeted)
         }
         .ignoresSafeArea()
     }
 }
 
+private struct FolderRemovalDropZone: View {
+    let isTargeted: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "arrow.up.forward.app")
+                .font(.system(size: 16, weight: .semibold))
+            Text("移出文件夹")
+                .font(.system(size: 15, weight: .semibold))
+        }
+        .foregroundStyle(.white.opacity(isTargeted ? 1 : 0.82))
+        .frame(width: 240, height: 54)
+        .background {
+            Capsule(style: .continuous)
+                .fill(Color.white.opacity(isTargeted ? 0.20 : 0.09))
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.white.opacity(isTargeted ? 0.62 : 0.22), lineWidth: 1)
+                }
+        }
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
+        .scaleEffect(isTargeted ? 1.06 : 1)
+    }
+}
+
 // MARK: - Liquid glass search field
+
+private struct FolderTitleField: View {
+    @ObservedObject var store: AppStore
+    let folder: AppFolder
+    @State private var draftName: String
+    @FocusState private var isFocused: Bool
+
+    private let fieldWidth: CGFloat = 360
+    private let fieldHeight: CGFloat = 44
+
+    init(store: AppStore, folder: AppFolder) {
+        self.store = store
+        self.folder = folder
+        _draftName = State(initialValue: folder.name)
+    }
+
+    var body: some View {
+        TextField("文件夹", text: $draftName) {
+            commitName()
+        }
+        .textFieldStyle(.plain)
+        .font(.system(size: 18, weight: .semibold))
+        .foregroundStyle(.white.opacity(0.94))
+        .multilineTextAlignment(.center)
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .focused($isFocused)
+        .frame(width: fieldWidth, height: fieldHeight)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Folder name")
+        .onAppear {
+            draftName = folder.name
+        }
+        .onChange(of: isFocused) { _, focused in
+            if !focused {
+                commitName()
+            }
+        }
+    }
+
+    private func commitName() {
+        store.renameFolder(folder.id, to: draftName)
+        if let currentName = store.folder(withID: folder.id)?.name {
+            draftName = currentName
+        }
+    }
+}
 
 private struct SearchField: View {
     @ObservedObject var store: AppStore
