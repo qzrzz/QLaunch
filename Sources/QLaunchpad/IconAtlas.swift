@@ -3,7 +3,7 @@ import Metal
 
 /// One linear Display P3 `RGBA16Float` texture per app.
 ///
-/// The source icon is rasterized at 2x the selected display size, converted by ColorSync while drawing
+/// The source icon is rasterized at 4x the selected display size, converted by ColorSync while drawing
 /// into an extended-linear Display P3 context, and premultiplied there. Metal
 /// therefore receives linear premultiplied values and never has to divide RGB by
 /// a nearly-zero edge alpha.
@@ -18,9 +18,9 @@ final class IconTextureStore: @unchecked Sendable {
     private let cacheLock = NSLock()
     private var cache: [CacheKey: MTLTexture] = [:]
 
-    /// Keep two source pixels for each display point. The 128pt layouts use
-    /// 256px textures; the 256pt layout uses 512px textures.
-    private var pixelSize = Int(GridLayoutPreset.current.iconPointSize * 2)
+    /// Keep four source pixels for each display point. The 128pt layouts use
+    /// 512px textures; the 256pt layout uses 1024px textures.
+    private var pixelSize = Int(GridLayoutPreset.current.iconPointSize * 4)
     private let bytesPerComponent = MemoryLayout<Float16>.size
 
     private static let linearDisplayP3 = CGColorSpace(
@@ -34,7 +34,7 @@ final class IconTextureStore: @unchecked Sendable {
     /// Switch texture resolution when the user changes the grid preset. The
     /// old textures cannot be reused because their rasterization size differs.
     func configure(for preset: GridLayoutPreset) {
-        let requestedPixelSize = Int(preset.iconPointSize * 2)
+        let requestedPixelSize = Int(preset.iconPointSize * 4)
         cacheLock.lock()
         defer { cacheLock.unlock() }
         guard pixelSize != requestedPixelSize else { return }

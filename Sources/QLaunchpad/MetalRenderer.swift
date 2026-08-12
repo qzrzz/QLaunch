@@ -219,8 +219,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             name: .qlaunchpadPresentationChanged, object: nil
         )
         NotificationCenter.default.addObserver(
-            self, selector: #selector(clearIconCacheRequested),
-            name: .qlaunchpadIconCacheClearRequested, object: nil
+            self, selector: #selector(clearCacheRequested),
+            name: .qlaunchpadCacheClearRequested, object: nil
         )
     }
 
@@ -371,10 +371,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
-    @objc private func clearIconCacheRequested() {
+    @objc private func clearCacheRequested() {
         pauseResourcePrewarming()
         iconTextures.clear()
+        textAtlas.clear()
         lastCatalogSignature = ""
+        lastTextSignature = ""
         resourcePrewarmSignature = ""
         isResourcePrewarmingPaused = false
         scheduleResourcePrewarmingIfNeeded()
@@ -690,8 +692,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     // MARK: Draw
 
     func draw(in view: MTKView) {
-        // A 256pt layout needs a freshly rasterized 512px icon source. Clear
-        // the previous 256px cache before any new frame can draw it.
+        // A 256pt layout needs a freshly rasterized 1024px icon source. Clear
+        // the previous 512px cache before any new frame can draw it.
         iconTextures.configure(for: GridLayoutPreset.current)
 
         // Prune icon cache when catalog changes (icons load lazily when drawn).
