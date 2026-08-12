@@ -447,24 +447,6 @@ private struct AppKitSearchTextField: NSViewRepresentable {
             updateSearchText(editor.string)
         }
 
-        /// Also runs for IME marked-text replacement before the candidate is
-        /// committed. Preview the replacement so search reacts immediately,
-        /// while returning true preserves native IME behavior.
-        func textView(
-            _ textView: NSTextView,
-            shouldChangeTextIn affectedCharRange: NSRange,
-            replacementString: String?
-        ) -> Bool {
-            guard let replacementString else { return true }
-            let current = textView.string as NSString
-            let preview = current.replacingCharacters(
-                in: affectedCharRange,
-                with: replacementString
-            )
-            updateSearchText(preview)
-            return true
-        }
-
         fileprivate func updateSearchText(_ value: String) {
             if parent.text != value {
                 parent.text = value
@@ -479,29 +461,16 @@ private final class IMESearchTextView: NSTextView {
 
     override var acceptsFirstResponder: Bool { true }
 
-    /// Designated initializer for `NSTextView` subclasses. Must be implemented:
-    /// on modern AppKit, `init(frame:)` re-enters this path via TextKit; omitting
-    /// it causes EXC_BREAKPOINT (SIGTRAP) during allocation.
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
         configureAppearance()
     }
 
     override init(frame frameRect: NSRect) {
-        let textStorage = NSTextStorage()
-        let layoutManager = NSLayoutManager()
-        textStorage.addLayoutManager(layoutManager)
-        let size = frameRect.size
-        let containerSize = NSSize(
-            width: size.width > 0 ? size.width : 300,
-            height: size.height > 0 ? size.height : 44
-        )
-        let textContainer = NSTextContainer(size: containerSize)
-        textContainer.widthTracksTextView = true
-        textContainer.heightTracksTextView = false
-        textContainer.lineFragmentPadding = 0
-        layoutManager.addTextContainer(textContainer)
-        super.init(frame: frameRect, textContainer: textContainer)
+        // Let AppKit create and connect the text storage, layout manager, and
+        // container. A hand-built TextKit 1 stack can leave a lazy attribute
+        // run in an invalid state on newer AppKit versions.
+        super.init(frame: frameRect)
         configureAppearance()
     }
 
@@ -537,27 +506,19 @@ private final class IMESearchTextView: NSTextView {
 
     func setSearchText(_ value: String) {
         guard !hasMarkedText() else { return }
-        string = value
-        normalizeTextAttributes()
-    }
+        guard string != value else { return }
 
-    private func normalizeTextAttributes() {
-        guard !hasMarkedText(),
-              let textStorage,
-              textStorage.length > 0,
-              let font,
-              let textColor else { return }
-        let range = NSRange(location: 0, length: textStorage.length)
-        textStorage.beginEditing()
-        textStorage.setAttributes([
-            .font: font,
-            .foregroundColor: textColor
-        ], range: range)
-        textStorage.endEditing()
-        typingAttributes = [
-            .font: font,
-            .foregroundColor: textColor
+        // Replace the whole value with one fully attributed string. This keeps
+        // externally synchronized values valid before AppKit lays them out,
+        // without changing the storage during a draw pass.
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font as Any,
+            .foregroundColor: textColor as Any
         ]
+        textStorage?.setAttributedString(
+            NSAttributedString(string: value, attributes: attributes)
+        )
+        typingAttributes = attributes
     }
 
     override func layout() {
@@ -574,7 +535,22 @@ private final class IMESearchTextView: NSTextView {
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         super.insertText(insertString, replacementRange: replacementRange)
-        normalizeTextAttributes()
+        onTextChange?(string)
+        needsDisplay = true
+    }
+
+    override func setMarkedText(
+        _ markedText: Any,
+        selectedRange: NSRange,
+        replacementRange: NSRange
+    ) {
+        super.setMarkedText(
+            markedText,
+            selectedRange: selectedRange,
+            replacementRange: replacementRange
+        )
+        // NSTextView may not send textDidChange while composition is active.
+        // Report the value only after AppKit has finished mutating its storage.
         onTextChange?(string)
         needsDisplay = true
     }
@@ -591,10 +567,6 @@ private final class IMESearchTextView: NSTextView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // AppKit 27 asserts if a custom text storage reaches layout with an
-        // unfixed attribute run. Normalize committed text before NSTextView
-        // draws; marked IME text is left untouched for native candidate styling.
-        normalizeTextAttributes()
         super.draw(dirtyRect)
         guard string.isEmpty, !hasMarkedText() else { return }
         let attributes: [NSAttributedString.Key: Any] = [

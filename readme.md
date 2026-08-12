@@ -51,6 +51,19 @@ QLAUNCHPAD_FORCE_ICON=1 bun run dev
 
 菜单栏图标仍为独立资源：`qlaunch-menubar.png`（template）。
 
+## 官网
+
+产品官网在 `web/`，架构与 QCopy/web 一致（Vite + React + TypeScript，多语言 SEO，构建同步到 `docs/` 供 GitHub Pages）。
+
+```sh
+cd web
+bun install
+bun run dev               # 本地预览
+bun run build             # 打包并同步到 ../docs（en + zh-Hans）
+```
+
+详见 [web/README.md](web/README.md)。
+
 ## 构建与开发
 
 需要 Xcode、macOS 14+ SDK 与 Bun：
