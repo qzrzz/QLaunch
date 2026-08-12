@@ -1,0 +1,235 @@
+@font-face {
+  font-family: "GeneralSans-Variable";
+  src: url("./assets/fonts/GeneralSans-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 200 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Pally-Variable";
+  src: url("./assets/fonts/Pally-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+:root {
+  --feature-group-gap: 48px;
+  --page-gutter: 24px;
+  --card-radius: 28px;
+  --accent: #8ec5ff;
+  --accent-soft: rgba(142, 197, 255, 0.14);
+  --surface: rgba(255, 255, 255, 0.04);
+  --surface-border: rgba(255, 255, 255, 0.08);
+  --text-muted: rgba(255, 255, 255, 0.62);
+  --font-sans:
+    "GeneralSans-Variable", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  --font-display: "GeneralSans-Variable", "SF Pro Display", sans-serif;
+
+  color: #fff;
+  background: #000;
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  scroll-behavior: smooth;
+  background: #000;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  overflow-x: hidden;
+  background: #000;
+}
+
+img.hero-shot {
+  margin: auto;
+  margin-bottom: 30px;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font: inherit;
+}
+
+img {
+  display: block;
+}
+
+.homePage {
+  width: min(100%, 1200px);
+  min-height: 100vh;
+  margin: 0 auto;
+  background: #000;
+}
+
+/* ==========================================================================
+   Section 分区
+   ========================================================================== */
+
+.featureCollection {
+  position: relative;
+  padding: 24px 0 32px;
+  /* 锚点跳转时避开吸顶导航 */
+  scroll-margin-top: 72px;
+}
+
+.featureCollection + .featureCollection {
+  margin-top: 40px;
+}
+
+.pageSectionHeading {
+  width: min(100% - (var(--page-gutter) * 2), 920px);
+  margin: 0 auto 40px;
+}
+
+.pageSectionHeading h2 {
+  margin: 0;
+  color: #fff;
+  font-family: var(--font-display);
+  font-size: clamp(32px, 5vw, 44px);
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+
+.pageSectionHeading p {
+  max-width: 640px;
+  margin: 14px 0 0;
+  color: var(--text-muted);
+  font-size: clamp(16px, 2vw, 18px);
+  line-height: 1.5;
+}
+
+.featureCollection__cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--feature-group-gap);
+}
+
+/* ==========================================================================
+   FeatureCard（仅 image + style：left / right / bottom / center）
+   ========================================================================== */
+
+.featureCard {
+  width: min(100% - (var(--page-gutter) * 2), 1100px);
+  min-height: 280px;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--card-radius);
+  background: var(--surface);
+}
+
+.featureCard__media {
+  position: relative;
+  width: 100%;
+  min-height: 280px;
+  height: 100%;
+}
+
+.featureCard__media--empty {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+}
+
+.featureCard__placeholderLabel {
+  padding: 8px 12px;
+
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+
+.featureCard__shot {
+  display: block;
+  width: auto;
+  height: auto;
+  min-height: 280px;
+  object-fit: cover;
+  object-position: center top;
+}
+
+/* left / right / bottom / center：构图差异 */
+.featureCard--left .featureCard__shot {
+  object-position: left top;
+}
+
+.featureCard--right .featureCard__shot {
+  object-position: right top;
+}
+
+.featureCard--bottom .featureCard__shot {
+  object-position: center bottom;
+}
+
+.featureCard--bottom .featureCard__media,
+.featureCard--bottom .featureCard__shot {
+  min-height: 320px;
+}
+
+/* center：图片在卡片内水平垂直居中，完整显示 */
+.featureCard--center .featureCard__media {
+  display: grid;
+  place-items: center;
+  min-height: 280px;
+}
+
+.featureCard--center {
+  border: none;
+  background: transparent;
+}
+
+.featureCard--center .featureCard__shot {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  object-position: center center;
+}
+
+.featureCard--placeholder {
+  min-height: 240px;
+}
+
+/* ==========================================================================
+   响应式
+   ========================================================================== */
+
+@media (max-width: 860px) {
+  :root {
+    --feature-group-gap: 28px;
+    --page-gutter: 16px;
+  }
+
+  .featureCard,
+  .featureCard__media,
+  .featureCard__shot {
+    min-height: 200px;
+  }
+
+  .featureCard--bottom .featureCard__media,
+  .featureCard--bottom .featureCard__shot {
+    min-height: 220px;
+  }
+}

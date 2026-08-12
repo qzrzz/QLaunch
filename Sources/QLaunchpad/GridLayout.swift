@@ -105,8 +105,49 @@ struct GridMetrics {
 
     /// Icon center in **top-left** coordinates (y grows downward). Used by Metal.
     func iconCenter(localIndex: Int, page: Int, pageOffset: Double) -> CGPoint {
-        let column = localIndex % Self.columns
-        let row = localIndex / Self.columns
+        iconCenter(localIndex: Double(localIndex), page: page, pageOffset: pageOffset)
+    }
+
+    /// Icon center for a fractional local index. Interpolating the cell center
+    /// instead of rounding the index keeps reorder animations smooth across
+    /// columns and rows.
+    func iconCenter(localIndex: Double, page: Int, pageOffset: Double) -> CGPoint {
+        let lowerIndex = max(0, Int(floor(localIndex)))
+        let upperIndex = min(Self.pageCapacity - 1, Int(ceil(localIndex)))
+        let fraction = CGFloat(localIndex - floor(localIndex))
+        let lower = iconCenter(integerLocalIndex: lowerIndex, page: page, pageOffset: pageOffset)
+        let upper = iconCenter(integerLocalIndex: upperIndex, page: page, pageOffset: pageOffset)
+        return CGPoint(
+            x: lower.x + (upper.x - lower.x) * fraction,
+            y: lower.y + (upper.y - lower.y) * fraction
+        )
+    }
+
+    /// Icon center for a fractional position in the complete app catalog.
+    /// This allows an item crossing a page boundary to travel continuously.
+    func iconCenter(globalIndex: Double, pageOffset: Double) -> CGPoint {
+        let lowerIndex = max(0, Int(floor(globalIndex)))
+        let upperIndex = max(lowerIndex, Int(ceil(globalIndex)))
+        let fraction = CGFloat(globalIndex - floor(globalIndex))
+        let lower = iconCenter(
+            localIndex: lowerIndex % Self.pageCapacity,
+            page: lowerIndex / Self.pageCapacity,
+            pageOffset: pageOffset
+        )
+        let upper = iconCenter(
+            localIndex: upperIndex % Self.pageCapacity,
+            page: upperIndex / Self.pageCapacity,
+            pageOffset: pageOffset
+        )
+        return CGPoint(
+            x: lower.x + (upper.x - lower.x) * fraction,
+            y: lower.y + (upper.y - lower.y) * fraction
+        )
+    }
+
+    private func iconCenter(integerLocalIndex: Int, page: Int, pageOffset: Double) -> CGPoint {
+        let column = integerLocalIndex % Self.columns
+        let row = integerLocalIndex / Self.columns
         let pageShift = CGFloat(Double(page) - pageOffset) * size.width
         return CGPoint(
             x: gridLeft + cellWidth * (CGFloat(column) + 0.5) + pageShift,

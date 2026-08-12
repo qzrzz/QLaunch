@@ -113,7 +113,6 @@ private struct GeneralSettingsView: View {
             }
 
             Section("显示") {
-            
                 Toggle("显示应用名称", isOn: $showLabels)
                 Picker("布局", selection: $gridLayoutPreset) {
                     ForEach(GridLayoutPreset.allCases) { preset in
