@@ -140,25 +140,86 @@ final class IconTextureStore: @unchecked Sendable {
 
 typealias IconAtlas = IconTextureStore
 
-/// The textured backing plate used by folder previews.
+/// A folder preview flattened into one icon texture.
 ///
-/// The source PNGs are premultiplied while being rasterized so they can use the
-/// same `sourceRGB = one` blending setup as app icons and text. Keep both
-/// resolutions in a tiny cache and select the source that matches the current
-/// grid preset.
-final class FolderPadTextureStore {
+/// Folder membership is part of the cache key, so adding, removing, or
+/// reordering an app automatically rasterizes a new preview. Once created, the
+/// renderer can treat this exactly like an application icon and apply the same
+/// entrance, zoom, drag, and opacity animations to the whole image.
+final class FolderIconTextureStore {
+    private struct CacheKey: Hashable {
+        let folderID: String
+        let appIDs: [String]
+        let pixelSize: Int
+    }
+
     private let device: MTLDevice
-    private var cache: [GridLayoutPreset: MTLTexture] = [:]
+    private let iconCache = AppIconCache()
+    private var cache: [CacheKey: MTLTexture] = [:]
+    private var backgroundCache: [Int: MTLTexture] = [:]
+    private let bytesPerComponent = MemoryLayout<Float16>.size
+
+    private static let linearDisplayP3 = CGColorSpace(
+        name: CGColorSpace.extendedLinearDisplayP3
+    )!
 
     init(device: MTLDevice) {
         self.device = device
     }
 
-    func texture(for preset: GridLayoutPreset) -> MTLTexture? {
-        if let texture = cache[preset] {
-            return texture
-        }
+    func clear() {
+        cache.removeAll(keepingCapacity: true)
+        backgroundCache.removeAll(keepingCapacity: true)
+    }
 
+    func backgroundTexture(for preset: GridLayoutPreset) -> MTLTexture? {
+        let pixelSize = Int(preset.iconPointSize * 4)
+        if let texture = backgroundCache[pixelSize] { return texture }
+        guard let padImage = padImage(for: preset),
+              let texture = makeTexture(
+                padImage: padImage,
+                members: [],
+                pixelSize: pixelSize,
+                iconPointSize: preset.iconPointSize
+              ) else { return nil }
+        backgroundCache[pixelSize] = texture
+        return texture
+    }
+
+    func texture(
+        for folder: AppFolder,
+        members: [AppInfo],
+        preset: GridLayoutPreset
+    ) -> MTLTexture? {
+        let previewMembers = Array(members.prefix(9))
+        guard !previewMembers.isEmpty else { return nil }
+        let pixelSize = Int(preset.iconPointSize * 4)
+        let key = CacheKey(
+            folderID: folder.id,
+            appIDs: previewMembers.map(\.id),
+            pixelSize: pixelSize
+        )
+        if let texture = cache[key] { return texture }
+
+        guard let padImage = padImage(for: preset),
+              let texture = makeTexture(
+                padImage: padImage,
+                members: previewMembers,
+                pixelSize: pixelSize,
+                iconPointSize: preset.iconPointSize
+              ) else {
+            return nil
+        }
+        // Discard obsolete membership variants for this folder while retaining
+        // previews belonging to every other folder.
+        for oldKey in cache.keys where oldKey.folderID == folder.id && oldKey != key {
+            cache.removeValue(forKey: oldKey)
+        }
+        cache[key] = texture
+        return texture
+    }
+
+    private func padImage(for preset: GridLayoutPreset) -> CGImage? {
         let resourceName: String
         switch preset {
         case .fourByTwo:
@@ -168,49 +229,72 @@ final class FolderPadTextureStore {
         }
 
         guard let url = Bundle.module.url(forResource: resourceName, withExtension: "png"),
-              let texture = makeTexture(from: url) else {
-            return nil
-        }
-        cache[preset] = texture
-        return texture
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        return image
     }
 
-    private func makeTexture(from url: URL) -> MTLTexture? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            return nil
-        }
-
-        let width = image.width
-        let height = image.height
-        let bytesPerRow = width * 4
-        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
-        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue
+    private func makeTexture(
+        padImage: CGImage,
+        members: [AppInfo],
+        pixelSize px: Int,
+        iconPointSize: CGFloat
+    ) -> MTLTexture? {
+        let bytesPerRow = px * 4 * bytesPerComponent
+        let bitmapInfo = CGBitmapInfo.floatComponents.rawValue
+            | CGBitmapInfo.byteOrder16Little.rawValue
             | CGImageAlphaInfo.premultipliedLast.rawValue
-        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let context = CGContext(
+            data: nil,
+            width: px,
+            height: px,
+            bitsPerComponent: 16,
+            bytesPerRow: bytesPerRow,
+            space: Self.linearDisplayP3,
+            bitmapInfo: bitmapInfo
+        ), let data = context.data else { return nil }
 
-        let didDraw = pixels.withUnsafeMutableBytes { buffer -> Bool in
-            guard let context = CGContext(
-                data: buffer.baseAddress,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace,
-                bitmapInfo: bitmapInfo
-            ) else {
-                return false
-            }
-            context.interpolationQuality = .high
-            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
+        context.clear(CGRect(x: 0, y: 0, width: px, height: px))
+        context.interpolationQuality = .high
+        context.draw(padImage, in: CGRect(x: 0, y: 0, width: px, height: px))
+
+        let pointsToPixels = CGFloat(px) / iconPointSize
+        let miniSize = 22 * pointsToPixels
+        let gap = 4 * pointsToPixels
+        let contentSize = miniSize * 3 + gap * 2
+        let left = (CGFloat(px) - contentSize) * 0.5
+        let bottom = (CGFloat(px) - contentSize) * 0.5
+
+        NSGraphicsContext.saveGraphicsState()
+        let graphics = NSGraphicsContext(cgContext: context, flipped: false)
+        NSGraphicsContext.current = graphics
+        graphics.imageInterpolation = .high
+        for (index, app) in members.enumerated() {
+            let column = index % 3
+            // CGContext is bottom-up; invert the visual row so the first member
+            // remains at the preview's top-left corner.
+            let rowFromBottom = 2 - index / 3
+            let rect = NSRect(
+                x: left + CGFloat(column) * (miniSize + gap),
+                y: bottom + CGFloat(rowFromBottom) * (miniSize + gap),
+                width: miniSize,
+                height: miniSize
+            )
+            iconCache.image(for: app, size: miniSize).draw(
+                in: rect,
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1,
+                respectFlipped: false,
+                hints: [.interpolation: NSImageInterpolation.high]
+            )
         }
-        guard didDraw else { return nil }
+        NSGraphicsContext.restoreGraphicsState()
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm_srgb,
-            width: width,
-            height: height,
+            pixelFormat: .rgba16Float,
+            width: px,
+            height: px,
             mipmapped: false
         )
         descriptor.usage = [.shaderRead]
@@ -218,15 +302,13 @@ final class FolderPadTextureStore {
         guard let texture = device.makeTexture(descriptor: descriptor) else {
             return nil
         }
-        pixels.withUnsafeBytes { buffer in
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, width, height),
-                mipmapLevel: 0,
-                withBytes: buffer.baseAddress!,
-                bytesPerRow: bytesPerRow
-            )
-        }
-        texture.label = "QLaunchpad folder pad"
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, px, px),
+            mipmapLevel: 0,
+            withBytes: data,
+            bytesPerRow: bytesPerRow
+        )
+        texture.label = "QLaunchpad folder icon"
         return texture
     }
 }

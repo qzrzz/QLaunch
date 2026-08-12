@@ -302,6 +302,9 @@ final class AppStore: ObservableObject {
     @Published private(set) var filteredApps: [AppInfo] = []
     @Published private(set) var launchpadItems: [LaunchpadItem] = []
     @Published private(set) var folders: [AppFolder] = []
+    @Published private(set) var openedFolderID: String?
+    @Published private(set) var isDraggingFolderApp = false
+    @Published private(set) var isFolderRemovalTargeted = false
     @Published private(set) var searchText = ""
     @Published private(set) var isLoading = true
     @Published private(set) var keyboardFocusID: String?
@@ -366,7 +369,7 @@ final class AppStore: ObservableObject {
     }
 
     var pageCount: Int {
-        max(1, Int(ceil(Double(max(displayItems.count, 1)) / Double(pageCapacity))))
+        max(1, Int(ceil(Double(max(activeDisplayItems.count, 1)) / Double(pageCapacity))))
     }
 
     var currentPage: Int {
@@ -383,7 +386,7 @@ final class AppStore: ObservableObject {
 
     var focusedApp: AppInfo? {
         guard let keyboardFocusID else { return nil }
-        return filteredApps.first { $0.id == keyboardFocusID }
+        return activeAppsForNavigation.first { $0.id == keyboardFocusID }
     }
 
     var hiddenApps: [AppInfo] {
@@ -399,12 +402,56 @@ final class AppStore: ObservableObject {
         return launchpadItems
     }
 
+    /// Items shown by the current Launchpad view. A folder is a page whose
+    /// contents use the same grid as the root view; it is not a separate panel.
+    var activeDisplayItems: [LaunchpadItem] {
+        guard let openedFolderID,
+              let folder = folder(withID: openedFolderID) else {
+            return displayItems
+        }
+        return folder.appIDs.compactMap { app(withID: $0).map(LaunchpadItem.app) }
+    }
+
+    var openedFolder: AppFolder? {
+        guard let openedFolderID else { return nil }
+        return folder(withID: openedFolderID)
+    }
+
+    /// Folder order as it appears in the root grid, used by context-menu
+    /// submenus so their order always matches the visible pages.
+    var orderedFolders: [AppFolder] {
+        launchpadItems.compactMap { item in
+            if case .folder(let folder) = item { return folder }
+            return nil
+        }
+    }
+
+    private var activeAppsForNavigation: [AppInfo] {
+        guard openedFolderID != nil else { return filteredApps }
+        return activeDisplayItems.compactMap { item in
+            if case .app(let app) = item { return app }
+            return nil
+        }
+    }
+
     func app(withID id: String) -> AppInfo? {
         apps.first { $0.id == id }
     }
 
     func folder(withID id: String) -> AppFolder? {
         folders.first { $0.id == id }
+    }
+
+    func folderContaining(appID: String) -> AppFolder? {
+        folders.first { $0.appIDs.contains(appID) }
+    }
+
+    func setFolderDragState(isDragging: Bool, removalTargeted: Bool = false) {
+        let targeted = isDragging && removalTargeted
+        guard isDraggingFolderApp != isDragging
+                || isFolderRemovalTargeted != targeted else { return }
+        isDraggingFolderApp = isDragging
+        isFolderRemovalTargeted = targeted
     }
 
     func load() {
@@ -433,6 +480,54 @@ final class AppStore: ObservableObject {
         searchText = text
         isKeyboardNavigationActive = false
         refreshFilteredApps(resetPage: true)
+    }
+
+    func enterFolder(_ folderID: String) {
+        guard folder(withID: folderID) != nil else { return }
+        openedFolderID = folderID
+        searchText = ""
+        refreshFilteredApps(resetPage: true)
+        pageOffset = 0
+        targetPage = 0
+        pageVelocity = 0
+        scrollAccumulated = 0
+        isPageGestureActive = false
+        keyboardFocusID = activeDisplayItems.compactMap { item in
+            if case .app(let app) = item { return app }
+            return nil
+        }.first?.id
+        isKeyboardNavigationActive = false
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func renameFolder(_ folderID: String, to name: String) {
+        guard let index = folders.firstIndex(where: { $0.id == folderID }) else { return }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedName = trimmedName.isEmpty ? "文件夹" : trimmedName
+        guard folders[index].name != normalizedName else { return }
+
+        folders[index].name = normalizedName
+        persistFolders()
+        reconcileLaunchpadItems()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func exitFolder() {
+        guard openedFolderID != nil else { return }
+        openedFolderID = nil
+        isDraggingFolderApp = false
+        isFolderRemovalTargeted = false
+        pageOffset = 0
+        targetPage = 0
+        pageVelocity = 0
+        scrollAccumulated = 0
+        isPageGestureActive = false
+        keyboardFocusID = activeDisplayItems.compactMap { item in
+            if case .app(let app) = item { return app }
+            return nil
+        }.first?.id
+        isKeyboardNavigationActive = false
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
     func applyGridLayoutChange() {
@@ -481,24 +576,26 @@ final class AppStore: ObservableObject {
     // MARK: Keyboard focus
 
     func focusApp(id: String) {
-        guard filteredApps.contains(where: { $0.id == id }) else { return }
+        guard activeAppsForNavigation.contains(where: { $0.id == id }) else { return }
         keyboardFocusID = id
         isKeyboardNavigationActive = false
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
     func focusFirstAppOnCurrentPage() {
-        guard !filteredApps.isEmpty else {
+        let apps = activeAppsForNavigation
+        guard !apps.isEmpty else {
             keyboardFocusID = nil
             return
         }
-        let start = min(currentPage * pageCapacity, filteredApps.count - 1)
-        keyboardFocusID = filteredApps[start].id
+        let start = min(currentPage * pageCapacity, apps.count - 1)
+        keyboardFocusID = apps[start].id
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
     func moveKeyboardFocus(_ direction: GridNavigationDirection) {
-        guard !filteredApps.isEmpty else {
+        let apps = activeAppsForNavigation
+        guard !apps.isEmpty else {
             keyboardFocusID = nil
             isKeyboardNavigationActive = false
             return
@@ -508,19 +605,19 @@ final class AppStore: ObservableObject {
         // Until then the implicit candidate remains invisible.
         if !isKeyboardNavigationActive {
             isKeyboardNavigationActive = true
-            let start = min(currentPage * pageCapacity, filteredApps.count - 1)
-            keyboardFocusID = filteredApps[start].id
+            let start = min(currentPage * pageCapacity, apps.count - 1)
+            keyboardFocusID = apps[start].id
             NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
             return
         }
 
-        let fallback = min(currentPage * pageCapacity, filteredApps.count - 1)
+        let fallback = min(currentPage * pageCapacity, apps.count - 1)
         let current = keyboardFocusID.flatMap { id in
-            filteredApps.firstIndex { $0.id == id }
+            apps.firstIndex { $0.id == id }
         } ?? fallback
         let page = current / pageCapacity
         let pageStart = page * pageCapacity
-        let pageEnd = min(pageStart + pageCapacity, filteredApps.count)
+        let pageEnd = min(pageStart + pageCapacity, apps.count)
         let local = current - pageStart
         let row = local / GridMetrics.columns
         let column = local % GridMetrics.columns
@@ -532,7 +629,7 @@ final class AppStore: ObservableObject {
                 destination = current - 1
             } else if page > 0 {
                 let previousStart = (page - 1) * pageCapacity
-                let previousEnd = min(previousStart + pageCapacity, filteredApps.count)
+                let previousEnd = min(previousStart + pageCapacity, apps.count)
                 destination = min(previousStart + row * GridMetrics.columns + GridMetrics.columns - 1,
                                   previousEnd - 1)
             }
@@ -541,7 +638,7 @@ final class AppStore: ObservableObject {
                 destination = current + 1
             } else if page + 1 < pageCount {
                 let nextStart = (page + 1) * pageCapacity
-                destination = min(nextStart + row * GridMetrics.columns, filteredApps.count - 1)
+                destination = min(nextStart + row * GridMetrics.columns, apps.count - 1)
             }
         case .up:
             if row > 0 {
@@ -553,7 +650,7 @@ final class AppStore: ObservableObject {
             }
         }
 
-        keyboardFocusID = filteredApps[destination].id
+        keyboardFocusID = apps[destination].id
         let destinationPage = destination / pageCapacity
         if destinationPage != currentPage {
             goToPage(destinationPage)
@@ -735,17 +832,18 @@ final class AppStore: ObservableObject {
     }
 
     private func ensureKeyboardFocus(onPage page: Int) {
-        guard !filteredApps.isEmpty else {
+        let apps = activeAppsForNavigation
+        guard !apps.isEmpty else {
             keyboardFocusID = nil
             return
         }
         if let id = keyboardFocusID,
-           let index = filteredApps.firstIndex(where: { $0.id == id }),
+           let index = apps.firstIndex(where: { $0.id == id }),
            index / pageCapacity == page {
             return
         }
-        let start = min(page * pageCapacity, filteredApps.count - 1)
-        keyboardFocusID = filteredApps[start].id
+        let start = min(page * pageCapacity, apps.count - 1)
+        keyboardFocusID = apps[start].id
     }
 
     // MARK: Reorder
@@ -765,6 +863,82 @@ final class AppStore: ObservableObject {
         persistItemOrder()
         reconcileLaunchpadItems()
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func moveAppInsideFolder(folderID: String, from source: Int, to destination: Int) {
+        guard let folderIndex = folders.firstIndex(where: { $0.id == folderID }),
+              folders[folderIndex].appIDs.indices.contains(source),
+              folders[folderIndex].appIDs.indices.contains(destination),
+              source != destination else { return }
+
+        let appID = folders[folderIndex].appIDs.remove(at: source)
+        folders[folderIndex].appIDs.insert(appID, at: destination)
+        persistFolders()
+        reconcileLaunchpadItems()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// Move an app from its current location into a folder. This supports both
+    /// root apps and apps currently residing in another folder.
+    @discardableResult
+    func moveAppToFolder(appID: String, folderID: String) -> Bool {
+        guard let targetIndex = folders.firstIndex(where: { $0.id == folderID }),
+              !folders[targetIndex].appIDs.contains(appID),
+              app(withID: appID) != nil else { return false }
+
+        if let sourceIndex = folders.firstIndex(where: { $0.appIDs.contains(appID) }) {
+            folders[sourceIndex].appIDs.removeAll { $0 == appID }
+        } else {
+            itemOrderIDs.removeAll { $0 == appID }
+        }
+
+        // Removing an empty source folder may shift the target's array index, so
+        // resolve it again before appending.
+        let emptyFolderIDs = Set(folders.filter(\.appIDs.isEmpty).map(\.id))
+        folders.removeAll { emptyFolderIDs.contains($0.id) }
+        itemOrderIDs.removeAll { emptyFolderIDs.contains($0) }
+        guard let refreshedTarget = folders.firstIndex(where: { $0.id == folderID }) else {
+            return false
+        }
+        folders[refreshedTarget].appIDs.append(appID)
+        if let openedFolderID, emptyFolderIDs.contains(openedFolderID) {
+            self.openedFolderID = nil
+        }
+        persistFolders()
+        persistItemOrder()
+        reconcileLaunchpadItems()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return true
+    }
+
+    /// Remove an app to the root, immediately after its former folder.
+    @discardableResult
+    func removeAppFromFolder(appID: String, folderID: String) -> Bool {
+        guard let folderIndex = folders.firstIndex(where: { $0.id == folderID }),
+              folders[folderIndex].appIDs.contains(appID) else { return false }
+
+        let rootFolderIndex = itemOrderIDs.firstIndex(of: folderID)
+            ?? launchpadItems.firstIndex(where: { $0.id == folderID })
+            ?? itemOrderIDs.endIndex
+        folders[folderIndex].appIDs.removeAll { $0 == appID }
+        itemOrderIDs.removeAll { $0 == appID }
+
+        if folders[folderIndex].appIDs.isEmpty {
+            folders.remove(at: folderIndex)
+            itemOrderIDs.removeAll { $0 == folderID }
+            itemOrderIDs.insert(appID, at: min(rootFolderIndex, itemOrderIDs.endIndex))
+            if openedFolderID == folderID { openedFolderID = nil }
+        } else {
+            let currentFolderOrder = itemOrderIDs.firstIndex(of: folderID)
+                ?? min(rootFolderIndex, itemOrderIDs.endIndex)
+            itemOrderIDs.insert(appID, at: min(currentFolderOrder + 1, itemOrderIDs.endIndex))
+        }
+
+        persistFolders()
+        persistItemOrder()
+        reconcileLaunchpadItems()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return true
     }
 
     /// Combine two top-level app items into one folder. The target app stays
@@ -798,18 +972,8 @@ final class AppStore: ObservableObject {
     /// created; dragging a folder remains a top-level reorder operation.
     func moveAppIntoFolder(appID: String, folderID: String) {
         guard !isSearching,
-              let appIndex = launchpadItems.firstIndex(where: { $0.id == appID && isApp($0) }),
-              let folderIndex = folders.firstIndex(where: { $0.id == folderID }),
-              !folders[folderIndex].appIDs.contains(appID) else {
-            return
-        }
-
-        folders[folderIndex].appIDs.append(appID)
-        itemOrderIDs.removeAll { $0 == launchpadItems[appIndex].id }
-        persistFolders()
-        persistItemOrder()
-        reconcileLaunchpadItems()
-        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+              launchpadItems.contains(where: { $0.id == appID && isApp($0) }) else { return }
+        _ = moveAppToFolder(appID: appID, folderID: folderID)
     }
 
     func moveApp(from source: Int, to destination: Int) {
@@ -848,6 +1012,9 @@ final class AppStore: ObservableObject {
         presentation = .hidden
         presentationProgress = 0
         isKeyboardNavigationActive = false
+        openedFolderID = nil
+        isDraggingFolderApp = false
+        isFolderRemovalTargeted = false
         // Clear search when closed so next open shows full grid.
         if !searchText.isEmpty {
             updateSearch("")

@@ -161,7 +161,11 @@ struct GridMetrics {
     }
 
     /// Hit-test using AppKit bottom-left point converted to top-left space.
-    func hitTest(point: CGPoint, pageOffset: Double) -> (page: Int, localIndex: Int)? {
+    func hitTest(
+        point: CGPoint,
+        pageOffset: Double,
+        hitRadiusScale: CGFloat = 0.62
+    ) -> (page: Int, localIndex: Int)? {
         let topPoint = CGPoint(x: point.x, y: size.height - point.y)
 
         // Find nearest page whose grid could contain this x.
@@ -181,7 +185,7 @@ struct GridMetrics {
         let iconCy = cellHeight * (CGFloat(row) + 0.5)
         let dx = localX - iconCx
         let dy = localY - iconCy
-        let hitRadius = iconSize * 0.62
+        let hitRadius = iconSize * hitRadiusScale
         guard (dx * dx + dy * dy) <= hitRadius * hitRadius else { return nil }
         return (page, row * Self.columns + column)
     }
