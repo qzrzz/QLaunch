@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private var showMenuItem: NSMenuItem?
+    private var statusMenu: NSMenu?
     private var globalHotKeyMonitor: Any?
     private var localHotKeyMonitor: Any?
     private var isAnimating = false
@@ -92,6 +93,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         if let globalHotKeyMonitor { NSEvent.removeMonitor(globalHotKeyMonitor) }
         if let localHotKeyMonitor { NSEvent.removeMonitor(localHotKeyMonitor) }
+    }
+
+    /// A regular Dock application receives this callback when its Dock icon is
+    /// clicked. Treat the click as a toggle for the Launchpad panel.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        toggleLaunchpad()
+        return true
     }
 
     @objc private func screensChanged() {
@@ -219,6 +230,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         item.button?.image?.isTemplate = true
         item.button?.toolTip = "QLaunchpad"
+        item.button?.target = self
+        item.button?.action = #selector(statusItemClicked(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         let menu = NSMenu()
         let showItem = NSMenuItem(
@@ -249,7 +263,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.keyEquivalentModifierMask = [.command]
         quitItem.target = self
         menu.addItem(quitItem)
-        item.menu = menu
+        statusMenu = menu
+        // Do not assign the menu to NSStatusItem. That would make left-click
+        // open the menu as well; the button action separates left and right.
+        item.menu = nil
     }
 
     private func removeStatusItem() {
@@ -258,6 +275,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem = nil
         showMenuItem = nil
+        statusMenu = nil
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let isRightClick = event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+
+        if isRightClick {
+            statusMenu?.popUp(
+                positioning: nil,
+                at: NSPoint(x: sender.bounds.midX, y: sender.bounds.minY),
+                in: sender
+            )
+        } else {
+            toggleLaunchpad()
+        }
     }
 
     private var showMenuBarIconPreference: Bool {
@@ -320,6 +354,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.beginPresenting()
 
         launchpadPanel.setFrame(screen.frame, display: false)
+        // Disable AppKit's automatic utility-window transition when the user
+        // explicitly selects no presentation animation. Otherwise orderOut()
+        // can keep the panel (and its icons) visually disappearing slowly.
+        launchpadPanel.animationBehavior = animationStyle == .none ? .none : .utilityWindow
         containerView.prepareForShow(on: screen)
 
         // Show the window and cached wallpaper immediately. Metal content starts

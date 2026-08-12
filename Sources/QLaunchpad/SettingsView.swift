@@ -83,7 +83,7 @@ private struct GeneralSettingsView: View {
     private var gridLayoutPreset = GridLayoutPreset.defaultPreset.rawValue
     @AppStorage(LaunchpadAnimationStyle.defaultsKey)
     private var presentationAnimationStyle = LaunchpadAnimationStyle.fly.rawValue
-    @State private var didClearIconCache = false
+    @State private var didClearCache = false
 
     var body: some View {
         Form {
@@ -93,8 +93,8 @@ private struct GeneralSettingsView: View {
 
                 Toggle(isOn: $showDockIcon) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("显示程序坞图标")
-                        Text("将 QLaunchpad 保留在程序坞中，以便从程序坞启动")
+                        Text("程序坞图标")
+                        Text("程序坞中显示图标，以便从程序坞启动")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -104,14 +104,16 @@ private struct GeneralSettingsView: View {
                 .onChange(of: showDockIcon) { _, _ in
                     notifyAppearanceChanged()
                 }
+
+                Toggle("菜单栏图标", isOn: $showMenuBarIcon)
+                .toggleStyle(.switch)
+                .onChange(of: showMenuBarIcon) { _, _ in
+                    notifyAppearanceChanged()
+                }
             }
 
             Section("显示") {
-                Toggle("显示菜单栏图标", isOn: $showMenuBarIcon)
-                    .toggleStyle(.switch)
-                    .onChange(of: showMenuBarIcon) { _, _ in
-                        notifyAppearanceChanged()
-                    }
+            
                 Toggle("显示应用名称", isOn: $showLabels)
                 Picker("布局", selection: $gridLayoutPreset) {
                     ForEach(GridLayoutPreset.allCases) { preset in
@@ -121,31 +123,6 @@ private struct GeneralSettingsView: View {
                 .pickerStyle(.menu)
                 .onChange(of: gridLayoutPreset) { _, _ in
                     NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
-                }
-            }
-
-            Section("缓存") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("图标缓存")
-                        Text("删除已缓存的图标并重新加载")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("删除") {
-                        NotificationCenter.default.post(
-                            name: .qlaunchpadIconCacheClearRequested,
-                            object: nil
-                        )
-                        didClearIconCache = true
-                    }
-                    .buttonStyle(.bordered)
-                }
-                if didClearIconCache {
-                    Text("图标缓存已删除，正在重新加载")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -165,6 +142,31 @@ private struct GeneralSettingsView: View {
                 LabeledContent("关闭", value: "Esc")
                 LabeledContent("选择应用", value: "方向键")
                 LabeledContent("打开应用", value: "Return")
+            }
+
+            Section("清除缓存") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("清除缓存")
+                        Text("清除图标、文字和壁纸缓存并重新构建")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("清除") {
+                        NotificationCenter.default.post(
+                            name: .qlaunchpadCacheClearRequested,
+                            object: nil
+                        )
+                        didClearCache = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+                if didClearCache {
+                    Text("缓存已清除，正在重新构建")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -445,26 +447,253 @@ private struct ApplicationSettingsView: View {
     }
 }
 
+/// 关于页（参考 Qf `AboutSettingsView`：版本、作者与社区链接、版权）。
 private struct AboutSettingsView: View {
-    private var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+    private static let githubURL = "https://github.com/qzrzz/QLaunch"
+    private static let releasesURL = "https://github.com/qzrzz/QLaunch/releases"
+    private static let authorURL = "https://qzrzz.com/"
+    private static let xURL = "https://x.com/qzrz256"
+    private static let xiaohongshuURL = "https://www.xiaohongshu.com/"
+    private static let bilibiliURL = "https://space.bilibili.com/3546636494047957"
+    private static let emailAddress = "qlaunchpad@qzrzz.com"
+
+    private var versionLabel: String {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "v\(short) (\(build))"
+    }
+
+    /// Prefer the system-rendered app icon (Assets.car / icns → 投影与圆角).
+    private var appIcon: NSImage {
+        let bundleURL = Bundle.main.bundleURL
+        if bundleURL.pathExtension == "app" {
+            let systemIcon = NSWorkspace.shared.icon(forFile: bundleURL.path)
+            if systemIcon.size.width > 0 {
+                return systemIcon
+            }
+        }
+        return QLaunchpadAppIcon.image ?? NSApplication.shared.applicationIconImage
     }
 
     var body: some View {
-        VStack(spacing: 14) {
-            Spacer()
-            Image(nsImage: NSApplication.shared.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 112, height: 112)
-            Text("QLaunchpad")
-                .font(.largeTitle.weight(.semibold))
-            Text("版本 \(version)")
-                .foregroundStyle(.secondary)
-            Text("高性能、原生 Metal 渲染的 macOS 应用启动器。")
-                .foregroundStyle(.secondary)
-            Spacer()
+        ScrollView {
+            VStack(spacing: 20) {
+                hero
+                versionCard
+                authorAndCommunityCard
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var hero: some View {
+        VStack(spacing: 14) {
+            Image(nsImage: appIcon)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                // Optical size: system icons already include margin + soft shadow.
+                .frame(width: 96, height: 96)
+
+            Text("QLaunchpad")
+                .font(.title.weight(.bold))
+
+            Text("高性能、原生 Metal 渲染的 macOS 应用启动器。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
+    }
+
+    private var versionCard: some View {
+        aboutCard(header: "版本") {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.blue)
+                    .frame(width: 22)
+
+                Text(versionLabel)
+                    .font(.body)
+                    .textSelection(.enabled)
+
+                Spacer(minLength: 12)
+
+                Button("检查更新") {
+                    openURL(Self.releasesURL)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private var authorAndCommunityCard: some View {
+        aboutCard(header: "关于作者与社区") {
+            VStack(spacing: 0) {
+                linkRow(
+                    title: "作者",
+                    subtitle: "Qzrzz · https://qzrzz.com/",
+                    url: Self.authorURL,
+                    icon: authorLogo
+                )
+                aboutDivider()
+                linkRow(
+                    title: "Github",
+                    subtitle: Self.githubURL,
+                    url: Self.githubURL,
+                    icon: templateIcon("RemixGithub", systemFallback: "chevron.left.forwardslash.chevron.right", tint: .primary)
+                )
+                aboutDivider()
+                linkRow(
+                    title: "X（推特）",
+                    subtitle: Self.xURL,
+                    url: Self.xURL,
+                    icon: templateIcon("RemixTwitterX", systemFallback: "at", tint: .primary)
+                )
+                aboutDivider()
+                linkRow(
+                    title: "小红书",
+                    subtitle: Self.xiaohongshuURL,
+                    url: Self.xiaohongshuURL,
+                    icon: templateIcon("RemixXiaohongshu", systemFallback: "book", tint: .red)
+                )
+                aboutDivider()
+                linkRow(
+                    title: "哔哩哔哩",
+                    subtitle: Self.bilibiliURL,
+                    url: Self.bilibiliURL,
+                    icon: templateIcon("RemixBilibili", systemFallback: "play.rectangle.fill", tint: .cyan)
+                )
+                aboutDivider()
+                linkRow(
+                    title: "Email",
+                    subtitle: Self.emailAddress,
+                    url: "mailto:\(Self.emailAddress)",
+                    icon: templateIcon("RemixEmail", systemFallback: "envelope.fill", tint: .teal)
+                )
+            }
+        }
+    }
+
+    private var authorLogo: some View {
+        Group {
+            if let logo = QLaunchpadAppIcon.resourceImage(named: "QzrzzLogo", pointSize: 22) {
+                Image(nsImage: logo)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(Circle())
+            } else {
+                Image(systemName: "person.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.green)
+            }
+        }
+        .frame(width: 22, height: 22)
+    }
+
+    private func templateIcon(
+        _ resourceName: String,
+        systemFallback: String,
+        tint: Color
+    ) -> some View {
+        Group {
+            if let image = QLaunchpadAppIcon.resourceImage(
+                named: resourceName,
+                template: true,
+                pointSize: 18
+            ) {
+                Image(nsImage: image)
+                    .renderingMode(.template)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .foregroundStyle(tint)
+            } else {
+                Image(systemName: systemFallback)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(tint)
+            }
+        }
+        .frame(width: 22, height: 22)
+    }
+
+    private func linkRow<Icon: View>(
+        title: String,
+        subtitle: String,
+        url: String,
+        icon: Icon
+    ) -> some View {
+        HStack(spacing: 12) {
+            icon
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.body)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 12)
+
+            Button {
+                openURL(url)
+            } label: {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .frame(width: 28, height: 28)
+            .help("打开链接: \(url)")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .contentShape(Rectangle())
+        .onTapGesture { openURL(url) }
+    }
+
+    private func aboutCard<Content: View>(
+        header: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(header)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+
+            content()
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 1)
+                )
+        }
+    }
+
+    private func aboutDivider() -> some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.45))
+            .frame(height: 1)
+            .padding(.leading, 14 + 22 + 12)
+    }
+
+    private func openURL(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
     }
 }

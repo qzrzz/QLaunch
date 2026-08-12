@@ -88,6 +88,63 @@ struct AppInfo: Identifiable, Hashable {
     let name: String
     let url: URL
     let bundleIdentifier: String
+    /// Search metadata generated once while the application catalog is built.
+    /// `pinyinFull` is compact full pinyin (e.g. `zhongguo`); initials are
+    /// stored separately (e.g. `zg`) so both search styles remain fast.
+    let pinyinFull: String
+    let pinyinInitials: String
+
+    init(
+        id: String,
+        name: String,
+        url: URL,
+        bundleIdentifier: String,
+        pinyinFull: String? = nil,
+        pinyinInitials: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.url = url
+        self.bundleIdentifier = bundleIdentifier
+        let metadata = pinyinFull == nil || pinyinInitials == nil
+            ? PinyinSearchMetadata.make(for: name)
+            : nil
+        self.pinyinFull = pinyinFull ?? metadata?.full ?? ""
+        self.pinyinInitials = pinyinInitials ?? metadata?.initials ?? ""
+    }
+}
+
+enum PinyinSearchMetadata {
+    struct Result {
+        let full: String
+        let initials: String
+    }
+
+    static func make(for value: String) -> Result {
+        let hasCJK = value.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
+                true
+            default:
+                false
+            }
+        }
+        guard hasCJK else { return Result(full: "", initials: "") }
+
+        let latin = NSMutableString(string: value)
+        CFStringTransform(latin, nil, kCFStringTransformToLatin, false)
+        CFStringTransform(latin, nil, kCFStringTransformStripCombiningMarks, false)
+
+        let syllables = latin
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
+            .map { $0.lowercased().filter { $0.isLetter || $0.isNumber } }
+            .filter { !$0.isEmpty }
+
+        return Result(
+            full: syllables.joined(),
+            initials: syllables.compactMap(\.first).map(String.init).joined()
+        )
+    }
 }
 
 struct AppIconCache {
@@ -169,7 +226,7 @@ enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .fly: "飞入"
+        case .fly: "飞入（iOS 桌面）"
         case .zoom: "放大"
         case .fade: "渐入"
         case .none: "无"
@@ -684,6 +741,10 @@ final class AppStore: ObservableObject {
 
     private func refreshFilteredApps(resetPage: Bool) {
         let query = normalized(searchText.trimmingCharacters(in: .whitespacesAndNewlines))
+        // Pinyin input may contain spaces, apostrophes, hyphens, or other
+        // syllable separators. Search the compact form against metadata that
+        // is stored without separators.
+        let compactQuery = query.filter { $0.isLetter || $0.isNumber }
         filteredApps = apps.filter { app in
             let isHidden = hiddenAppIDs.contains(app.id)
             if isHidden && (query.isEmpty || !showHiddenAppsInSearch) {
@@ -692,6 +753,8 @@ final class AppStore: ObservableObject {
             return query.isEmpty
                 || normalized(app.name).contains(query)
                 || normalized(app.bundleIdentifier).contains(query)
+                || (!compactQuery.isEmpty && app.pinyinFull.contains(compactQuery))
+                || (!compactQuery.isEmpty && app.pinyinInitials.contains(compactQuery))
         }
 
         if resetPage {

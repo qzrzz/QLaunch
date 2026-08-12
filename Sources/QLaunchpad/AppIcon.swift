@@ -16,6 +16,20 @@ enum QLaunchpadAppIcon {
         return image
     }
 
+    /// Bundle resource PNG (About social icons, author logo, …).
+    static func resourceImage(
+        named name: String,
+        template: Bool = false,
+        pointSize: CGFloat? = nil
+    ) -> NSImage? {
+        guard let image = image(named: name) else { return nil }
+        if let pointSize {
+            image.size = NSSize(width: pointSize, height: pointSize)
+        }
+        image.isTemplate = template
+        return image
+    }
+
     private static func image(named name: String) -> NSImage? {
         guard let bundle = resourceBundle,
               let url = bundle.url(forResource: name, withExtension: "png") else {

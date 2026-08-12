@@ -8,7 +8,7 @@ extension Notification.Name {
     static let qlaunchpadPresentationChanged = Notification.Name("QLaunchpadPresentationChanged")
     static let qlaunchpadFocusSearch = Notification.Name("QLaunchpadFocusSearch")
     static let qlaunchpadGridLayoutChanged = Notification.Name("QLaunchpadGridLayoutChanged")
-    static let qlaunchpadIconCacheClearRequested = Notification.Name("QLaunchpadIconCacheClearRequested")
+    static let qlaunchpadCacheClearRequested = Notification.Name("QLaunchpadCacheClearRequested")
 }
 
 /// Overlay hosting view that only intercepts hits in the search / chrome regions.
@@ -71,6 +71,12 @@ final class LaunchpadContainerView: NSView {
             name: .qlaunchpadPresentationChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(cacheClearRequested),
+            name: .qlaunchpadCacheClearRequested,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) {
@@ -113,6 +119,10 @@ final class LaunchpadContainerView: NSView {
                 backgroundView.animator().alphaValue = 0
             }
         }
+    }
+
+    @objc private func cacheClearRequested() {
+        backgroundView.clearCacheAndReload()
     }
 
     private func syncOverlayAlpha() {
@@ -358,9 +368,9 @@ private struct SearchField: View {
 
 // MARK: - AppKit search field (placeholder color + IME)
 
-/// Native `NSTextField` so placeholder color works and IME preedit (marked text)
-/// is not covered or clobbered. AppKit hides `placeholderAttributedString` while
-/// composing; `updateNSView` must not rewrite `stringValue` during composition.
+/// Native single-line `NSTextView` so the IME field editor can report marked text
+/// directly. `NSTextField`'s shared field editor only reliably reports committed
+/// text, which is too late for responsive pinyin search.
 private struct AppKitSearchTextField: NSViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
@@ -382,75 +392,41 @@ private struct AppKitSearchTextField: NSViewRepresentable {
         Coordinator(self)
     }
 
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(frame: .zero)
-        field.isBordered = false
-        field.isBezeled = false
-        field.drawsBackground = false
-        field.backgroundColor = .clear
-        field.focusRingType = .none
-        field.font = Self.textFont
-        field.textColor = Self.textColor
-        field.allowsEditingTextAttributes = false
-        field.isAutomaticTextCompletionEnabled = false
-        field.lineBreakMode = .byTruncatingTail
-        field.refusesFirstResponder = false
-        field.stringValue = text
-        field.placeholderAttributedString = Self.makePlaceholder(placeholder)
-        field.delegate = context.coordinator
-        if let cell = field.cell as? NSTextFieldCell {
-            cell.isScrollable = true
-            cell.wraps = false
-            cell.usesSingleLineMode = true
-            cell.lineBreakMode = .byTruncatingTail
-            cell.placeholderAttributedString = Self.makePlaceholder(placeholder)
+    func makeNSView(context: Context) -> IMESearchTextView {
+        let view = IMESearchTextView(frame: .zero)
+        view.setSearchText(text)
+        view.placeholder = placeholder
+        view.delegate = context.coordinator
+        view.onTextChange = { [weak coordinator = context.coordinator] value in
+            coordinator?.updateSearchText(value)
         }
-        return field
+        return view
     }
 
-    func updateNSView(_ field: NSTextField, context: Context) {
+    func updateNSView(_ field: IMESearchTextView, context: Context) {
         context.coordinator.parent = self
 
-        // Critical for IME: never replace stringValue while marked text is active.
-        let isComposing = (field.currentEditor() as? NSTextView)?.hasMarkedText() == true
-        if !isComposing, field.stringValue != text {
-            field.stringValue = text
+        // Never replace the text while IME marked text is active.
+        if !field.hasMarkedText(), field.string != text {
+            field.setSearchText(text)
         }
-
-        // Re-apply attributed placeholder each update — AppKit may reset styling.
-        let placeholderAttr = Self.makePlaceholder(placeholder)
-        field.placeholderAttributedString = placeholderAttr
-        (field.cell as? NSTextFieldCell)?.placeholderAttributedString = placeholderAttr
-        field.font = Self.textFont
-        field.textColor = Self.textColor
+        field.placeholder = placeholder
+        field.needsDisplay = true
 
         if focusRequestID != context.coordinator.lastFocusRequestID {
             context.coordinator.lastFocusRequestID = focusRequestID
             DispatchQueue.main.async {
                 guard let window = field.window else { return }
-                // Prefer the field editor when already editing; otherwise make field first responder.
-                if window.firstResponder !== field.currentEditor() {
+                if window.firstResponder !== field {
                     window.makeFirstResponder(field)
                 }
-                // AppKit selects the entire value when an NSTextField becomes
-                // first responder programmatically. Continue typing at the end
-                // instead, so the first search character we committed is kept.
-                if let editor = field.currentEditor() as? NSTextView {
-                    editor.setSelectedRange(NSRange(location: field.stringValue.utf16.count, length: 0))
-                }
+                field.setSelectedRange(NSRange(location: field.string.utf16.count, length: 0))
                 context.coordinator.parent.isFocused = true
             }
         }
     }
 
-    private static func makePlaceholder(_ string: String) -> NSAttributedString {
-        NSAttributedString(string: string, attributes: [
-            .font: textFont,
-            .foregroundColor: placeholderColor
-        ])
-    }
-
-    final class Coordinator: NSObject, NSTextFieldDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: AppKitSearchTextField
         var lastFocusRequestID = -1
 
@@ -458,33 +434,176 @@ private struct AppKitSearchTextField: NSViewRepresentable {
             self.parent = parent
         }
 
-        func controlTextDidChange(_ obj: Notification) {
-            guard let field = obj.object as? NSTextField else { return }
-            // During IME composition, stringValue stays at last committed text until insert.
-            // AppKit still shows marked text in the field editor and hides the placeholder.
-            let value = field.stringValue
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.isFocused = true
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.isFocused = false
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let editor = notification.object as? NSTextView else { return }
+            updateSearchText(editor.string)
+        }
+
+        /// Also runs for IME marked-text replacement before the candidate is
+        /// committed. Preview the replacement so search reacts immediately,
+        /// while returning true preserves native IME behavior.
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            guard let replacementString else { return true }
+            let current = textView.string as NSString
+            let preview = current.replacingCharacters(
+                in: affectedCharRange,
+                with: replacementString
+            )
+            updateSearchText(preview)
+            return true
+        }
+
+        fileprivate func updateSearchText(_ value: String) {
             if parent.text != value {
                 parent.text = value
             }
         }
+    }
+}
 
-        func controlTextDidBeginEditing(_ obj: Notification) {
-            parent.isFocused = true
-        }
+private final class IMESearchTextView: NSTextView {
+    var placeholder = "Search"
+    var onTextChange: ((String) -> Void)?
 
-        func controlTextDidEndEditing(_ obj: Notification) {
-            parent.isFocused = false
-        }
+    override var acceptsFirstResponder: Bool { true }
 
-        /// Keep Escape / navigation available to the panel; do not swallow unhandled commands.
-        func control(
-            _ control: NSControl,
-            textView: NSTextView,
-            doCommandBy commandSelector: Selector
-        ) -> Bool {
-            // Return false so AppKit / local monitors can handle Esc, etc.
-            false
+    /// Designated initializer for `NSTextView` subclasses. Must be implemented:
+    /// on modern AppKit, `init(frame:)` re-enters this path via TextKit; omitting
+    /// it causes EXC_BREAKPOINT (SIGTRAP) during allocation.
+    override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        super.init(frame: frameRect, textContainer: container)
+        configureAppearance()
+    }
+
+    override init(frame frameRect: NSRect) {
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let size = frameRect.size
+        let containerSize = NSSize(
+            width: size.width > 0 ? size.width : 300,
+            height: size.height > 0 ? size.height : 44
+        )
+        let textContainer = NSTextContainer(size: containerSize)
+        textContainer.widthTracksTextView = true
+        textContainer.heightTracksTextView = false
+        textContainer.lineFragmentPadding = 0
+        layoutManager.addTextContainer(textContainer)
+        super.init(frame: frameRect, textContainer: textContainer)
+        configureAppearance()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func configureAppearance() {
+        isRichText = false
+        isEditable = true
+        isSelectable = true
+        drawsBackground = false
+        isHorizontallyResizable = false
+        isVerticallyResizable = false
+        maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        minSize = .zero
+        textContainer?.lineFragmentPadding = 0
+        textContainer?.widthTracksTextView = true
+        textContainerInset = .zero
+        font = NSFont.systemFont(ofSize: 16, weight: .medium)
+        textColor = NSColor.white.withAlphaComponent(0.95)
+        insertionPointColor = .white
+        backgroundColor = .clear
+        allowsUndo = true
+        typingAttributes = [
+            .font: font as Any,
+            .foregroundColor: textColor as Any
+        ]
+    }
+
+    func setSearchText(_ value: String) {
+        guard !hasMarkedText() else { return }
+        string = value
+        normalizeTextAttributes()
+    }
+
+    private func normalizeTextAttributes() {
+        guard !hasMarkedText(),
+              let textStorage,
+              textStorage.length > 0,
+              let font,
+              let textColor else { return }
+        let range = NSRange(location: 0, length: textStorage.length)
+        textStorage.beginEditing()
+        textStorage.setAttributes([
+            .font: font,
+            .foregroundColor: textColor
+        ], range: range)
+        textStorage.endEditing()
+        typingAttributes = [
+            .font: font,
+            .foregroundColor: textColor
+        ]
+    }
+
+    override func layout() {
+        super.layout()
+        // NSTextView defaults to a top-aligned text container. Center the
+        // single-line editor in the 44pt glass search field so the glyphs and
+        // insertion caret align with the surrounding toolbar buttons.
+        let lineHeight = max(font?.boundingRectForFont.height ?? 19, 1)
+        textContainerInset = NSSize(
+            width: 0,
+            height: max(0, (bounds.height - lineHeight) * 0.5)
+        )
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        super.insertText(insertString, replacementRange: replacementRange)
+        normalizeTextAttributes()
+        onTextChange?(string)
+        needsDisplay = true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // Keep single-line container width in sync with the view.
+        if let textContainer, textContainer.containerSize.width != newSize.width {
+            textContainer.containerSize = NSSize(
+                width: max(newSize.width, 1),
+                height: textContainer.containerSize.height
+            )
         }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // AppKit 27 asserts if a custom text storage reaches layout with an
+        // unfixed attribute run. Normalize committed text before NSTextView
+        // draws; marked IME text is left untouched for native candidate styling.
+        normalizeTextAttributes()
+        super.draw(dirtyRect)
+        guard string.isEmpty, !hasMarkedText() else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 16, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.55)
+        ]
+        let size = placeholder.size(withAttributes: attributes)
+        let y = max(0, (bounds.height - size.height) / 2)
+        placeholder.draw(at: NSPoint(x: 0, y: y), withAttributes: attributes)
     }
 }
 

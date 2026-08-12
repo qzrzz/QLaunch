@@ -4,7 +4,14 @@ import AppKit
 enum QLaunchpadMain {
     static func main() {
         let application = NSApplication.shared
-        application.applicationIconImage = QLaunchpadAppIcon.image
+        // Packaged .app: use Icon Services (Assets.car / icns). Bare binary: flat PNG.
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            application.applicationIconImage = NSWorkspace.shared.icon(
+                forFile: Bundle.main.bundlePath
+            )
+        } else if let image = QLaunchpadAppIcon.image {
+            application.applicationIconImage = image
+        }
         let delegate = AppDelegate()
         application.delegate = delegate
         application.setActivationPolicy(.accessory)

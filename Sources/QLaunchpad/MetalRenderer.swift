@@ -1367,6 +1367,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if isPanningPage {
             store.endPagePan()
             startDisplayLink()
+            // An empty-area click is a dismissal gesture. Once the pointer
+            // moves past the drag threshold, the same gesture remains a page
+            // pan and must not dismiss the Launchpad on mouse-up.
+            if !didDrag {
+                NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
+            }
             return
         }
         guard let source = dragSource, displayedApps.indices.contains(source) else { return }

@@ -1,0 +1,81 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "features" : [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill" : {
+    "automatic-gradient" : "display-p3:0.95536,0.95536,0.95536,1.00000"
+  },
+  "groups" : [
+    {
+      "blend-mode" : "normal",
+      "blur-material" : 1,
+      "layers" : [
+        {
+          "image-name" : "Image 5.png",
+          "name" : "Image 5",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              -2
+            ]
+          }
+        }
+      ],
+      "lighting" : "combined",
+      "refractivity" : {
+        "depth" : 0.673984375,
+        "enabled" : true,
+        "strength" : 0.22234375
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : "outside",
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.28
+      }
+    },
+    {
+      "blur-material" : 0.5,
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "Image 3.png",
+          "name" : "Image 3",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              18,
+              123
+            ]
+          }
+        }
+      ],
+      "lighting" : "combined",
+      "refractivity" : {
+        "depth" : 0.673984375,
+        "enabled" : true,
+        "strength" : 0.22234375
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : "outside",
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

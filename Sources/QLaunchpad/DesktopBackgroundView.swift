@@ -271,6 +271,18 @@ final class DesktopBackgroundView: NSView {
         }
     }
 
+    func clearCacheAndReload() {
+        captureGeneration += 1
+        captureTask?.cancel()
+        wallpaperImageView.image = nil
+        wallpaperImageView.isHidden = true
+        visualEffectView.isHidden = false
+
+        if let screen = window?.screen ?? NSScreen.main {
+            prepare(for: screen)
+        }
+    }
+
     func prepareForPresentation() {
         wallpaperImageView.alphaValue = 0.72
     }

@@ -32,9 +32,13 @@ final class TextAtlas {
         self.device = device
     }
 
-    func rebuild(with apps: [AppInfo], scale: CGFloat) {
+    func clear() {
         layouts.removeAll(keepingCapacity: true)
         sheets.removeAll(keepingCapacity: true)
+    }
+
+    func rebuild(with apps: [AppInfo], scale: CGFloat) {
+        clear()
         guard !apps.isEmpty else { return }
 
         let scale = max(1, scale.rounded())

@@ -23,6 +23,34 @@
 - 搜索：名称 / Bundle Identifier，90ms 节流
 - 快捷键：`⌘ Space` 开关，`Esc` 关闭，`⌘ ,` 设置
 
+## 应用图标（Icon Composer）
+
+优先使用 Icon Composer 多层源：
+
+```text
+icons/QLaunch.icon          # 首选
+icons/AppIcon.icon          # 备选
+icons/QLaunchpad.icon       # 备选
+```
+
+打包时 `scripts/build-app.ts` 会用 `actool` 编译为：
+
+- `Contents/Resources/Assets.car` — macOS 26+ 液态玻璃 / 系统投影
+- `Contents/Resources/QLaunchpad.icns` — 旧系统与 Finder 回退
+- 并刷新 `Sources/QLaunchpad/Resources/QLaunchpadAppIcon.png` 供关于页与 `swift run`
+
+可用环境变量覆盖源路径：`QLAUNCHPAD_ICON=/path/to/Your.icon`。
+
+图标编译结果缓存在 `build/icon-cache/`，**源 `.icon` 未改时 `bun run dev` 会跳过 actool**。强制重编：
+
+```sh
+QLAUNCHPAD_FORCE_ICON=1 bun run dev
+```
+
+若当前 `actool` 无法处理部分高级字段（refractivity 等），脚本会自动做兼容规范化（保留阴影与半透明），并在日志中提示。没有 `.icon` 时回退为 PNG → icns。
+
+菜单栏图标仍为独立资源：`qlaunch-menubar.png`（template）。
+
 ## 构建与开发
 
 需要 Xcode、macOS 14+ SDK 与 Bun：
