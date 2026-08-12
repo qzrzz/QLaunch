@@ -478,18 +478,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             userInfo: presentationInfo
         )
 
-        let finishDismissal: () -> Void = { [weak self] in
-            guard let self, generation == self.presentationGeneration else { return }
-            self.containerView.hideImmediately()
-            self.launchpadPanel.animationBehavior = .none
-            self.launchpadPanel.alphaValue = 0
-            self.launchpadPanel.orderOut(nil)
-            self.store.markHidden()
-            self.isAnimating = false
-            self.updateStatusMenu()
-        }
         if dismissalDuration <= 0.0001 {
-            finishDismissal()
+            completeDismissal(generation: generation)
         } else if animationStyle == .fade {
             // Fade the composited panel as one surface so wallpaper, Metal
             // icons, labels and SwiftUI chrome disappear in exact sync.
@@ -498,12 +488,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 context.allowsImplicitAnimation = true
                 launchpadPanel.animator().alphaValue = 0
-            }, completionHandler: finishDismissal)
+            }, completionHandler: { [weak self] in
+                Task { @MainActor in
+                    self?.completeDismissal(generation: generation)
+                }
+            })
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + dismissalDuration + 0.02) {
-                finishDismissal()
+                self.completeDismissal(generation: generation)
             }
         }
+    }
+
+    private func completeDismissal(generation: UInt) {
+        guard generation == presentationGeneration else { return }
+        containerView.hideImmediately()
+        launchpadPanel.animationBehavior = .none
+        launchpadPanel.alphaValue = 0
+        launchpadPanel.orderOut(nil)
+        store.markHidden()
+        isAnimating = false
+        updateStatusMenu()
     }
 
     @objc private func quitApplication() {

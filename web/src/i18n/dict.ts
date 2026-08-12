@@ -28,35 +28,36 @@ export const DOWNLOAD_URL = "https://github.com/qzrzz/QLaunch/releases/latest";
 
 export const uiDictMap: Record<SupportedLang, UiDict> = {
   en: {
-    siteTitle: "QLaunch — Native macOS Launchpad",
+    siteTitle: "QLaunch — Smooth Launchpad Alternative for macOS",
     metaDesc:
-      "A simple, high-performance native macOS Launchpad. 128pt icons, Metal rendering, blurred wallpaper, liquid glass search.",
+      "The smoothest Launchpad for macOS — high-performance, native, free, open source, and powered by Metal.",
     brand: "QLaunch",
-    tagline: "Simple, high-performance macOS Launchpad — native, free, open source",
+    tagline:
+      "The smoothest Launchpad for macOS — high-performance, native, free, open source",
     download: "Download",
     viewOnGithub: "GitHub",
-    footerTagline: "A simple, high-performance native macOS Launchpad.",
+    footerTagline: "The smoothest Launchpad for macOS.",
     copyright: "© 2026",
     studioName: "Qzrzz.com",
     langSwitchName: "English",
     langSwitchAria: "Select language",
   },
   "zh-Hans": {
-    siteTitle: "QLaunch — 原生 macOS Launchpad",
+    siteTitle: "QLaunch — 流畅的启动台 - macOS Launchpad 替代品",
     metaDesc:
-      "简单、高性能的原生 macOS Launchpad。128pt 图标、Metal 渲染、高斯模糊壁纸、液态玻璃搜索。",
+      "最流畅的启动台，macOS Launchpad， 高性能、原生、免费、开源，Metal 渲染。",
     brand: "QLaunch",
-    tagline: "简单、高性能的 macOS Launchpad — 原生，免费，开源",
+    tagline:
+      "最流畅的启动台，macOS Launchpad， 高性能、原生、免费、开源",
     download: "下载",
     viewOnGithub: "GitHub",
-    footerTagline: "简单、高性能的原生 macOS Launchpad。",
+    footerTagline: "最流畅的启动台 macOS Launchpad",
     copyright: "© 2026",
     studioName: "Qzrzz.com",
     langSwitchName: "简体中文",
     langSwitchAria: "选择语言",
   },
 };
-
 /** 语言切换器展示标签。 */
 export const langLabels: Record<SupportedLang, string> = {
   en: "English",
