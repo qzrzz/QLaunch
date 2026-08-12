@@ -161,6 +161,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var isPanningPage = false
     private var panLastPoint: CGPoint = .zero
     private var contextMenuApp: AppInfo?
+    private var contextMenuFolder: AppFolder?
 
     // Keep visual positions separate from the catalog order so reordering an
     // item does not make the surrounding icons jump to their new cells.
@@ -213,7 +214,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         self.store = store
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue() else {
-            fatalError("Metal is required by QLaunchpad")
+            fatalError("Metal is required by QLaunch")
         }
         self.commandQueue = commandQueue
         iconTextures = IconTextureStore(device: device)
@@ -226,7 +227,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
               let vertex = library.makeFunction(name: "ql_vertex"),
               let iconFrag = library.makeFunction(name: "ql_icon_fragment"),
               let textFrag = library.makeFunction(name: "ql_text_fragment") else {
-            fatalError("Unable to compile QLaunchpad shaders")
+            fatalError("Unable to compile QLaunch shaders")
         }
 
         let desc = MTLRenderPipelineDescriptor()
@@ -992,6 +993,29 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
     }
 
+    /// Replace the visible collection without discarding the current visual
+    /// slots. Surviving icons then glide from their old cells to their new
+    /// indices instead of snapping after folder membership changes.
+    private func applyAnimatedLayout(
+        _ items: [LaunchpadItem],
+        emergingItemIDs: Set<String> = [],
+        emergingFrom originSlot: Double? = nil
+    ) {
+        displayedItems = items
+        lastDisplaySignature = AppListSignature(items: items)
+        if let originSlot {
+            for id in emergingItemIDs where items.contains(where: { $0.id == id }) {
+                reorderVisualSlots[id] = originSlot
+            }
+        }
+        synchronizeReorderVisualSlots(with: items)
+        isReorderAnimationActive = items.enumerated().contains { index, item in
+            abs((reorderVisualSlots[item.id] ?? Double(index)) - Double(index)) >= 0.001
+        }
+        if isReorderAnimationActive { startDisplayLink() }
+        needsDisplay = true
+    }
+
     private func tickReorderAnimation(dt: CFTimeInterval) {
         guard !reorderVisualSlots.isEmpty else {
             isReorderAnimationActive = false
@@ -1315,13 +1339,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             iconSprites,
             to: &resources.iconBuffer,
             capacity: &resources.iconCapacity,
-            label: "QLaunchpad icon instances"
+            label: "QLaunch icon instances"
         )
         upload(
             textSprites,
             to: &resources.textBuffer,
             capacity: &resources.textCapacity,
-            label: "QLaunchpad text instances"
+            label: "QLaunch text instances"
         )
     }
 
@@ -1864,9 +1888,16 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return nil
         }
         let index = hit.page * store.pageCapacity + hit.localIndex
-        guard displayedItems.indices.contains(index),
-              case .app(let app) = displayedItems[index] else { return nil }
+        guard displayedItems.indices.contains(index) else { return nil }
 
+        if case .folder(let folder) = displayedItems[index] {
+            contextMenuApp = nil
+            contextMenuFolder = folder
+            return makeFolderContextMenu(for: folder)
+        }
+        guard case .app(let app) = displayedItems[index] else { return nil }
+
+        contextMenuFolder = nil
         contextMenuApp = app
         store.focusApp(id: app.id)
         needsDisplay = true
@@ -1909,6 +1940,40 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         for item in menu.items where item.action != nil {
             item.target = self
         }
+        return menu
+    }
+
+    private func makeFolderContextMenu(for folder: AppFolder) -> NSMenu {
+        let menu = NSMenu(title: folder.name)
+        let renameItem = menu.addItem(
+            withTitle: "重命名",
+            action: #selector(renameContextMenuFolder),
+            keyEquivalent: ""
+        )
+        renameItem.target = self
+
+        let mergeItem = NSMenuItem(title: "合并入文件夹", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "合并入文件夹")
+        for target in store.orderedFolders where target.id != folder.id {
+            let item = NSMenuItem(
+                title: target.name,
+                action: #selector(mergeContextMenuFolder(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = target.id
+            submenu.addItem(item)
+        }
+        mergeItem.submenu = submenu
+        mergeItem.isEnabled = !submenu.items.isEmpty
+        menu.addItem(mergeItem)
+        menu.addItem(.separator())
+        let dissolveItem = menu.addItem(
+            withTitle: "解散文件夹",
+            action: #selector(dissolveContextMenuFolder),
+            keyEquivalent: ""
+        )
+        dissolveItem.target = self
         return menu
     }
 
@@ -1957,9 +2022,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard let app = contextMenuApp,
               let folderID = sender.representedObject as? String else { return }
         _ = store.moveAppToFolder(appID: app.id, folderID: folderID)
-        displayedItems = store.activeDisplayItems
-        lastDisplaySignature = AppListSignature(items: displayedItems)
-        resetReorderVisualSlots(to: displayedItems)
+        applyAnimatedLayout(store.activeDisplayItems)
         contextMenuApp = nil
         needsDisplay = true
     }
@@ -1968,11 +2031,56 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard let app = contextMenuApp,
               let folderID = store.folderContaining(appID: app.id)?.id else { return }
         _ = store.removeAppFromFolder(appID: app.id, folderID: folderID)
-        displayedItems = store.activeDisplayItems
-        lastDisplaySignature = AppListSignature(items: displayedItems)
-        resetReorderVisualSlots(to: displayedItems)
+        applyAnimatedLayout(store.activeDisplayItems)
         contextMenuApp = nil
         needsDisplay = true
+    }
+
+    @objc private func renameContextMenuFolder() {
+        guard let folder = contextMenuFolder else { return }
+        let alert = NSAlert()
+        alert.messageText = "重命名文件夹"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(string: folder.name)
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 26)
+        field.selectText(nil)
+        alert.accessoryView = field
+
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            if response == .alertFirstButtonReturn {
+                self.store.renameFolder(folder.id, to: field.stringValue)
+            }
+            self.contextMenuFolder = nil
+            self.needsDisplay = true
+        }
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            completion(alert.runModal())
+        }
+    }
+
+    @objc private func mergeContextMenuFolder(_ sender: NSMenuItem) {
+        guard let source = contextMenuFolder,
+              let targetID = sender.representedObject as? String,
+              store.mergeFolder(sourceID: source.id, into: targetID) else { return }
+        applyAnimatedLayout(store.activeDisplayItems)
+        contextMenuFolder = nil
+    }
+
+    @objc private func dissolveContextMenuFolder() {
+        guard let folder = contextMenuFolder else { return }
+        let originSlot = reorderVisualSlots[folder.id]
+            ?? Double(displayedItems.firstIndex(where: { $0.id == folder.id }) ?? 0)
+        guard let memberIDs = store.dissolveFolder(folder.id) else { return }
+        applyAnimatedLayout(
+            store.activeDisplayItems,
+            emergingItemIDs: Set(memberIDs),
+            emergingFrom: originSlot
+        )
+        contextMenuFolder = nil
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -2041,9 +2149,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 if store.isFolderRemovalTargeted,
                    let folderID = store.openedFolderID,
                    store.removeAppFromFolder(appID: draggedAppID, folderID: folderID) {
-                    displayedItems = store.activeDisplayItems
-                    lastDisplaySignature = AppListSignature(items: displayedItems)
-                    resetReorderVisualSlots(to: displayedItems)
+                    applyAnimatedLayout(store.activeDisplayItems)
                 } else {
                     beginDragReleaseAnimation(itemID: draggedAppID)
                 }
@@ -2064,23 +2170,29 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if didDrag, let draggedAppID {
             var completedGrouping = false
             if let dragHoverTargetID,
-               case .app = displayedItems.first(where: { $0.id == draggedAppID }),
+               let source = displayedItems.first(where: { $0.id == draggedAppID }),
                let target = displayedItems.first(where: { $0.id == dragHoverTargetID }) {
-                switch target {
-                case .folder:
+                switch (source, target) {
+                case (.folder(let sourceFolder), .folder(let targetFolder)):
+                    completedGrouping = store.mergeFolder(
+                        sourceID: sourceFolder.id,
+                        into: targetFolder.id
+                    )
+                case (.app, .folder):
                     store.moveAppIntoFolder(appID: draggedAppID, folderID: target.id)
                     completedGrouping = true
-                case .app(let targetApp):
+                case (.app, .app(let targetApp)):
                     if targetApp.id != draggedAppID {
                         completedGrouping = store.createFolder(
                             draggedAppID: draggedAppID,
                             targetAppID: targetApp.id
                         ) != nil
                     }
+                case (.folder, .app):
+                    break
                 }
                 if completedGrouping {
-                    displayedItems = store.activeDisplayItems
-                    lastDisplaySignature = AppListSignature(items: displayedItems)
+                    applyAnimatedLayout(store.activeDisplayItems)
                 }
             }
             if !completedGrouping {

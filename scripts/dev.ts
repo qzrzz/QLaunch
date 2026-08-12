@@ -8,7 +8,7 @@ async function main(): Promise<void> {
     configuration: "debug",
     version: readPackageVersion(),
     buildNumber: readBuildNumber(),
-    productName: "QLaunchpad Dev",
+    productName: "QLaunch Dev",
     bundleIdentifier: "com.qzrzz.qlaunchpad.dev",
     signIdentity: "-",
   });

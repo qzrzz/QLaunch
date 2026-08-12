@@ -19,8 +19,8 @@ import {
 } from "./version";
 
 const ROOT_DIR = join(import.meta.dir, "..");
-const DEFAULT_NOTARY_PROFILE = "QLaunchpad-notary";
-const DEFAULT_GITHUB_REPOSITORY = "qzrzz/QLaunchpad";
+const DEFAULT_NOTARY_PROFILE = "QLaunch-notary";
+const DEFAULT_GITHUB_REPOSITORY = "qzrzz/QLaunch";
 
 function loadEnv(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -90,7 +90,7 @@ async function notarizeApp(appPath: string, version: string, env: Record<string,
     return false;
   }
 
-  const zipPath = join(ROOT_DIR, "build/QLaunchpad-" + version + "-notary.zip");
+  const zipPath = join(ROOT_DIR, "build/QLaunch-" + version + "-notary.zip");
   console.log("▸ 压缩 App 并提交 Apple 公证…");
   rmSync(zipPath, { force: true });
   await runCommand(["ditto", "-c", "-k", "--keepParent", appPath, zipPath]);
@@ -112,7 +112,7 @@ async function createDMG(appPath: string, dmgPath: string): Promise<void> {
       console.log("▸ 使用 create-dmg 打包安装镜像…");
       await runCommand([
         createDmg,
-        "--volname", "QLaunchpad",
+        "--volname", "QLaunch",
         "--window-pos", "200", "120",
         "--window-size", "600", "400",
         "--icon-size", "128",
@@ -133,7 +133,7 @@ async function createDMG(appPath: string, dmgPath: string): Promise<void> {
     await runCommand(["cp", "-R", appPath, join(stage, basename(appPath))]);
     await runCommand(["ln", "-s", "/Applications", join(stage, "Applications")]);
     await runCommand([
-      "hdiutil", "create", "-volname", "QLaunchpad", "-srcfolder", stage,
+      "hdiutil", "create", "-volname", "QLaunch", "-srcfolder", stage,
       "-ov", "-format", "UDZO", dmgPath,
     ]);
   } finally {
@@ -144,13 +144,13 @@ async function createDMG(appPath: string, dmgPath: string): Promise<void> {
 function releaseNotes(version: string): string {
   const changelogPath = join(ROOT_DIR, "CHANGELOG.md");
   if (!existsSync(changelogPath)) {
-    return "QLaunchpad " + version + "\n\nQLaunchpad macOS release.";
+    return "QLaunch " + version + "\n\nQLaunch macOS release.";
   }
 
   const sections = readFileSync(changelogPath, "utf8").split(/^##\s+/m).slice(1);
   const target = sections.find((section) => section.startsWith("[" + version + "]") || section.startsWith(version));
   if (target) return target.trim();
-  return sections[0]?.trim() || ("QLaunchpad " + version);
+  return sections[0]?.trim() || ("QLaunch " + version);
 }
 
 async function publishToGitHub(
@@ -175,13 +175,13 @@ async function publishToGitHub(
   if (exists) {
     await runCommand([
       "gh", "release", "edit", tag, "--repo", repository,
-      "--title", "QLaunchpad " + tag,
+      "--title", "QLaunch " + tag,
       "--notes-file", notesPath,
     ]);
   } else {
     await runCommand([
       "gh", "release", "create", tag, "--repo", repository,
-      "--title", "QLaunchpad " + tag,
+      "--title", "QLaunch " + tag,
       "--notes-file", notesPath,
     ]);
   }
@@ -208,7 +208,7 @@ async function main(): Promise<void> {
   const env = loadEnv();
   const { version, buildNumber } = syncVersionAndBumpBuildNumber(versionOverride);
   const publishing = !noPublish;
-  console.log("\n📦 QLaunchpad " + (publishing ? "发布" : "本地构建") + "流程");
+  console.log("\n📦 QLaunch " + (publishing ? "发布" : "本地构建") + "流程");
   console.log("▸ 版本: " + version + " | Build: " + buildNumber);
 
   const identity = await resolveSigningIdentity(env);
@@ -222,7 +222,7 @@ async function main(): Promise<void> {
     configuration: "release",
     version,
     buildNumber,
-    productName: "QLaunchpad",
+    productName: "QLaunch",
     bundleIdentifier: "com.qzrzz.qlaunchpad",
     signIdentity: identity,
   });
@@ -232,12 +232,12 @@ async function main(): Promise<void> {
     notarized = await notarizeApp(app.appPath, version, env);
   }
   if (publishing && !notarized) {
-    throw new Error("发布流程未完成公证，请配置 QLaunchpad-notary profile 或 Apple 公证凭据");
+    throw new Error("发布流程未完成公证，请配置 QLaunch-notary profile 或 Apple 公证凭据");
   }
 
-  const dmgPath = join(ROOT_DIR, "build/QLaunchpad-" + version + ".dmg");
-  const zipPath = join(ROOT_DIR, "build/QLaunchpad-" + version + ".zip");
-  const notesPath = join(ROOT_DIR, "build/QLaunchpad-" + version + ".md");
+  const dmgPath = join(ROOT_DIR, "build/QLaunch-" + version + ".dmg");
+  const zipPath = join(ROOT_DIR, "build/QLaunch-" + version + ".zip");
+  const notesPath = join(ROOT_DIR, "build/QLaunch-" + version + ".md");
   await createDMG(app.appPath, dmgPath);
   rmSync(zipPath, { force: true });
   await runCommand(["ditto", "-c", "-k", "--keepParent", app.appPath, zipPath]);

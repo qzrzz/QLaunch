@@ -30,7 +30,7 @@ extension Notification.Name {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let store = AppStore()
     private var launchpadPanel: LaunchpadPanel!
     private var containerView: LaunchpadContainerView!
@@ -128,11 +128,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hasShadow = false
         panel.alphaValue = 0
         panel.animationBehavior = .utilityWindow
+        panel.delegate = self
 
         let container = LaunchpadContainerView(store: store)
         panel.contentView = container
         containerView = container
         launchpadPanel = panel
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard notification.object as? NSWindow === launchpadPanel else { return }
+
+        // Opening Settings also makes the Launchpad resign key. Wait until
+        // AppKit has finished ordering the new window or attached sheet before
+        // deciding whether the Launchpad should be dismissed.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let keyWindow = NSApp.keyWindow
+            let isLaunchpadSheet = self.launchpadPanel.attachedSheet != nil
+                || keyWindow?.sheetParent === self.launchpadPanel
+            guard self.launchpadPanel.isVisible,
+                  self.store.presentation != .hidden,
+                  self.settingsWindow?.isKeyWindow != true,
+                  !isLaunchpadSheet else { return }
+            self.dismissLaunchpad()
+        }
     }
 
     private func installHotKey() {
@@ -150,6 +170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return nil
             }
             guard self.launchpadPanel.isVisible else { return event }
+            // A sheet or Settings window may be key while Launchpad remains
+            // visible. Let that window handle Return/arrows normally.
+            guard self.launchpadPanel.isKeyWindow else { return event }
 
             // Do not steal arrows/Return while an IME candidate window is active.
             if let editor = self.launchpadPanel.firstResponder as? NSTextView,
@@ -187,9 +210,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.store.moveKeyboardFocus(.up)
                 return nil
             case 36, 76: // Return / keypad Enter
-                if let app = self.store.focusedApp {
+                switch self.store.focusedItem {
+                case .app(let app):
                     self.openAppFromLaunchpad(app)
                     return nil
+                case .folder(let folder):
+                    self.store.enterFolder(folder.id)
+                    return nil
+                case nil:
+                    break
                 }
             default:
                 break
@@ -225,18 +254,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             item.button?.image = NSImage(
                 systemSymbolName: "square.grid.2x2.fill",
-                accessibilityDescription: "QLaunchpad"
+                accessibilityDescription: "QLaunch"
             )
         }
         item.button?.image?.isTemplate = true
-        item.button?.toolTip = "QLaunchpad"
+        item.button?.toolTip = "QLaunch"
         item.button?.target = self
         item.button?.action = #selector(statusItemClicked(_:))
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         let menu = NSMenu()
         let showItem = NSMenuItem(
-            title: "Show QLaunchpad",
+            title: "Show QLaunch",
             action: #selector(toggleLaunchpad),
             keyEquivalent: ""
         )
@@ -256,7 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
-            title: "Quit QLaunchpad",
+            title: "Quit QLaunch",
             action: #selector(quitApplication),
             keyEquivalent: "q"
         )
@@ -483,7 +512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusMenu() {
         let visible = launchpadPanel?.isVisible == true && store.presentation != .hidden
-        showMenuItem?.title = visible ? "Hide QLaunchpad" : "Show QLaunchpad"
+        showMenuItem?.title = visible ? "Hide QLaunch" : "Show QLaunch"
     }
 
     @objc private func openSettings() {
@@ -503,7 +532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "QLaunchpad 设置"
+        window.title = "QLaunch 设置"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none

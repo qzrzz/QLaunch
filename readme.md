@@ -1,4 +1,4 @@
-# QLaunchpad
+# QLaunch
 
 简单、高性能的 macOS Launchpad 替代方案。面向发布级体验：128pt 图标、高帧率翻页、高斯模糊壁纸、液态玻璃搜索框、渐入渐出窗口。
 
@@ -36,7 +36,7 @@ icons/QLaunchpad.icon       # 备选
 打包时 `scripts/build-app.ts` 会用 `actool` 编译为：
 
 - `Contents/Resources/Assets.car` — macOS 26+ 液态玻璃 / 系统投影
-- `Contents/Resources/QLaunchpad.icns` — 旧系统与 Finder 回退
+- `Contents/Resources/QLaunch.icns` — 旧系统与 Finder 回退
 - 并刷新 `Sources/QLaunchpad/Resources/QLaunchpadAppIcon.png` 供关于页与 `swift run`
 
 可用环境变量覆盖源路径：`QLAUNCHPAD_ICON=/path/to/Your.icon`。
@@ -77,18 +77,18 @@ bun run clean             # 清理构建产物
 bun run check             # 检查 Swift Package 结构
 ```
 
-`bun run dev` 会先编译并打包 `QLaunchpad Dev.app`，然后以前台方式启动它，因此终端仍会显示 AppKit / Metal 日志。Debug App 位于：
+`bun run dev` 会先编译并打包 `QLaunch Dev.app`，然后以前台方式启动它，因此终端仍会显示 AppKit / Metal 日志。Debug App 位于：
 
 ```text
-build/DerivedData/Build/Products/Debug/QLaunchpad Dev.app
+build/DerivedData/Build/Products/Debug/QLaunch Dev.app
 ```
 
 本地 Release 构建产物位于 `build/`：
 
 ```text
-build/DerivedData/Build/Products/Release/QLaunchpad.app
-build/QLaunchpad-<version>.dmg
-build/QLaunchpad-<version>.zip
+build/DerivedData/Build/Products/Release/QLaunch.app
+build/QLaunch-<version>.dmg
+build/QLaunch-<version>.zip
 ```
 
 发布前可在 `.env` 配置：
@@ -98,8 +98,8 @@ MACOS_SIGNING_IDENTITY=Developer ID Application: Your Name (TEAMID)
 APPLE_ID=your-apple-id@example.com
 APPLE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx
 APPLE_TEAM_ID=XXXXXXXXXX
-QLAUNCHPAD_NOTARY_PROFILE=QLaunchpad-notary
-GITHUB_REPOSITORY=qzrzz/QLaunchpad
+QLAUNCHPAD_NOTARY_PROFILE=QLaunch-notary
+GITHUB_REPOSITORY=qzrzz/QLaunch
 ```
 
 `bun run release -- 1.0.1` 可指定版本号；每次 Release 构建会递增 `package.json` 中的 `buildNumber`。正式发布需要 Developer ID Application 证书、公证凭据和已登录的 `gh`。

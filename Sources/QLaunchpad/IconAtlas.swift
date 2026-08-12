@@ -308,7 +308,7 @@ final class FolderIconTextureStore {
             withBytes: data,
             bytesPerRow: bytesPerRow
         )
-        texture.label = "QLaunchpad folder icon"
+        texture.label = "QLaunch folder icon"
         return texture
     }
 }
