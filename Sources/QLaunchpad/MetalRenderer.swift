@@ -142,6 +142,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private let iconPipeline: MTLRenderPipelineState
     private let textPipeline: MTLRenderPipelineState
     private let iconTextures: IconTextureStore
+    private let folderPadTextures: FolderPadTextureStore
     private let textAtlas: TextAtlas
 
     private var iconSampler: MTLSamplerState!
@@ -225,10 +226,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var folderScrollTarget: CGFloat = 0
     private let folderColumns = 3
     private let folderRows = 4
-    private let folderPreviewSize: CGFloat = 102
     private let folderPreviewIconSize: CGFloat = 22
     private let folderPreviewIconSpacing: CGFloat = 4
-    private let folderPreviewPadding: CGFloat = 14
 
     // MARK: Init
 
@@ -240,6 +239,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         self.commandQueue = commandQueue
         iconTextures = IconTextureStore(device: device)
+        folderPadTextures = FolderPadTextureStore(device: device)
         textAtlas = TextAtlas(device: device)
         inFlightFrames = (0..<3).map { _ in FrameResources() }
 
@@ -404,14 +404,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return float4(0.0, 0.0, 0.0, in.alpha * 0.34);
         }
         if (in.kind > 3.5) {
-            float2 p = abs(in.uv - 0.5) * 2.0;
-            float shape = pow(p.x, 4.0) + pow(p.y, 4.0);
-            float feather = max(fwidth(shape) * 1.25, 0.003);
-            float coverage = 1.0 - smoothstep(1.0 - feather, 1.0 + feather, shape);
-            float highlight = (1.0 - p.y) * 0.13 + (1.0 - p.x) * 0.04;
-            float3 glass = float3(0.78, 0.84, 0.91) + highlight;
-            float a = coverage * in.alpha * 0.78;
-            return float4(glass * a, a);
+            // The folder plate is supplied as a premultiplied image texture so
+            // its soft bevel and shadow remain visible at every display scale.
+            return atlas.sample(samp, in.uv) * in.alpha;
         }
         if (in.kind < 0.5) {
             // A fourth-order superellipse closely follows the continuous rounded
@@ -1428,8 +1423,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         iconSprites: inout [SpriteInstance]
     ) {
         let members = folder.appIDs.compactMap { store.app(withID: $0) }.prefix(9)
-        guard let backgroundApp = members.first,
-              let backgroundTexture = iconTextures.texture(for: backgroundApp) else {
+        guard !members.isEmpty,
+              let backgroundTexture = folderPadTextures.texture(for: GridLayoutPreset.current) else {
             return
         }
 
@@ -1444,12 +1439,16 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         let miniSize = folderPreviewIconSize
         let gap = folderPreviewIconSpacing
-        let left = center.x - size * 0.5 + folderPreviewPadding + miniSize * 0.5
-        let top = center.y - size * 0.5 + folderPreviewPadding + miniSize * 0.5
+        let columns = 3
+        let rows = 3
+        let contentWidth = CGFloat(columns) * miniSize + CGFloat(columns - 1) * gap
+        let contentHeight = CGFloat(rows) * miniSize + CGFloat(rows - 1) * gap
+        let left = center.x - contentWidth * 0.5 + miniSize * 0.5
+        let top = center.y - contentHeight * 0.5 + miniSize * 0.5
         for (offset, app) in members.enumerated() {
             guard let texture = iconTextures.texture(for: app) else { continue }
-            let column = offset % 3
-            let row = offset / 3
+            let column = offset % columns
+            let row = offset / columns
             let miniCenter = CGPoint(
                 x: left + CGFloat(column) * (miniSize + gap),
                 y: top + CGFloat(row) * (miniSize + gap)
@@ -1525,7 +1524,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     ))
                     let alpha = pageFade * alphaScale
                     if alpha > 0.002 {
-                        let folderSize = folderPreviewSize * (isDragged ? 1.08 : 1)
+                        let folderScale: CGFloat = isDragged ? 1.08 : 1
+                        let folderSize = metrics.iconSize * folderScale
                         buildFolderPreview(
                             folder,
                             center: center,
@@ -1540,14 +1540,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                             let lc = CGPoint(
                                 x: center.x,
                                 y: center.y + folderSize * 0.5
-                                    + 6 + label.heightPoints * 0.5 * (isDragged ? 1.08 : 1)
+                                    + 6 + label.heightPoints * 0.5 * folderScale
                             )
                             labelsBySheet[label.sheet].append(
                                 .label(
                                     center: lc,
                                     size: CGSize(
-                                        width: label.widthPoints * (isDragged ? 1.08 : 1),
-                                        height: label.heightPoints * (isDragged ? 1.08 : 1)
+                                        width: label.widthPoints * folderScale,
+                                        height: label.heightPoints * folderScale
                                     ),
                                     uv: label.uv,
                                     alpha: alpha * 0.9
