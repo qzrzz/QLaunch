@@ -1,0 +1,17 @@
+{
+  "name": "qlaunchpad",
+  "version": "1.0.0",
+  "buildNumber": 4,
+  "private": true,
+  "description": "简单高性能的 macOS Launchpad",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "dev": "bun scripts/dev.ts",
+    "build": "bun scripts/release.ts --no-publish",
+    "release": "bun scripts/release.ts",
+    "run": "bun scripts/dev.ts",
+    "clean": "bun scripts/clean.ts",
+    "check": "SWIFT_MODULECACHE_PATH=/private/tmp/qlaunchpad-swift-module-cache CLANG_MODULE_CACHE_PATH=/private/tmp/qlaunchpad-clang-module-cache swift package describe"
+  }
+}

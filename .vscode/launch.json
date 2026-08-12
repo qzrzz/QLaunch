@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:QLaunchpad}",
+            "name": "Debug QLaunchpad",
+            "target": "QLaunchpad",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug QLaunchpad"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:QLaunchpad}",
+            "name": "Release QLaunchpad",
+            "target": "QLaunchpad",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release QLaunchpad"
+        }
+    ]
+}

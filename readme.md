@@ -1,0 +1,76 @@
+# QLaunchpad
+
+简单、高性能的 macOS Launchpad 替代方案。面向发布级体验：128pt 图标、高帧率翻页、高斯模糊壁纸、液态玻璃搜索框、渐入渐出窗口。
+
+## 特性
+
+| 能力 | 实现 |
+|------|------|
+| **128pt 图标** | 网格固定 128pt 显示，Metal atlas 使用 256px tile（2× 视网膜） |
+| **高帧率动画** | `CADisplayLink` 驱动，最高 120fps；分页弹簧 + 展示缩放淡入 |
+| **高斯模糊背景** | 读取当前桌面壁纸，`CIGaussianBlur` 真模糊 + 暗色叠层与 vignette |
+| **滚动翻页** | 精确触控板相位 / 惯性、边缘橡胶回弹、松手按速度吸附整页 |
+| **液态玻璃搜索** | macOS 26+ `glassEffect`；旧系统分层 material + 高光描边近似 |
+| **窗口渐入渐出** | 面板 alpha 与内容 scale（0.88→1）同步的 open / close 动画 |
+
+其它能力：
+
+- AppKit `NSPanel`：`popUpMenu` 层级、跨 Space、全屏辅助
+- 菜单栏入口：显示 / 隐藏、Settings、退出
+- App 扫描：`/Applications`、`/System/Applications`、Utilities、用户 Applications，按 Bundle ID 去重
+- Icon 缓存：`~/Library/Caches/com.qlaunchpad.icons`
+- 交互：点击启动、拖拽排序、←/→ 翻页、页码指示器
+- 搜索：名称 / Bundle Identifier，90ms 节流
+- 快捷键：`⌘ Space` 开关，`Esc` 关闭，`⌘ ,` 设置
+
+## 构建与开发
+
+需要 Xcode、macOS 14+ SDK 与 Bun：
+
+```sh
+bun install
+bun run dev               # 构建 Debug .app 并前台运行
+bun run build             # 构建 Release .app、DMG、ZIP（不发布）
+bun run release           # 签名、公证并发布 GitHub Release
+bun run clean             # 清理构建产物
+bun run check             # 检查 Swift Package 结构
+```
+
+`bun run dev` 会先编译并打包 `QLaunchpad Dev.app`，然后以前台方式启动它，因此终端仍会显示 AppKit / Metal 日志。Debug App 位于：
+
+```text
+build/DerivedData/Build/Products/Debug/QLaunchpad Dev.app
+```
+
+本地 Release 构建产物位于 `build/`：
+
+```text
+build/DerivedData/Build/Products/Release/QLaunchpad.app
+build/QLaunchpad-<version>.dmg
+build/QLaunchpad-<version>.zip
+```
+
+发布前可在 `.env` 配置：
+
+```sh
+MACOS_SIGNING_IDENTITY=Developer ID Application: Your Name (TEAMID)
+APPLE_ID=your-apple-id@example.com
+APPLE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx
+APPLE_TEAM_ID=XXXXXXXXXX
+QLAUNCHPAD_NOTARY_PROFILE=QLaunchpad-notary
+GITHUB_REPOSITORY=qzrzz/QLaunchpad
+```
+
+`bun run release -- 1.0.1` 可指定版本号；每次 Release 构建会递增 `package.json` 中的 `buildNumber`。正式发布需要 Developer ID Application 证书、公证凭据和已登录的 `gh`。
+
+## 架构
+
+```
+AppDelegate          NSPanel 生命周期、热键、状态栏、fade 展示
+LaunchpadContainer   背景 + Metal 网格 + SwiftUI 覆盖层
+DesktopBackground    CIGaussianBlur 壁纸
+LaunchpadMetalView   图标 / 标签实例化绘制、DisplayLink 动画、翻页
+AppStore             扫描结果、搜索、分页状态机、展示状态
+```
+
+后续可扩展：登录项、图标变更监听、持久化排序；建议继续保持 AppKit / SwiftUI / Metal 边界清晰。

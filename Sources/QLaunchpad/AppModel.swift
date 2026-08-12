@@ -1,0 +1,717 @@
+import AppKit
+import Combine
+import Foundation
+
+enum QLaunchpadPreferences {
+    static let showMenuBarIconKey = "showMenuBarIcon"
+    static let showDockIconKey = "showDockIcon"
+
+    // Preserve the existing status-bar entry for users upgrading from the
+    // original build, while keeping the Dock hidden unless explicitly enabled.
+    static let defaultShowMenuBarIcon = true
+    static let defaultShowDockIcon = false
+}
+
+enum LaunchpadHotKeyPreferences {
+    static let keyCodeKey = "launchpadHotKeyCode"
+    static let modifiersKey = "launchpadHotKeyModifiers"
+    static let defaultKeyCode = 49 // Space
+    static let defaultModifiers = Int(NSEvent.ModifierFlags.command.rawValue)
+
+    static var keyCode: UInt16 {
+        UInt16(UserDefaults.standard.object(forKey: keyCodeKey) as? Int ?? defaultKeyCode)
+    }
+
+    static var modifiers: NSEvent.ModifierFlags {
+        let rawValue = UserDefaults.standard.object(forKey: modifiersKey) as? Int
+            ?? defaultModifiers
+        return NSEvent.ModifierFlags(rawValue: UInt(rawValue))
+    }
+
+    static func matches(_ event: NSEvent) -> Bool {
+        event.type == .keyDown
+            && event.keyCode == keyCode
+            && event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                == modifiers.intersection(.deviceIndependentFlagsMask)
+    }
+
+    static func displayName(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> String {
+        let modifierName = [
+            (NSEvent.ModifierFlags.control, "⌃"),
+            (NSEvent.ModifierFlags.option, "⌥"),
+            (NSEvent.ModifierFlags.shift, "⇧"),
+            (NSEvent.ModifierFlags.command, "⌘")
+        ]
+        .filter { modifiers.contains($0.0) }
+        .map(\.1)
+        .joined()
+
+        let keyName: String
+        switch keyCode {
+        case 49: keyName = "Space"
+        case 36: keyName = "Return"
+        case 48: keyName = "Tab"
+        case 51: keyName = "Delete"
+        case 53: keyName = "Esc"
+        case 123: keyName = "←"
+        case 124: keyName = "→"
+        case 125: keyName = "↓"
+        case 126: keyName = "↑"
+        case 122: keyName = "F1"
+        case 120: keyName = "F2"
+        case 99: keyName = "F3"
+        case 118: keyName = "F4"
+        case 96: keyName = "F5"
+        case 97: keyName = "F6"
+        case 98: keyName = "F7"
+        case 100: keyName = "F8"
+        case 101: keyName = "F9"
+        case 109: keyName = "F10"
+        case 103: keyName = "F11"
+        case 111: keyName = "F12"
+        default:
+            keyName = [
+                0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
+                8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y",
+                17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5",
+                24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0", 30: "]", 31: "O",
+                32: "U", 33: "[", 34: "I", 35: "P", 37: "L", 38: "J", 39: "'", 40: "K",
+                41: ";", 42: "\\", 43: ",", 44: "/", 45: "N", 46: "M", 47: ".", 50: "`"
+            ][Int(keyCode)] ?? "Key \(keyCode)"
+        }
+        return modifierName + keyName
+    }
+}
+
+struct AppInfo: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let url: URL
+    let bundleIdentifier: String
+}
+
+struct AppIconCache {
+    /// `NSWorkspace` is already backed by the system icon cache. Returning the
+    /// original multi-representation image preserves its ICC profile until the
+    /// renderer performs the single linear Display P3 rasterization.
+    func image(for app: AppInfo, size: CGFloat = 512) -> NSImage {
+        let source = NSWorkspace.shared.icon(forFile: app.url.path)
+        return (source.copy() as? NSImage) ?? source
+    }
+}
+
+enum AppScanner {
+    static func scan(additionalRoots: [URL] = []) -> [AppInfo] {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        let roots = [
+            URL(fileURLWithPath: "/Applications"),
+            URL(fileURLWithPath: "/System/Applications"),
+            URL(fileURLWithPath: "/System/Applications/Utilities"),
+            home.appendingPathComponent("Applications")
+        ] + additionalRoots
+
+        var apps: [AppInfo] = []
+        var seen = Set<String>()
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .localizedNameKey]
+
+        for root in roots where fileManager.fileExists(atPath: root.path) {
+            guard let enumerator = fileManager.enumerator(
+                at: root,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            ) else { continue }
+
+            for case let url as URL in enumerator {
+                guard url.pathExtension == "app" else { continue }
+                guard let bundle = Bundle(url: url),
+                      let identifier = bundle.bundleIdentifier,
+                      !seen.contains(identifier) else { continue }
+                // Skip background-only / agent helpers without a UI when possible.
+                if let bgOnly = bundle.object(forInfoDictionaryKey: "LSBackgroundOnly") as? Bool, bgOnly {
+                    continue
+                }
+                if let uiElement = bundle.object(forInfoDictionaryKey: "LSUIElement") as? Bool, uiElement {
+                    // Still allow menu-bar apps that users expect to launch.
+                }
+                let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                    ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                    ?? url.deletingPathExtension().lastPathComponent
+                seen.insert(identifier)
+                apps.append(AppInfo(id: identifier, name: name, url: url, bundleIdentifier: identifier))
+            }
+        }
+
+        return apps.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+}
+
+// MARK: - Presentation state (fade / scale window)
+
+enum LaunchpadPresentation: Equatable {
+    case hidden
+    case presenting
+    case visible
+    case dismissing
+}
+
+enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
+    case fly
+    case zoom
+    case fade
+    case none
+
+    static let defaultsKey = "presentationAnimationStyle"
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .fly: "飞入"
+        case .zoom: "放大"
+        case .fade: "渐入"
+        case .none: "无"
+        }
+    }
+
+    var duration: CFTimeInterval {
+        switch self {
+        case .fly: 1.3
+        case .zoom: 0.62
+        case .fade: 0.26
+        case .none: 0
+        }
+    }
+
+    var dismissalDuration: CFTimeInterval {
+        switch self {
+        case .fly: 0.48
+        case .zoom: 0.22
+        case .fade: 0.25
+        case .none: 0
+        }
+    }
+
+    static var current: Self {
+        guard let rawValue = UserDefaults.standard.string(forKey: defaultsKey),
+              let style = Self(rawValue: rawValue) else {
+            return .fly
+        }
+        return style
+    }
+}
+
+enum GridNavigationDirection {
+    case left
+    case right
+    case up
+    case down
+}
+
+// MARK: - App store + paging
+
+@MainActor
+final class AppStore: ObservableObject {
+    @Published private(set) var apps: [AppInfo] = []
+    @Published private(set) var filteredApps: [AppInfo] = []
+    @Published private(set) var searchText = ""
+    @Published private(set) var isLoading = true
+    @Published private(set) var keyboardFocusID: String?
+    @Published private(set) var isKeyboardNavigationActive = false
+    @Published private(set) var hiddenAppIDs: Set<String>
+    @Published private(set) var customApplicationSourcePaths: [String]
+    @Published var showHiddenAppsInSearch: Bool {
+        didSet {
+            UserDefaults.standard.set(showHiddenAppsInSearch, forKey: Self.showHiddenAppsKey)
+            refreshFilteredApps(resetPage: true)
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        }
+    }
+
+    /// Continuous page position (0 = first page). Driven by scroll + spring settle.
+    @Published var pageOffset: Double = 0
+
+    /// Target page used for snapping after a gesture ends.
+    @Published private(set) var targetPage: Double = 0
+
+    /// 0…1 presentation progress for window fade / content scale-in.
+    @Published var presentationProgress: CGFloat = 0
+
+    @Published private(set) var presentation: LaunchpadPresentation = .hidden
+
+    /// Horizontal page velocity in pages/second (trackpad momentum).
+    private(set) var pageVelocity: Double = 0
+
+    /// `true` while the user is actively scrolling (finger / wheel phase).
+    @Published private(set) var isPageGestureActive = false
+
+    var pageCapacity: Int { GridMetrics.pageCapacity }
+    private var scrollAccumulated: Double = 0
+    private var lastScrollTime: CFTimeInterval = 0
+    private var scanTask: Task<Void, Never>?
+
+    /// Points of scroll delta that equal one full page turn.
+    private let pageScrollUnit: Double = 320
+
+    private static let hiddenAppsKey = "hiddenAppIdentifiers"
+    private static let customSourcesKey = "customApplicationSourcePaths"
+    private static let showHiddenAppsKey = "showHiddenAppsInSearch"
+
+    init() {
+        let defaults = UserDefaults.standard
+        hiddenAppIDs = Set(defaults.stringArray(forKey: Self.hiddenAppsKey) ?? [])
+        customApplicationSourcePaths = defaults.stringArray(forKey: Self.customSourcesKey) ?? []
+        showHiddenAppsInSearch = defaults.bool(forKey: Self.showHiddenAppsKey)
+    }
+
+    deinit {
+        scanTask?.cancel()
+    }
+
+    var pageCount: Int {
+        max(1, Int(ceil(Double(max(filteredApps.count, 1)) / Double(pageCapacity))))
+    }
+
+    var currentPage: Int {
+        min(max(Int(pageOffset.rounded()), 0), max(pageCount - 1, 0))
+    }
+
+    var isSearching: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var isPresented: Bool {
+        presentation == .visible || presentation == .presenting
+    }
+
+    var focusedApp: AppInfo? {
+        guard let keyboardFocusID else { return nil }
+        return filteredApps.first { $0.id == keyboardFocusID }
+    }
+
+    var hiddenApps: [AppInfo] {
+        apps.filter { hiddenAppIDs.contains($0.id) }
+    }
+
+    func load() {
+        // A detached scan cannot be stopped reliably once it has started.
+        // Ignore duplicate requests instead of allowing two filesystem scans
+        // to run at the same time.
+        guard scanTask == nil else { return }
+
+        isLoading = true
+        let additionalRoots = customApplicationSourcePaths.map { URL(fileURLWithPath: $0) }
+        scanTask = Task { @MainActor [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                AppScanner.scan(additionalRoots: additionalRoots)
+            }.value
+            guard let self else { return }
+            apps = result
+            refreshFilteredApps(resetPage: true)
+            isLoading = false
+            scanTask = nil
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        }
+    }
+
+    func updateSearch(_ text: String) {
+        searchText = text
+        isKeyboardNavigationActive = false
+        refreshFilteredApps(resetPage: true)
+    }
+
+    func applyGridLayoutChange() {
+        pageOffset = 0
+        targetPage = 0
+        pageVelocity = 0
+        scrollAccumulated = 0
+        isPageGestureActive = false
+        keyboardFocusID = nil
+        isKeyboardNavigationActive = false
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func hide(_ app: AppInfo) {
+        hiddenAppIDs.insert(app.id)
+        persistHiddenApps()
+        refreshFilteredApps(resetPage: false)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func unhide(_ app: AppInfo) {
+        hiddenAppIDs.remove(app.id)
+        persistHiddenApps()
+        refreshFilteredApps(resetPage: false)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func addApplicationSource(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        guard !customApplicationSourcePaths.contains(path) else { return }
+        customApplicationSourcePaths.append(path)
+        persistApplicationSources()
+        load()
+    }
+
+    func removeApplicationSource(at offsets: IndexSet) {
+        for index in offsets.sorted(by: >) where customApplicationSourcePaths.indices.contains(index) {
+            customApplicationSourcePaths.remove(at: index)
+        }
+        persistApplicationSources()
+        load()
+    }
+
+    // MARK: Keyboard focus
+
+    func focusApp(id: String) {
+        guard filteredApps.contains(where: { $0.id == id }) else { return }
+        keyboardFocusID = id
+        isKeyboardNavigationActive = false
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func focusFirstAppOnCurrentPage() {
+        guard !filteredApps.isEmpty else {
+            keyboardFocusID = nil
+            return
+        }
+        let start = min(currentPage * pageCapacity, filteredApps.count - 1)
+        keyboardFocusID = filteredApps[start].id
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func moveKeyboardFocus(_ direction: GridNavigationDirection) {
+        guard !filteredApps.isEmpty else {
+            keyboardFocusID = nil
+            isKeyboardNavigationActive = false
+            return
+        }
+
+        // The first arrow key reveals the current-page focus without moving it.
+        // Until then the implicit candidate remains invisible.
+        if !isKeyboardNavigationActive {
+            isKeyboardNavigationActive = true
+            let start = min(currentPage * pageCapacity, filteredApps.count - 1)
+            keyboardFocusID = filteredApps[start].id
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+            return
+        }
+
+        let fallback = min(currentPage * pageCapacity, filteredApps.count - 1)
+        let current = keyboardFocusID.flatMap { id in
+            filteredApps.firstIndex { $0.id == id }
+        } ?? fallback
+        let page = current / pageCapacity
+        let pageStart = page * pageCapacity
+        let pageEnd = min(pageStart + pageCapacity, filteredApps.count)
+        let local = current - pageStart
+        let row = local / GridMetrics.columns
+        let column = local % GridMetrics.columns
+        var destination = current
+
+        switch direction {
+        case .left:
+            if column > 0 {
+                destination = current - 1
+            } else if page > 0 {
+                let previousStart = (page - 1) * pageCapacity
+                let previousEnd = min(previousStart + pageCapacity, filteredApps.count)
+                destination = min(previousStart + row * GridMetrics.columns + GridMetrics.columns - 1,
+                                  previousEnd - 1)
+            }
+        case .right:
+            if column + 1 < GridMetrics.columns, current + 1 < pageEnd {
+                destination = current + 1
+            } else if page + 1 < pageCount {
+                let nextStart = (page + 1) * pageCapacity
+                destination = min(nextStart + row * GridMetrics.columns, filteredApps.count - 1)
+            }
+        case .up:
+            if row > 0 {
+                destination = current - GridMetrics.columns
+            }
+        case .down:
+            if current + GridMetrics.columns < pageEnd {
+                destination = current + GridMetrics.columns
+            }
+        }
+
+        keyboardFocusID = filteredApps[destination].id
+        let destinationPage = destination / pageCapacity
+        if destinationPage != currentPage {
+            goToPage(destinationPage)
+        } else {
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        }
+    }
+
+    // MARK: Paging
+
+    /// Discrete page step (keyboard / indicator).
+    /// Logical offset updates immediately; Metal springs the visual position.
+    func goToPage(_ page: Int, animated: Bool = true) {
+        let clamped = min(max(page, 0), pageCount - 1)
+        targetPage = Double(clamped)
+        pageVelocity = 0
+        isPageGestureActive = false
+        pageOffset = targetPage
+        ensureKeyboardFocus(onPage: clamped)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func movePage(byPages delta: Int) {
+        goToPage(currentPage + delta)
+    }
+
+    // MARK: Mouse drag pan (empty area)
+
+    /// Begin a click-drag page pan on empty background.
+    func beginPagePan() {
+        isKeyboardNavigationActive = false
+        isPageGestureActive = true
+        pageVelocity = 0
+        lastScrollTime = CACurrentMediaTime()
+        scrollAccumulated = 0
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// Update pan by a fractional page delta (same rubber-band rules as scroll).
+    /// Positive delta → next page (content moves left).
+    func updatePagePan(deltaPages: Double) {
+        let now = CACurrentMediaTime()
+        let dt = max(1.0 / 240.0, min(now - lastScrollTime, 1.0 / 20.0))
+        lastScrollTime = now
+
+        isPageGestureActive = true
+        let proposed = pageOffset + deltaPages
+        let minPage = 0.0
+        let maxPage = Double(max(pageCount - 1, 0))
+        if proposed < minPage {
+            pageOffset = minPage - rubberBand(minPage - proposed)
+        } else if proposed > maxPage {
+            pageOffset = maxPage + rubberBand(proposed - maxPage)
+        } else {
+            pageOffset = proposed
+        }
+        scrollAccumulated += deltaPages
+        pageVelocity = deltaPages / dt
+        targetPage = pageOffset
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// End pan and snap to a page (velocity-biased).
+    func endPagePan() {
+        isPageGestureActive = false
+        settlePage(withVelocity: pageVelocity)
+    }
+
+    /// Continuous trackpad / mouse-wheel paging with phase awareness.
+    func handleScroll(
+        deltaX: CGFloat,
+        deltaY: CGFloat,
+        phase: NSEvent.Phase,
+        momentumPhase: NSEvent.Phase,
+        isPrecise: Bool
+    ) {
+        isKeyboardNavigationActive = false
+        let primary = abs(deltaX) >= abs(deltaY) ? deltaX : deltaY
+        guard abs(primary) > 0.01 else { return }
+
+        let now = CACurrentMediaTime()
+        let dt = max(1.0 / 240.0, min(now - lastScrollTime, 1.0 / 20.0))
+        lastScrollTime = now
+
+        // Convert pixel/line delta into fractional pages. Negative scroll = next page (content moves left).
+        let unit = isPrecise ? pageScrollUnit : pageScrollUnit * 0.35
+        let pageDelta = Double(-primary) / unit
+
+        let began = phase.contains(.began)
+            || (phase == [] && momentumPhase == [] && !isPageGestureActive && !isPrecise)
+        let ended = phase.contains(.ended) || phase.contains(.cancelled)
+        let momentumEnded = momentumPhase.contains(.ended) || momentumPhase.contains(.cancelled)
+        let inMomentum = momentumPhase.contains(.began) || momentumPhase.contains(.changed)
+        let inGesture = phase.contains(.changed) || began || inMomentum || isPageGestureActive
+
+        if began {
+            isPageGestureActive = true
+            scrollAccumulated = 0
+            pageVelocity = 0
+        }
+
+        if inGesture || inMomentum {
+            isPageGestureActive = true
+            // Rubber-band past ends while the gesture is live.
+            let proposed = pageOffset + pageDelta
+            let minPage = 0.0
+            let maxPage = Double(max(pageCount - 1, 0))
+            if proposed < minPage {
+                let overflow = minPage - proposed
+                pageOffset = minPage - rubberBand(overflow)
+            } else if proposed > maxPage {
+                let overflow = proposed - maxPage
+                pageOffset = maxPage + rubberBand(overflow)
+            } else {
+                pageOffset = proposed
+            }
+            scrollAccumulated += pageDelta
+            pageVelocity = pageDelta / dt
+            targetPage = pageOffset
+        }
+
+        // Mouse wheel (non-precise): snap after each notch.
+        if !isPrecise && phase == [] && momentumPhase == [] {
+            isPageGestureActive = false
+            settlePage(withVelocity: pageDelta > 0 ? 1.2 : -1.2)
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+            return
+        }
+
+        if ended || momentumEnded {
+            isPageGestureActive = false
+            settlePage(withVelocity: pageVelocity)
+        }
+
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// Snap to nearest page, biased by flick velocity (Launchpad-style).
+    /// Logical `pageOffset` jumps to the target; the Metal layer springs visually.
+    func settlePage(withVelocity velocity: Double = 0) {
+        let minPage = 0.0
+        let maxPage = Double(max(pageCount - 1, 0))
+        var page = pageOffset
+
+        // Flick threshold ≈ 0.85 pages/sec.
+        if velocity > 0.85 {
+            page = floor(pageOffset + 0.08) + 1
+        } else if velocity < -0.85 {
+            page = ceil(pageOffset - 0.08) - 1
+        } else {
+            page = pageOffset.rounded()
+        }
+
+        targetPage = min(max(page, minPage), maxPage)
+        pageOffset = targetPage
+        pageVelocity = 0
+        isPageGestureActive = false
+        ensureKeyboardFocus(onPage: Int(targetPage))
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// Legacy helper used by metal settle timer fallback.
+    func settlePage() {
+        settlePage(withVelocity: pageVelocity)
+    }
+
+    func movePage(by delta: Double) {
+        let minPage = 0.0
+        let maxPage = Double(max(pageCount - 1, 0))
+        pageOffset = min(max(pageOffset + delta, minPage - 0.15), maxPage + 0.15)
+        targetPage = pageOffset
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    private func rubberBand(_ overflow: Double) -> Double {
+        // Classic rubber-band: diminishing return past the edge.
+        let c = 0.55
+        return (1 - 1 / (overflow * c + 1)) * 0.35
+    }
+
+    private func ensureKeyboardFocus(onPage page: Int) {
+        guard !filteredApps.isEmpty else {
+            keyboardFocusID = nil
+            return
+        }
+        if let id = keyboardFocusID,
+           let index = filteredApps.firstIndex(where: { $0.id == id }),
+           index / pageCapacity == page {
+            return
+        }
+        let start = min(page * pageCapacity, filteredApps.count - 1)
+        keyboardFocusID = filteredApps[start].id
+    }
+
+    // MARK: Reorder
+
+    func moveApp(from source: Int, to destination: Int) {
+        guard !isSearching,
+              filteredApps.indices.contains(source), filteredApps.indices.contains(destination),
+              source != destination,
+              let sourceIndex = apps.firstIndex(of: filteredApps[source]),
+              let destinationIndex = apps.firstIndex(of: filteredApps[destination]) else {
+            return
+        }
+        let item = apps.remove(at: sourceIndex)
+        apps.insert(item, at: min(destinationIndex, apps.endIndex))
+        refreshFilteredApps(resetPage: false)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    // MARK: Presentation
+
+    func beginPresenting() {
+        presentation = .presenting
+        presentationProgress = 0
+        isKeyboardNavigationActive = false
+        focusFirstAppOnCurrentPage()
+    }
+
+    func markVisible() {
+        presentation = .visible
+        presentationProgress = 1
+    }
+
+    func beginDismissing() {
+        presentation = .dismissing
+    }
+
+    func markHidden() {
+        presentation = .hidden
+        presentationProgress = 0
+        isKeyboardNavigationActive = false
+        // Clear search when closed so next open shows full grid.
+        if !searchText.isEmpty {
+            updateSearch("")
+        }
+    }
+
+    private func normalized(_ value: String) -> String {
+        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+    }
+
+    private func refreshFilteredApps(resetPage: Bool) {
+        let query = normalized(searchText.trimmingCharacters(in: .whitespacesAndNewlines))
+        filteredApps = apps.filter { app in
+            let isHidden = hiddenAppIDs.contains(app.id)
+            if isHidden && (query.isEmpty || !showHiddenAppsInSearch) {
+                return false
+            }
+            return query.isEmpty
+                || normalized(app.name).contains(query)
+                || normalized(app.bundleIdentifier).contains(query)
+        }
+
+        if resetPage {
+            pageOffset = 0
+            targetPage = 0
+            pageVelocity = 0
+        } else {
+            let lastPage = Double(max(pageCount - 1, 0))
+            pageOffset = min(pageOffset, lastPage)
+            targetPage = min(targetPage, lastPage)
+        }
+        keyboardFocusID = filteredApps.first?.id
+    }
+
+    private func persistHiddenApps() {
+        UserDefaults.standard.set(hiddenAppIDs.sorted(), forKey: Self.hiddenAppsKey)
+    }
+
+    private func persistApplicationSources() {
+        UserDefaults.standard.set(customApplicationSourcePaths, forKey: Self.customSourcesKey)
+    }
+
+}
