@@ -56,7 +56,8 @@ private struct SpriteInstance {
 
 private struct FrameUniforms {
     var viewport: SIMD2<Float>
-    var _pad: SIMD2<Float> = .zero
+    /// x: icon filter mode (1 = quality binomial, 0 = performance).
+    var mode: SIMD2<Float> = .zero
 }
 
 private struct TextBatch {
@@ -100,6 +101,16 @@ private struct TextAtlasSignature: Equatable, Sendable {
     }
 }
 
+/// Identity of the icon GPU cache window (catalog + visible list + page + quality).
+private struct IconPrewarmSignature: Equatable, Sendable {
+    let catalog: AppListSignature
+    /// Root / folder / search list currently shown (search changes this without
+    /// changing the full catalog).
+    let display: AppListSignature
+    let page: Int
+    let quality: String
+}
+
 /// Reusable GPU storage for one in-flight frame. A slot is not written again
 /// until Metal completes the command buffer that references it.
 private final class FrameResources {
@@ -126,12 +137,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var textSampler: MTLSamplerState!
 
     private var currentPageOffset = 0.0
+    private var lastRenderQuality = IconRenderQuality.current
     private var lastCatalogSignature: AppListSignature?
     private var lastTextSignature: TextAtlasSignature?
     private var lastFrameTime = CACurrentMediaTime()
-    private var resourcePrewarmSignature: AppListSignature?
+    /// Prewarm only a sliding page window — full-catalog upload was hundreds of MB.
+    private var resourcePrewarmSignature: IconPrewarmSignature?
     private var resourcePrewarmTask: Task<Void, Never>?
     private var isResourcePrewarmingPaused = false
+    private var lastTextureWindowPage: Int = -1
     private var firstFrameWaiters: [() -> Void] = []
     private var isFirstFrameCompletionScheduled = false
 
@@ -302,6 +316,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             self, selector: #selector(clearCacheRequested),
             name: .qlaunchpadCacheClearRequested, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(renderQualityChanged),
+            name: .qlaunchpadRenderQualityChanged, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(iconTexturesUpdated),
+            name: .qlaunchpadIconTexturesUpdated, object: nil
+        )
     }
 
     required init(coder: NSCoder) {
@@ -327,7 +349,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     };
     struct Uniforms {
         float2 viewport;
-        float2 pad;
+        // x: 1 = quality (4×4 binomial), 0 = performance (bilinear)
+        float2 mode;
     };
     struct VertexOut {
         float4 position [[position]];
@@ -380,23 +403,44 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return float4(0.0, 0.0, 0.0, a);
         }
 
-        // High-quality 4x4 separable binomial reconstruction over premultiplied
-        // linear-P3 values. Positive [1, 3, 3, 1]^2 weights avoid the ringing
-        // that negative-lobe filters such as Lanczos can create around alpha.
-        const float offsets[4] = { -0.75, -0.25, 0.25, 0.75 };
-        const float weights[4] = { 1.0, 3.0, 3.0, 1.0 };
-        float2 pixelDx = dfdx(in.uv);
-        float2 pixelDy = dfdy(in.uv);
-        float4 c = float4(0.0);
-        for (uint y = 0; y < 4; ++y) {
-            for (uint x = 0; x < 4; ++x) {
-                float2 sampleUV = in.uv
-                    + pixelDx * offsets[x]
-                    + pixelDy * offsets[y];
-                c += atlas.sample(samp, sampleUV) * weights[x] * weights[y];
+        // sample(): quality = rgba16Float linear; performance = rgba8Unorm linear
+        // (same light domain — no sRGB decode).
+        float4 c;
+        if (u.mode.x > 0.5) {
+            // Quality: 4x linear float16 + 4×4 separable binomial in screen space.
+            const float offsets[4] = { -0.75, -0.25, 0.25, 0.75 };
+            const float weights[4] = { 1.0, 3.0, 3.0, 1.0 };
+            float2 pixelDx = dfdx(in.uv);
+            float2 pixelDy = dfdy(in.uv);
+            c = float4(0.0);
+            for (uint y = 0; y < 4; ++y) {
+                for (uint x = 0; x < 4; ++x) {
+                    float2 sampleUV = in.uv
+                        + pixelDx * offsets[x]
+                        + pixelDy * offsets[y];
+                    c += atlas.sample(samp, sampleUV) * weights[x] * weights[y];
+                }
+            }
+            c *= (1.0 / 64.0);
+        } else {
+            // Performance: 2x linear 8-bit — hardware bilinear, already linear light.
+            // Multi-tap when clearly minifying (entrance scale / zoom).
+            float2 texSize = float2(atlas.get_width(), atlas.get_height());
+            float2 uvDx = dfdx(in.uv);
+            float2 uvDy = dfdy(in.uv);
+            float footprint = max(length(uvDx * texSize), length(uvDy * texSize));
+            if (footprint <= 1.4) {
+                c = atlas.sample(samp, in.uv);
+            } else {
+                const float o = 0.3;
+                c = (
+                    atlas.sample(samp, in.uv + uvDx * (-o) + uvDy * (-o))
+                  + atlas.sample(samp, in.uv + uvDx * ( o) + uvDy * (-o))
+                  + atlas.sample(samp, in.uv + uvDx * (-o) + uvDy * ( o))
+                  + atlas.sample(samp, in.uv + uvDx * ( o) + uvDy * ( o))
+                ) * 0.25;
             }
         }
-        c *= (1.0 / 64.0);
         float pressed = (in.kind > 1.5 && in.kind < 2.5) ? 0.4 : 1.0;
         // Pressed brightness is a real premultiplied opacity, not an RGB-only
         // darkening. Keeping RGB and alpha on the same curve prevents a launched
@@ -685,13 +729,64 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     @objc private func storeChanged() {
-        scheduleResourcePrewarmingIfNeeded()
+        resourcePrewarmSignature = nil
+        scheduleResourcePrewarmingIfNeeded(prune: true)
         startDisplayLink()
         needsDisplay = true
     }
 
     @objc private func settingsChanged() {
+        if IconRenderQuality.current != lastRenderQuality {
+            applyRenderQualityChange()
+            return
+        }
         needsDisplay = true
+    }
+
+    @objc private func renderQualityChanged() {
+        applyRenderQualityChange()
+    }
+
+    @objc private func iconTexturesUpdated() {
+        // Background bakes finished — paint without doing work on this path.
+        needsDisplay = true
+        startDisplayLink()
+    }
+
+    /// Rebuild icon textures at the active scale and redraw immediately so
+    /// Settings changes are visible under the settings window without relaunch.
+    private func applyRenderQualityChange() {
+        let quality = IconRenderQuality.current
+        lastRenderQuality = quality
+
+        pauseResourcePrewarming()
+        iconTextures.resetForRenderQualityChange()
+        folderIconTextures.clear()
+        lastCatalogSignature = nil
+        resourcePrewarmSignature = nil
+        isResourcePrewarmingPaused = false
+
+        // Bake the currently visible page on the main thread so the next frame
+        // already shows the new quality instead of empty placeholders.
+        let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
+        let page = max(0, Int(currentPageOffset.rounded()))
+        let capacity = max(store.pageCapacity, 1)
+        let start = min(items.count, page * capacity)
+        let end = min(items.count, start + capacity)
+        if start < end {
+            for item in items[start..<end] {
+                _ = iconTexture(for: item, allowCreate: true)
+            }
+        }
+
+        scheduleResourcePrewarmingIfNeeded(prune: true)
+        startDisplayLink()
+        needsDisplay = true
+        // MTKView is paused; force one draw now so the Launchpad under Settings
+        // updates without waiting for the next event loop tick.
+        if window != nil, bounds.width > 1, bounds.height > 1 {
+            draw()
+        }
     }
 
     @objc private func clearCacheRequested() {
@@ -702,8 +797,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         lastCatalogSignature = nil
         lastTextSignature = nil
         resourcePrewarmSignature = nil
+        lastTextureWindowPage = -1
         isResourcePrewarmingPaused = false
-        scheduleResourcePrewarmingIfNeeded()
+        scheduleResourcePrewarmingIfNeeded(prune: true)
         startDisplayLink()
         needsDisplay = true
     }
@@ -713,7 +809,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let style = (note.userInfo?["animationStyle"] as? String)
             .flatMap(LaunchpadAnimationStyle.init(rawValue:))
             ?? (showing ? LaunchpadAnimationStyle.current : presentationStyle)
-        pauseResourcePrewarming()
         presentationStyle = style
         isShowingPresentation = showing
         stationaryDismissedAppID = showing
@@ -723,23 +818,81 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if showing {
             presentFrom = 0
             presentTo = 1
+            // Unpause immediately so resident caches can be used / topped up
+            // during the open animation (do not wait until animation end).
+            isResourcePrewarmingPaused = false
+            if !IconRenderQuality.current.usesLazyTextureLoading {
+                iconTextures.setAllowedAppIDs(nil)
+            }
+            scheduleResourcePrewarmingIfNeeded(
+                prune: IconRenderQuality.current.usesLazyTextureLoading
+            )
         } else {
             presentFrom = store.presentationProgress
             presentTo = 0
+            pauseResourcePrewarming()
         }
         let fullDuration = showing ? style.duration : style.dismissalDuration
         presentDurationActive = fullDuration * CFTimeInterval(abs(presentTo - presentFrom))
         if presentDurationActive <= 0.0001 {
             animatingPresentation = false
             applyPresentationPhase(presentTo)
-            if showing { store.markVisible() }
-            resumeResourcePrewarming()
+            if showing {
+                store.markVisible()
+                resumeResourcePrewarming()
+            } else {
+                releaseIconGPUResources()
+            }
             needsDisplay = true
             return
         }
         animatingPresentation = true
         startDisplayLink()
         needsDisplay = true
+    }
+
+    /// On hide: reclaim memory without making the next open wait for a full re-bake.
+    /// - Quality / performance: keep **all** resident icon textures (fluency first).
+    /// - Low memory: keep only the **current page**, drop the rest.
+    private func releaseIconGPUResources() {
+        pauseResourcePrewarming()
+        resourcePrewarmTask = nil
+        isResourcePrewarmingPaused = true
+
+        let quality = IconRenderQuality.current
+        if !quality.usesLazyTextureLoading {
+            // Resident modes: leave the GPU cache intact so reopen is instant.
+            // Only stop background work while hidden. Clear the prewarm signature
+            // so an interrupted full-catalog bake can resume (cache hits are free).
+            iconTextures.setAllowedAppIDs(nil)
+            resourcePrewarmSignature = nil
+            return
+        }
+
+        let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
+        let page = max(0, Int(currentPageOffset.rounded()))
+        let window = iconCacheWindow(around: page, items: items, radius: 0)
+        pruneIconTextureCaches(appIDs: window.appIDs, folderIDs: window.folderIDs)
+        lastTextureWindowPage = page
+
+        // Keep labels for the same page; drop other glyph sheets via rebuild.
+        let capacity = max(store.pageCapacity, 1)
+        let start = min(items.count, page * capacity)
+        let end = min(items.count, start + capacity)
+        let pageItems = start < end ? Array(items[start..<end]) : []
+        let labelApps = textAtlasApps(for: pageItems)
+        if labelApps.isEmpty {
+            textAtlas.clear()
+            lastTextSignature = nil
+        } else {
+            let scale = windowScale
+            let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
+            textAtlas.rebuild(with: labelApps, scale: scale)
+            lastTextSignature = textSignature
+        }
+
+        // Low-memory: re-plan neighbor prewarm on next show; keep current-page cache.
+        resourcePrewarmSignature = nil
     }
 
     private func applyPresentationPhase(_ phase: CGFloat) {
@@ -785,25 +938,58 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         isPrimingPresentationFrame = true
         presentationStyle = style
         applyPresentationPhase(0)
-        pauseResourcePrewarming()
+        // Do not clear textures here. Resume residency so a second open can paint
+        // from cache immediately (especially quality / performance modes).
+        isResourcePrewarmingPaused = false
+        if !IconRenderQuality.current.usesLazyTextureLoading {
+            iconTextures.setAllowedAppIDs(nil)
+        }
+        scheduleResourcePrewarmingIfNeeded(prune: IconRenderQuality.current.usesLazyTextureLoading)
         startDisplayLink()
         needsDisplay = true
     }
 
-    /// Warm page one first, then continue through the remaining catalog on a
-    /// utility-priority worker so later page turns never synchronously decode icons.
-    private func scheduleResourcePrewarmingIfNeeded() {
+    /// Prewarm icon GPU resources according to the active render-quality profile.
+    /// - Quality / performance: full-catalog resident (smooth paging).
+    /// - Low memory: page-window lazy load + prune.
+    private func scheduleResourcePrewarmingIfNeeded(
+        around page: Int? = nil,
+        prune: Bool = true
+    ) {
         guard !isResourcePrewarmingPaused else { return }
+        let quality = IconRenderQuality.current
+        if quality.usesLazyTextureLoading {
+            scheduleLazyResourcePrewarming(around: page, prune: prune)
+        } else {
+            scheduleResidentResourcePrewarming()
+        }
+    }
+
+    /// Original-style full-catalog upload for quality & performance modes.
+    private func scheduleResidentResourcePrewarming() {
         let catalog = store.apps
         let visibleApps = store.filteredApps
-        guard !catalog.isEmpty, !visibleApps.isEmpty else { return }
-        let signature = AppListSignature(apps: catalog)
-        guard signature != resourcePrewarmSignature else { return }
-        resourcePrewarmSignature = signature
+        guard !catalog.isEmpty else { return }
 
+        let signature = IconPrewarmSignature(
+            catalog: AppListSignature(apps: catalog),
+            display: AppListSignature(apps: catalog),
+            page: -1,
+            quality: IconRenderQuality.current.rawValue
+        )
+        // Unrestricted baking — always clear the allow-list first so a previous
+        // low-memory session cannot block resident uploads.
+        iconTextures.setAllowedAppIDs(nil)
+
+        // Skip only while the same full-catalog job is already running or done.
+        if signature == resourcePrewarmSignature {
+            return
+        }
+
+        resourcePrewarmSignature = signature
         resourcePrewarmTask?.cancel()
-        iconTextures.rebuild(with: catalog)
-        lastCatalogSignature = signature
+        lastCatalogSignature = signature.catalog
+        lastTextureWindowPage = -1
 
         if displayedItems.isEmpty {
             displayedItems = store.displayItems
@@ -812,49 +998,274 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             contentTransitionAlpha = 1
         }
 
-        let firstPageEnd = min(store.pageCapacity, visibleApps.count)
-        let firstPage = Array(visibleApps[..<firstPageEnd])
-        let firstPageIDs = Set(firstPage.map(\.id))
-        let remaining = catalog.filter { !firstPageIDs.contains($0.id) }
+        let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
+        let capacity = max(store.pageCapacity, 1)
+        let firstPageEnd = min(capacity, visibleApps.isEmpty ? catalog.count : visibleApps.count)
+        let firstPageApps: [AppInfo]
+        if !visibleApps.isEmpty {
+            firstPageApps = Array(visibleApps.prefix(firstPageEnd))
+        } else {
+            firstPageApps = Array(catalog.prefix(firstPageEnd))
+        }
+        let firstPageIDs = Set(firstPageApps.map(\.id))
+        let remainingApps = catalog.filter { !firstPageIDs.contains($0.id) }
+
+        // Bake folder composites for the whole item list (resident).
+        var allFolders: [(AppFolder, [AppInfo])] = []
+        var seenFolders = Set<String>()
+        for item in items {
+            guard case .folder(let folder) = item else { continue }
+            let current = store.folder(withID: folder.id) ?? folder
+            guard seenFolders.insert(current.id).inserted else { continue }
+            let members = current.appIDs.compactMap { store.app(withID: $0) }
+            allFolders.append((current, members))
+        }
+
         let textureStore = iconTextures
+        let folderStore = folderIconTextures
+        let preset = GridLayoutPreset.current
         let scale = windowScale
-        let textSignature = TextAtlasSignature(apps: visibleApps, scale: scale)
+        let labelApps = textAtlasApps(for: items)
+        let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
 
         resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
-            // Page one is deliberately first in the queue.
-            for app in firstPage {
+            for app in firstPageApps {
                 guard !Task.isCancelled else { return }
-                autoreleasepool { _ = textureStore.texture(for: app) }
+                autoreleasepool { _ = textureStore.texture(for: app, allowCreate: true) }
+            }
+            for entry in allFolders {
+                guard !Task.isCancelled else { return }
+                autoreleasepool {
+                    _ = folderStore.texture(
+                        for: entry.0,
+                        members: entry.1,
+                        preset: preset,
+                        allowCreate: true
+                    )
+                }
             }
 
             guard !Task.isCancelled else { return }
             await installPrewarmedTextAtlas(
-                apps: visibleApps,
-                catalogSignature: signature,
+                apps: labelApps,
+                expectedSignature: signature,
                 textSignature: textSignature,
                 scale: scale
             )
 
-            // Decode/upload the other pages incrementally at lower priority.
-            for app in remaining {
+            for app in remainingApps {
                 guard !Task.isCancelled else { return }
-                autoreleasepool { _ = textureStore.texture(for: app) }
+                autoreleasepool { _ = textureStore.texture(for: app, allowCreate: true) }
                 await Task.yield()
             }
 
             guard !Task.isCancelled else { return }
-            await finishResourcePrewarming(catalogSignature: signature)
+            await finishResourcePrewarming(expectedSignature: signature)
         }
+    }
+
+    /// Page-window lazy load used only by「低内存占用」.
+    /// Search uses the active result list (not the root page window), otherwise
+    /// result icons stay blank because they were never allowed into the cache.
+    private func scheduleLazyResourcePrewarming(around page: Int?, prune: Bool) {
+        let catalog = store.apps
+        // Prefer the list about to appear during a content transition.
+        let items: [LaunchpadItem]
+        if contentTransitionPhase == .fadingOut, let pending = pendingDisplayItems {
+            items = pending
+        } else {
+            items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
+        }
+        guard !catalog.isEmpty else { return }
+        // Empty search results still need a signature update so allow-lists reset.
+        let targetPage = max(0, page ?? Int(currentPageOffset.rounded()))
+        let displaySignature = AppListSignature(items: items)
+        let signature = IconPrewarmSignature(
+            catalog: AppListSignature(apps: catalog),
+            display: displaySignature,
+            page: store.isSearching ? -2 : targetPage,
+            quality: IconRenderQuality.current.rawValue
+        )
+
+        // Search: keep the whole result set (capped). Root/folder: page ± 1.
+        let searchCap = max(store.pageCapacity * 6, 48)
+        let window: IconCacheWindow
+        if store.isSearching {
+            window = iconCacheWindow(covering: items, maxCount: searchCap)
+        } else {
+            window = iconCacheWindow(around: targetPage, items: items, radius: 1)
+        }
+
+        if prune {
+            pruneIconTextureCaches(appIDs: window.appIDs, folderIDs: window.folderIDs)
+            lastTextureWindowPage = targetPage
+        } else {
+            iconTextures.expandAllowedAppIDs(window.appIDs)
+        }
+
+        if signature == resourcePrewarmSignature, resourcePrewarmTask != nil {
+            return
+        }
+        if signature == resourcePrewarmSignature, !prune {
+            return
+        }
+
+        resourcePrewarmSignature = signature
+        resourcePrewarmTask?.cancel()
+        lastCatalogSignature = signature.catalog
+
+        if displayedItems.isEmpty {
+            displayedItems = store.displayItems
+            lastDisplaySignature = AppListSignature(items: displayedItems)
+            contentTransitionPhase = .idle
+            contentTransitionAlpha = 1
+        }
+
+        let capacity = max(store.pageCapacity, 1)
+        let pageStart = min(items.count, targetPage * capacity)
+        let pageEnd = min(items.count, pageStart + capacity)
+        let pageItems: [LaunchpadItem]
+        if store.isSearching {
+            // Prioritize the first screen of search hits, then the rest of the cap.
+            pageItems = Array(items.prefix(capacity))
+        } else {
+            pageItems = pageStart < pageEnd ? Array(items[pageStart..<pageEnd]) : []
+        }
+        var pageAppIDs = Set<String>()
+        for item in pageItems {
+            if case .app(let app) = item { pageAppIDs.insert(app.id) }
+        }
+        let priorityApps =
+            window.apps.filter { pageAppIDs.contains($0.id) }
+            + window.apps.filter { !pageAppIDs.contains($0.id) }
+        let priorityFolders = window.folders
+        let textureStore = iconTextures
+        let folderStore = folderIconTextures
+        let preset = GridLayoutPreset.current
+        let scale = windowScale
+        let labelSource = store.isSearching ? Array(items.prefix(searchCap)) : pageItems
+        let labelApps = textAtlasApps(for: labelSource)
+        let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
+
+        resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
+            for app in priorityApps {
+                guard !Task.isCancelled else { return }
+                autoreleasepool { _ = textureStore.texture(for: app, allowCreate: true) }
+            }
+            for entry in priorityFolders {
+                guard !Task.isCancelled else { return }
+                autoreleasepool {
+                    _ = folderStore.texture(
+                        for: entry.folder,
+                        members: entry.members,
+                        preset: preset,
+                        allowCreate: true
+                    )
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+            await installPrewarmedTextAtlas(
+                apps: labelApps,
+                expectedSignature: signature,
+                textSignature: textSignature,
+                scale: scale
+            )
+
+            guard !Task.isCancelled else { return }
+            await finishResourcePrewarming(expectedSignature: signature)
+        }
+    }
+
+    private struct IconCacheWindow {
+        var apps: [AppInfo]
+        var appIDs: Set<String>
+        var folders: [(folder: AppFolder, members: [AppInfo])]
+        var folderIDs: Set<String>
+    }
+
+    private func itemsForPages(
+        around page: Int,
+        radius: Int,
+        in items: [LaunchpadItem]
+    ) -> [LaunchpadItem] {
+        let capacity = max(store.pageCapacity, 1)
+        let startPage = max(0, page - radius)
+        let endPage = page + radius
+        let start = min(items.count, startPage * capacity)
+        let end = min(items.count, (endPage + 1) * capacity)
+        guard start < end else { return [] }
+        return Array(items[start..<end])
+    }
+
+    /// Apps/folders on `[page-radius ... page+radius]` (clamped).
+    private func iconCacheWindow(
+        around page: Int,
+        items: [LaunchpadItem],
+        radius: Int = 1
+    ) -> IconCacheWindow {
+        let capacity = max(store.pageCapacity, 1)
+        let startPage = max(0, page - radius)
+        let endPage = page + radius
+        let start = min(items.count, startPage * capacity)
+        let end = min(items.count, (endPage + 1) * capacity)
+        guard start < end else {
+            return IconCacheWindow(apps: [], appIDs: [], folders: [], folderIDs: [])
+        }
+        return iconCacheWindow(covering: Array(items[start..<end]), maxCount: end - start)
+    }
+
+    /// Flatten an arbitrary item list into a bake/retain window (search results).
+    private func iconCacheWindow(
+        covering items: [LaunchpadItem],
+        maxCount: Int
+    ) -> IconCacheWindow {
+        var apps: [AppInfo] = []
+        var appIDs = Set<String>()
+        var folders: [(AppFolder, [AppInfo])] = []
+        var folderIDs = Set<String>()
+        var seenApps = Set<String>()
+        var counted = 0
+
+        for item in items {
+            guard counted < maxCount else { break }
+            switch item {
+            case .app(let app):
+                if seenApps.insert(app.id).inserted {
+                    apps.append(app)
+                    appIDs.insert(app.id)
+                    counted += 1
+                }
+            case .folder(let folder):
+                let current = store.folder(withID: folder.id) ?? folder
+                if folderIDs.insert(current.id).inserted {
+                    let members = current.appIDs.compactMap { store.app(withID: $0) }
+                    folders.append((current, members))
+                    counted += 1
+                }
+            }
+        }
+        return IconCacheWindow(
+            apps: apps,
+            appIDs: appIDs,
+            folders: folders,
+            folderIDs: folderIDs
+        )
+    }
+
+    private func pruneIconTextureCaches(appIDs: Set<String>, folderIDs: Set<String>) {
+        iconTextures.retainOnly(appIDs: appIDs)
+        folderIconTextures.retainOnly(folderIDs: folderIDs)
     }
 
     private func installPrewarmedTextAtlas(
         apps: [AppInfo],
-        catalogSignature: AppListSignature,
+        expectedSignature: IconPrewarmSignature,
         textSignature: TextAtlasSignature,
         scale: CGFloat
     ) {
         guard !isResourcePrewarmingPaused,
-              resourcePrewarmSignature == catalogSignature else { return }
+              resourcePrewarmSignature == expectedSignature else { return }
         if lastTextSignature != textSignature {
             textAtlas.rebuild(with: apps, scale: scale)
             lastTextSignature = textSignature
@@ -862,9 +1273,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
-    private func finishResourcePrewarming(catalogSignature: AppListSignature) {
+    private func finishResourcePrewarming(expectedSignature: IconPrewarmSignature) {
         guard !isResourcePrewarmingPaused,
-              resourcePrewarmSignature == catalogSignature else { return }
+              resourcePrewarmSignature == expectedSignature else { return }
         resourcePrewarmTask = nil
         needsDisplay = true
     }
@@ -877,9 +1288,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     private func resumeResourcePrewarming() {
         isResourcePrewarmingPaused = false
-        // Restart the ordered queue; already-cached page-one textures are no-ops.
         resourcePrewarmSignature = nil
-        scheduleResourcePrewarmingIfNeeded()
+        scheduleResourcePrewarmingIfNeeded(prune: true)
     }
 
     private func signalFirstFrameRenderedIfNeeded() {
@@ -1074,6 +1484,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 - contentTransitionHalfDuration * already
             startDisplayLink()
         }
+        // Kick low-memory baking for the incoming list (search/folder) during fade-out
+        // so icons are ready when the new grid fades in.
+        if IconRenderQuality.current.usesLazyTextureLoading {
+            resourcePrewarmSignature = nil
+            lastTextureWindowPage = -1
+            isResourcePrewarmingPaused = false
+            scheduleLazyResourcePrewarming(
+                around: max(0, Int(store.pageOffset.rounded())),
+                prune: false
+            )
+        }
     }
 
     private func tickContentTransition(now: CFTimeInterval) {
@@ -1093,6 +1514,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 contentTransitionPhase = .fadingIn
                 contentTransitionStart = now
                 contentTransitionAlpha = 0
+                // Search / folder swaps change the visible app set. Refresh the
+                // low-memory texture window immediately or results stay blank.
+                if IconRenderQuality.current.usesLazyTextureLoading {
+                    resourcePrewarmSignature = nil
+                    lastTextureWindowPage = -1
+                    isResourcePrewarmingPaused = false
+                    scheduleLazyResourcePrewarming(
+                        around: max(0, Int(store.pageOffset.rounded())),
+                        prune: true
+                    )
+                }
             }
         case .fadingIn:
             contentTransitionAlpha = Float(smoothstep(t))
@@ -1110,16 +1542,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     // MARK: Draw
 
     func draw(in view: MTKView) {
-        // A 256pt layout needs a freshly rasterized 1024px icon source. Clear
-        // the previous 512px cache before any new frame can draw it.
+        // Layout / render-quality changes need a matching raster size. Clears
+        // the previous cache when the pixel edge length changes.
         iconTextures.configure(for: GridLayoutPreset.current)
 
-        // Prune icon cache when catalog changes (icons load lazily when drawn).
-        if lastCatalogSignature?.matches(store.apps) != true {
-            let catalogSignature = AppListSignature(apps: store.apps)
-            iconTextures.rebuild(with: store.apps)
-            lastCatalogSignature = catalogSignature
-        }
         // If apps just arrived, populate the grid immediately (no empty first open).
         if displayedItems.isEmpty, !store.activeDisplayItems.isEmpty {
             displayedItems = store.activeDisplayItems
@@ -1131,10 +1557,49 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         noteDisplayChangeIfNeeded()
 
-        // Text atlas only for currently displayed apps (fast). Full-catalog rebuild
-        // was freezing the first frame so nothing appeared for seconds.
+        let quality = IconRenderQuality.current
+        if quality.usesLazyTextureLoading {
+            // Low-memory: also react to search/folder list identity, not just page.
+            let destPage = max(
+                0,
+                Int((store.isPageGestureActive ? store.pageOffset : store.targetPage).rounded())
+            )
+            let pageSettled = !store.isPageGestureActive
+                && abs(currentPageOffset - store.targetPage) < 0.02
+            let displaySignature = AppListSignature(items: displayedItems)
+            let displayChanged = resourcePrewarmSignature?.display != displaySignature
+            if lastCatalogSignature?.matches(store.apps) != true || displayChanged {
+                scheduleResourcePrewarmingIfNeeded(around: destPage, prune: true)
+            } else if pageSettled {
+                let page = max(0, Int(store.targetPage.rounded()))
+                if page != lastTextureWindowPage
+                    || iconTextures.cachedTextureCount > (store.pageCapacity * 3 + 8) {
+                    scheduleResourcePrewarmingIfNeeded(around: page, prune: true)
+                }
+            } else if !store.isSearching, destPage != resourcePrewarmSignature?.page {
+                scheduleResourcePrewarmingIfNeeded(around: destPage, prune: false)
+            }
+        } else {
+            // Quality / performance: keep full-catalog residency for smooth paging.
+            scheduleResourcePrewarmingIfNeeded()
+        }
+
+        // Text atlas: resident modes keep labels for the full item list;
+        // low-memory builds search results or pages near the camera.
         let scale = windowScale
-        let labelApps = textAtlasApps(for: displayedItems)
+        let labelItems: [LaunchpadItem]
+        if quality.usesLazyTextureLoading {
+            if store.isSearching {
+                let searchCap = max(store.pageCapacity * 6, 48)
+                labelItems = Array(displayedItems.prefix(searchCap))
+            } else {
+                let labelPage = max(0, Int(currentPageOffset.rounded()))
+                labelItems = itemsForPages(around: labelPage, radius: 1, in: displayedItems)
+            }
+        } else {
+            labelItems = displayedItems
+        }
+        let labelApps = textAtlasApps(for: labelItems)
         if lastTextSignature?.matches(labelApps, scale: scale) != true,
            !labelApps.isEmpty {
             let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
@@ -1168,8 +1633,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             if t >= 1 {
                 animatingPresentation = false
                 applyPresentationPhase(presentTo)
-                if isShowingPresentation { store.markVisible() }
-                resumeResourcePrewarming()
+                if isShowingPresentation {
+                    store.markVisible()
+                    resumeResourcePrewarming()
+                } else {
+                    // Panel closed — free GPU icon textures so RSS does not stay elevated.
+                    releaseIconGPUResources()
+                }
             }
         }
 
@@ -1243,7 +1713,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         prepareFrameResources(frameSlot)
 
         var uniforms = FrameUniforms(
-            viewport: SIMD2(Float(bounds.width), Float(bounds.height))
+            viewport: SIMD2(Float(bounds.width), Float(bounds.height)),
+            mode: SIMD2(IconRenderQuality.current.shaderQualityMode, 0)
         )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
@@ -1531,10 +2002,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         )
     }
 
-    private func iconTexture(for item: LaunchpadItem) -> MTLTexture? {
+    /// - Parameter allowCreate: `false` during interactive frames so paging never
+    ///   stalls on CG→Metal uploads (those run on the icon bake queue).
+    private func iconTexture(for item: LaunchpadItem, allowCreate: Bool = false) -> MTLTexture? {
         switch item {
         case .app(let app):
-            return iconTextures.texture(for: app)
+            return iconTextures.texture(for: app, allowCreate: allowCreate)
         case .folder(let folder):
             // `displayedItems` can intentionally stay frozen during a content
             // transition. Always resolve the latest folder value so a membership
@@ -1544,7 +2017,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return folderIconTextures.texture(
                 for: currentFolder,
                 members: members,
-                preset: GridLayoutPreset.current
+                preset: GridLayoutPreset.current,
+                allowCreate: allowCreate
             )
         }
     }
@@ -1695,13 +2169,19 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
                 // Resolve the transparent presentation frame too, preserving
                 // the existing GPU-completion gate for both apps and folders.
+                // Low-memory: never sync-bake on the draw path (async only).
+                // Quality / performance: allow create so a rare cache miss cannot
+                // leave a blank icon during a full-resident session.
+                let allowCreate = isPrimingPresentationFrame
+                    || !IconRenderQuality.current.usesLazyTextureLoading
                 let primedTexture = isPrimingPresentationFrame
-                    ? iconTexture(for: item)
+                    ? iconTexture(for: item, allowCreate: true)
                     : nil
                 guard alpha > 0.002 else { continue }
                 // Folder previews are already flattened into a single texture,
                 // so every item below follows the exact same sprite path.
-                let texture = primedTexture ?? iconTexture(for: item)
+                let texture = primedTexture
+                    ?? iconTexture(for: item, allowCreate: allowCreate)
 
                 // Preserve the exact 40% pressed opacity while the launched
                 // icon fades. Clearing dragSource on mouse-up must not briefly
