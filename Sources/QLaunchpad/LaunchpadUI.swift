@@ -184,6 +184,13 @@ final class LaunchpadContainerView: NSView {
         metalView.alphaValue = 1
     }
 
+    func hideImmediately() {
+        [backgroundView, metalView, overlayView].forEach { view in
+            view.layer?.removeAllAnimations()
+            view.alphaValue = 0
+        }
+    }
+
     func animateWallpaperIn() {
         backgroundView.animateWallpaperIn(duration: 0.5)
     }

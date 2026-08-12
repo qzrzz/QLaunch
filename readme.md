@@ -71,6 +71,8 @@ bun run build             # 打包并同步到 ../docs（en + zh-Hans）
 ```sh
 bun install
 bun run dev               # 构建 Debug .app 并前台运行
+bun run debug             # 构建 Debug .app 并用 Instruments 打开
+bun run debug -- --record # 同上，并用 xctrace Time Profiler 直接录制
 bun run build             # 构建 Release .app、DMG、ZIP（不发布）
 bun run release           # 签名、公证并发布 GitHub Release
 bun run clean             # 清理构建产物
@@ -82,6 +84,14 @@ bun run check             # 检查 Swift Package 结构
 ```text
 build/DerivedData/Build/Products/Debug/QLaunch Dev.app
 ```
+
+`bun run debug` 使用同一 Debug 包（ad-hoc 签名并带 `get-task-allow`），默认 `open -a Instruments` 打开 `.app`；加 `--record` / `-r` 时用 `xctrace record --template "Time Profiler" --launch` 启动并录制。
+
+若 Instruments 报 **Failed to attach to target process**：
+
+1. 开启 Developer Mode：系统设置 → 隐私与安全性 → 开发者模式，或 `sudo DevToolsSecurity -enable`（可能需重启）
+2. 用本仓库脚本重新打 Debug 包后再测（不要 attach 旧的 `QLaunchpad Dev.app` 进程）
+3. 优先 `bun run debug -- --record`，让 Instruments 自己 launch，而不是 attach 已在运行的进程
 
 本地 Release 构建产物位于 `build/`：
 

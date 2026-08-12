@@ -593,11 +593,41 @@ function makeInfoPlist(
   ].join("\n");
 }
 
-async function signApp(appPath: string, identity: string): Promise<void> {
+/** Debugger / Instruments attach requires this for signed Debug apps. */
+function makeDebugEntitlements(): string {
+  return [
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
+    "<plist version=\"1.0\">",
+    "<dict>",
+    "  <key>com.apple.security.get-task-allow</key>",
+    "  <true/>",
+    "</dict>",
+    "</plist>",
+    "",
+  ].join("\n");
+}
+
+async function signApp(
+  appPath: string,
+  identity: string,
+  options: { allowDebugger?: boolean } = {},
+): Promise<void> {
   const args = ["codesign", "--force", "--deep"];
   if (identity !== "-") {
+    // Hardened runtime for Developer ID / notarization.
     args.push("--options", "runtime", "--timestamp");
   }
+
+  let entitlementsPath: string | null = null;
+  if (options.allowDebugger) {
+    // get-task-allow is Debug-only; never ship it on Release / notarized builds.
+    entitlementsPath = join(ROOT_DIR, "build/debug-entitlements.plist");
+    mkdirSync(dirname(entitlementsPath), { recursive: true });
+    writeFileSync(entitlementsPath, makeDebugEntitlements(), "utf8");
+    args.push("--entitlements", entitlementsPath);
+  }
+
   args.push("--sign", identity, appPath);
   await runCommand(args);
 }
@@ -678,8 +708,12 @@ export async function buildApp(options: AppBuildOptions): Promise<AppBuildResult
   );
 
   if (options.signIdentity) {
-    console.log("▸ 签署 " + appName(configuration) + " (" + options.signIdentity + ")…");
-    await signApp(appPath, options.signIdentity);
+    const allowDebugger = configuration === "debug";
+    console.log(
+      "▸ 签署 " + appName(configuration) + " (" + options.signIdentity + ")" +
+        (allowDebugger ? " [get-task-allow]" : "") + "…",
+    );
+    await signApp(appPath, options.signIdentity, { allowDebugger });
   }
 
   return {
