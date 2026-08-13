@@ -88,11 +88,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: .qlaunchpadHotKeyRecordingChanged,
             object: nil
         )
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(layoutDidChangeExternally(_:)),
+            name: .qlaunchpadLayoutDidChange,
+            object: nil
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let globalHotKeyMonitor { NSEvent.removeMonitor(globalHotKeyMonitor) }
         if let localHotKeyMonitor { NSEvent.removeMonitor(localHotKeyMonitor) }
+        DistributedNotificationCenter.default().removeObserver(
+            self,
+            name: .qlaunchpadLayoutDidChange,
+            object: nil
+        )
+    }
+
+    @objc private func layoutDidChangeExternally(_ note: Notification) {
+        let domain = note.object as? String
+        guard domain == Bundle.main.bundleIdentifier else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.store.reloadPersistedLayout()
+        }
     }
 
     /// A regular Dock application receives this callback when its Dock icon is
