@@ -52,7 +52,7 @@ final class LaunchpadPreferenceStoreTests: XCTestCase {
         XCTAssertEqual(rawOrder as? [String], read.itemOrder)
     }
 
-    func testPersistIfChangedLeavesIdenticalLayoutUntouched() throws {
+    func testPersistIfChangedSkipsSecondWrite() throws {
         let folders = [AppFolder(id: "folder-a", name: "A", appIDs: ["com.alpha"])]
         let foldersData = try LaunchpadPreferenceStore.encodeFolders(folders)
         let layout = LaunchpadPersistedLayout(
@@ -61,7 +61,26 @@ final class LaunchpadPreferenceStoreTests: XCTestCase {
             hiddenIDs: ["com.hidden"]
         )
         LaunchpadPreferenceStore.writeLayout(domain: domain, layout)
+
+        let probeKey = "layoutWriteProbe"
+        CFPreferencesSetAppValue(probeKey as CFString, "keep" as CFString, domain as CFString)
+        CFPreferencesAppSynchronize(domain as CFString)
+
+        let plistURL = preferencesPlistURL(domain)
+        let firstModified = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: plistURL.path)[.modificationDate] as? Date
+        )
+
         LaunchpadPreferenceStore.writeLayout(domain: domain, layout)
+
+        let secondModified = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: plistURL.path)[.modificationDate] as? Date
+        )
+        XCTAssertEqual(firstModified, secondModified)
+        XCTAssertEqual(
+            CFPreferencesCopyAppValue(probeKey as CFString, domain as CFString) as? String,
+            "keep"
+        )
 
         let read = LaunchpadPreferenceStore.readLayout(domain: domain)
         XCTAssertEqual(read.itemOrder, ["folder-a"])
@@ -69,7 +88,7 @@ final class LaunchpadPreferenceStoreTests: XCTestCase {
         XCTAssertEqual(read.hiddenIDs, ["com.hidden"])
     }
 
-    func testReadStringAndStringArraySynchronizeFirst() {
+    func testReadStringAndStringArray() {
         CFPreferencesSetAppValue(
             LaunchpadPersistence.gridLayoutPresetKey as CFString,
             "7x5-128" as CFString,
@@ -140,6 +159,11 @@ final class LaunchpadPreferenceStoreTests: XCTestCase {
         )
     }
 
+    private func preferencesPlistURL(_ domain: String) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/\(domain).plist")
+    }
+
     private func clearLayoutDomain(_ domain: String) {
         let applicationID = domain as CFString
         CFPreferencesSetAppValue(LaunchpadPersistence.itemOrderKey as CFString, nil, applicationID)
@@ -147,6 +171,8 @@ final class LaunchpadPreferenceStoreTests: XCTestCase {
         CFPreferencesSetAppValue(LaunchpadPersistence.hiddenAppsKey as CFString, nil, applicationID)
         CFPreferencesSetAppValue(LaunchpadPersistence.gridLayoutPresetKey as CFString, nil, applicationID)
         CFPreferencesSetAppValue(LaunchpadPersistence.customSourcesKey as CFString, nil, applicationID)
+        CFPreferencesSetAppValue("layoutWriteProbe" as CFString, nil, applicationID)
         CFPreferencesAppSynchronize(applicationID)
+        try? FileManager.default.removeItem(at: preferencesPlistURL(domain))
     }
 }
