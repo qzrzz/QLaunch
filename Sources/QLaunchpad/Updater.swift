@@ -48,6 +48,7 @@ final class Updater: ObservableObject {
     }
 
     func checkForUpdates() {
+        NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
         #if DEBUG
         NSWorkspace.shared.open(Self.releasesURL)
         #else

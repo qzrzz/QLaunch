@@ -102,6 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: .qlaunchpadHotKeyRecordingChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appWindowDidBecomeKey(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
         // 提前武装 Sparkle，自动检查不依赖是否打开关于页。
         _ = Updater.shared
 
@@ -196,6 +202,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                   !isLaunchpadSheet else { return }
             self.dismissLaunchpad()
         }
+    }
+
+    /// Settings already took key from the overlay, so `windowDidResignKey`
+    /// will not fire again when the user opens a browser, Sparkle, or
+    /// System Settings. Hide the fullscreen overlay so those windows are
+    /// not covered.
+    func applicationDidResignActive(_ notification: Notification) {
+        guard settingsWindow?.isVisible == true else { return }
+        dismissLaunchpad()
+    }
+
+    /// Sparkle and other in-app windows stay at the normal level. If one
+    /// becomes key while the overlay is up, hide the overlay so it is visible.
+    @objc private func appWindowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window !== launchpadPanel,
+              window !== settingsWindow,
+              window.sheetParent !== launchpadPanel,
+              window.sheetParent !== settingsWindow,
+              window.level <= .normal else { return }
+        dismissLaunchpad()
     }
 
     private func installHotKey() {
@@ -443,6 +470,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         launchpadPanel.makeKey()
+        syncSettingsWindowLevel()
 
         // Prime the icon layer while the already-visible window shows its background.
         containerView.metal.submitFirstPresentationFrame(style: animationStyle) { [weak self] in
@@ -517,6 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let dismissalDuration = animationStyle.dismissalDuration
             * CFTimeInterval(store.presentationProgress)
         store.beginDismissing()
+        syncSettingsWindowLevel()
 
         var presentationInfo: [String: Any] = [
             "showing": false,
@@ -562,6 +591,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         containerView.background.refreshAfterHide()
         store.markHidden()
         isAnimating = false
+        syncSettingsWindowLevel()
         updateStatusMenu()
     }
 
@@ -580,7 +610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func showSettingsWindow() {
         if let settingsWindow {
-            settingsWindow.level = .popUpMenu
+            syncSettingsWindowLevel()
             settingsWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -598,15 +628,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isMovableByWindowBackground = true
         window.minSize = NSSize(width: 530, height: 550)
         // Keep Settings above the Launchpad panel when it is opened from the
-        // main window. The Launchpad remains visible underneath it.
-        window.level = .popUpMenu
+        // main window. Drop back to `.normal` once the overlay is gone so
+        // Sparkle and other app windows are not trapped underneath.
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: SettingsView(store: store))
         window.center()
         settingsWindow = window
+        syncSettingsWindowLevel()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Settings must sit above the fullscreen overlay, but that same level
+    /// hides Sparkle / browser windows once the overlay should go away.
+    private func syncSettingsWindowLevel() {
+        guard let settingsWindow else { return }
+        settingsWindow.level = store.isPresented ? .popUpMenu : .normal
     }
 }
