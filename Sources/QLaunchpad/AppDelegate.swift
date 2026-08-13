@@ -506,6 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         launchpadPanel.animationBehavior = .none
         launchpadPanel.alphaValue = 0
         launchpadPanel.orderOut(nil)
+        containerView.background.refreshAfterHide()
         store.markHidden()
         isAnimating = false
         updateStatusMenu()
