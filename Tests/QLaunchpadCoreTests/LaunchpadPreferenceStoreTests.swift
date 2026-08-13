@@ -19,12 +19,14 @@ final class LaunchpadPreferenceStoreTests: XCTestCase {
             )
         ]
         let foldersData = try LaunchpadPreferenceStore.encodeFolders(folders)
-        LaunchpadPreferenceStore.writeLayout(
-            domain: domain,
-            LaunchpadPersistedLayout(
-                itemOrder: ["folder-550e8400-e29b-41d4-a716-446655440000", "com.apple.Safari"],
-                foldersData: foldersData,
-                hiddenIDs: ["com.zebra", "com.alpha"]
+        XCTAssertTrue(
+            LaunchpadPreferenceStore.writeLayout(
+                domain: domain,
+                LaunchpadPersistedLayout(
+                    itemOrder: ["folder-550e8400-e29b-41d4-a716-446655440000", "com.apple.Safari"],
+                    foldersData: foldersData,
+                    hiddenIDs: ["com.zebra", "com.alpha"]
+                )
             )
         )
 

@@ -6,9 +6,9 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
-const ROOT = join(import.meta.dir, "..");
+const ROOT = resolve(join(import.meta.dir, ".."));
 
 const DEV_EXECUTABLE_SUFFIX = "/QLaunch Dev.app/Contents/MacOS/QLaunchpad";
 const RELEASE_EXECUTABLE_SUFFIX = "/QLaunch.app/Contents/MacOS/QLaunchpad";
@@ -23,15 +23,21 @@ const APPLICATIONS_EXECUTABLE = join(APPLICATIONS_APP, "Contents/MacOS/QLaunchpa
 
 const CLI_COMMANDS = new Set(["export", "import", "validate", "help", "-h", "--help"]);
 
-function extractExecutable(line: string, marker: string): string | null {
-  const index = line.indexOf(marker);
-  if (index === -1) return null;
+export function extractExecutable(line: string, marker: string): string | null {
   if (/\bpgrep\b/.test(line)) return null;
-  let start = index;
-  while (start > 0 && line[start - 1] !== " ") {
-    start -= 1;
-  }
-  return line.slice(start, index + marker.length);
+  const match = line.match(/^\s*\d+\s+(.*)$/);
+  if (match == null) return null;
+  const command = match[1] ?? "";
+  const index = command.indexOf(marker);
+  if (index === -1) return null;
+  const slash = command.indexOf("/");
+  if (slash === -1 || slash > index) return null;
+  return command.slice(slash, index + marker.length);
+}
+
+function isUnderRoot(path: string): boolean {
+  const resolved = resolve(path);
+  return resolved === ROOT || resolved.startsWith(ROOT + "/");
 }
 
 function findRunning(marker: string): string | null {
@@ -52,16 +58,43 @@ function resolvePackagedBinary():
   | { ok: true; path: string }
   | { ok: false; runningDev: string | null; runningRelease: string | null } {
   const runningDev = findRunning(DEV_EXECUTABLE_SUFFIX);
-  if (runningDev) return { ok: true, path: runningDev };
+  if (runningDev && isUnderRoot(runningDev)) return { ok: true, path: runningDev };
 
   const runningRelease = findRunning(RELEASE_EXECUTABLE_SUFFIX);
-  if (runningRelease) return { ok: true, path: runningRelease };
+  if (runningRelease && isUnderRoot(runningRelease)) return { ok: true, path: runningRelease };
 
   if (existsSync(DEBUG_EXECUTABLE)) return { ok: true, path: DEBUG_EXECUTABLE };
   if (existsSync(RELEASE_EXECUTABLE)) return { ok: true, path: RELEASE_EXECUTABLE };
   if (existsSync(APPLICATIONS_EXECUTABLE)) return { ok: true, path: APPLICATIONS_EXECUTABLE };
 
   return { ok: false, runningDev, runningRelease };
+}
+
+function normalizeCLIArgv(args: string[]):
+  | { ok: true; argv: string[] }
+  | { ok: true; helpOnly: true }
+  | { ok: false; error: string } {
+  const filtered = args.filter((arg) => arg !== "--cli");
+  let command: string | null = null;
+  const rest: string[] = [];
+  for (const arg of filtered) {
+    if (command == null && CLI_COMMANDS.has(arg)) {
+      command = arg;
+      continue;
+    }
+    rest.push(arg);
+  }
+  if (command == null) {
+    return { ok: false, error: "missing export|import|validate command" };
+  }
+  if (
+    (command === "help" || command === "-h" || command === "--help") &&
+    rest.length === 0
+  ) {
+    return { ok: true, helpOnly: true };
+  }
+  // Subcommand is argv[0] after --cli so LaunchpadCLI.isInvocation is true.
+  return { ok: true, argv: ["--cli", command, ...rest] };
 }
 
 function printMissingBinary(
@@ -94,17 +127,13 @@ Does not call swift run, open -a, or send arguments to a running GUI.
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const command = args.find((arg) => CLI_COMMANDS.has(arg));
-  if (command == null) {
-    console.error("error: missing export|import|validate command");
+  const normalized = normalizeCLIArgv(process.argv.slice(2));
+  if (!normalized.ok) {
+    console.error("error: " + normalized.error);
     printUsage();
     process.exit(1);
   }
-  if (
-    (command === "help" || command === "-h" || command === "--help") &&
-    args.every((arg) => CLI_COMMANDS.has(arg) || arg === "--cli")
-  ) {
+  if ("helpOnly" in normalized) {
     printUsage();
     process.exit(0);
   }
@@ -115,7 +144,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const child = Bun.spawn([resolved.path, ...args], {
+  const child = Bun.spawn([resolved.path, ...normalized.argv], {
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
@@ -124,7 +153,9 @@ async function main(): Promise<void> {
   process.exit(code ?? 1);
 }
 
-main().catch((error) => {
-  console.error("✗ " + (error instanceof Error ? error.message : error));
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error("✗ " + (error instanceof Error ? error.message : error));
+    process.exit(1);
+  });
+}

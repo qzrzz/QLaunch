@@ -25,6 +25,14 @@ public enum LaunchpadPreferenceStore {
         try LaunchpadPersistence.decodeFolders(data)
     }
 
+    /// Missing key (`Data()`) is empty folders. Non-empty undecodable bytes throw.
+    public static func decodePersistedFolders(_ data: Data) throws -> [AppFolder] {
+        if data.isEmpty {
+            return []
+        }
+        return try decodeFolders(data)
+    }
+
     /// Synchronizes the domain, then copies the three layout keys. Missing keys
     /// are empty arrays / empty `Data`.
     public static func readLayout(domain: String) -> LaunchpadPersistedLayout {
@@ -39,7 +47,9 @@ public enum LaunchpadPreferenceStore {
 
     /// Writes only keys that differ. Hidden is sorted before compare / set.
     /// Folders must be `CFData` (encoded `[AppFolder]` bytes), not a JSON string.
-    public static func writeLayout(domain: String, _ layout: LaunchpadPersistedLayout) {
+    /// Returns `false` when a dirty write's `CFPreferencesAppSynchronize` fails.
+    @discardableResult
+    public static func writeLayout(domain: String, _ layout: LaunchpadPersistedLayout) -> Bool {
         let applicationID = domain as CFString
         let next = LaunchpadPersistedLayout(
             itemOrder: layout.itemOrder,
@@ -74,9 +84,12 @@ public enum LaunchpadPreferenceStore {
             changed = true
         }
         if changed {
-            CFPreferencesAppSynchronize(applicationID)
+            guard CFPreferencesAppSynchronize(applicationID) else {
+                return false
+            }
         }
         writeThroughIfCurrentDomain(domain, next)
+        return true
     }
 
     public static func persistFolders(domain: String, _ folders: [AppFolder]) {
