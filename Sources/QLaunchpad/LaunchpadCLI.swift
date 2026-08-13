@@ -3,17 +3,8 @@ import Foundation
 import QLaunchpadCore
 
 enum LaunchpadCLI {
-    private static let knownDomains: Set<String> = [
-        LaunchpadPreferenceStore.releaseDomain,
-        LaunchpadPreferenceStore.developmentDomain
-    ]
-
     static func isInvocation(_ args: [String]) -> Bool {
-        guard let first = args.first else { return false }
-        if Self.commands.contains(first) || first == "help" || first == "-h" || first == "--help" {
-            return true
-        }
-        return args.contains("--cli")
+        LaunchpadCLIInvocation.isInvocation(args)
     }
 
     static func run(_ args: [String]) -> Int32 {
@@ -28,6 +19,10 @@ enum LaunchpadCLI {
         } catch let error as LaunchpadLayoutError {
             fputs("error: \(describe(error))\n", stderr)
             return 2
+        } catch let error as LaunchpadCLIInvocation.ParseError {
+            fputs("error: \(error.message)\n", stderr)
+            fputs(usageText, stderr)
+            return 1
         } catch let error as DecodingError {
             fputs("error: invalid layout JSON: \(error)\n", stderr)
             return 2
@@ -37,22 +32,8 @@ enum LaunchpadCLI {
         }
     }
 
-    private static let commands: Set<String> = ["export", "import", "validate"]
-
     private static func execute(_ rawArgs: [String]) throws -> Int32 {
-        let args = rawArgs.filter { $0 != "--cli" }
-        guard let command = args.first else {
-            throw CLIError.usage("missing command")
-        }
-        if command == "help" || command == "-h" || command == "--help" {
-            fputs(usageText, stdout)
-            return 0
-        }
-        guard commands.contains(command) else {
-            throw CLIError.usage("unknown command '\(command)'")
-        }
-
-        let options = try parseOptions(Array(args.dropFirst()), command: command)
+        let (command, options) = try LaunchpadCLIInvocation.parse(rawArgs)
         if options.help {
             fputs(usageText, stdout)
             return 0
@@ -70,12 +51,12 @@ enum LaunchpadCLI {
         }
     }
 
-    private static func runExport(_ options: Options) throws -> Int32 {
+    private static func runExport(_ options: LaunchpadCLIInvocation.Options) throws -> Int32 {
         let domain = try resolveDomain(options)
         fputs("usingDomain: \(domain)\n", stderr)
         try ensureDomainAvailable(domain)
 
-        let snapshot = scanAndReconcile(domain: domain)
+        let snapshot = try scanAndReconcile(domain: domain, failOnCorruptFolders: false)
         let document = makeDocument(
             snapshot,
             grid: gridSnapshot(domain: domain),
@@ -83,13 +64,18 @@ enum LaunchpadCLI {
             includePaths: options.includePaths,
             appVersion: appVersion(options)
         )
-        let pretty = try shouldPretty(options, writingToStdout: isStandardStream(options.out))
+        let pretty = try LaunchpadCLIInvocation.shouldPretty(
+            pretty: options.pretty,
+            compact: options.compact,
+            writingToStdout: isStandardStream(options.out),
+            stdoutIsTTY: isatty(STDOUT_FILENO) != 0
+        )
         let data = try LaunchpadLayoutDocument.makeEncoder(pretty: pretty).encode(document)
         try writeOutput(data, to: options.out)
         return 0
     }
 
-    private static func runImport(_ options: Options) throws -> Int32 {
+    private static func runImport(_ options: LaunchpadCLIInvocation.Options) throws -> Int32 {
         if options.merge && options.replace {
             throw CLIError.usage("--merge and --replace are mutually exclusive")
         }
@@ -103,8 +89,9 @@ enum LaunchpadCLI {
             LaunchpadLayoutDocument.self,
             from: data
         )
+        try LaunchpadLayoutImporter.validate(document)
 
-        let snapshot = scanAndReconcile(domain: domain)
+        let snapshot = try scanAndReconcile(domain: domain, failOnCorruptFolders: true)
         if snapshot.apps.isEmpty {
             throw CLIError.validate("application catalog is empty")
         }
@@ -125,7 +112,7 @@ enum LaunchpadCLI {
 
         writeBackupFailOpen(domain: domain, snapshot: snapshot, appVersion: appVersion(options))
         let foldersData = try LaunchpadPreferenceStore.encodeFolders(applied.folders)
-        LaunchpadPreferenceStore.writeLayout(
+        let wrote = LaunchpadPreferenceStore.writeLayout(
             domain: domain,
             LaunchpadPersistedLayout(
                 itemOrder: applied.order,
@@ -133,6 +120,9 @@ enum LaunchpadCLI {
                 hiddenIDs: Array(applied.hidden)
             )
         )
+        guard wrote else {
+            throw CLIError.prefsUnavailable("failed to persist layout to \(domain)")
+        }
         DistributedNotificationCenter.default().postNotificationName(
             .qlaunchpadLayoutDidChange,
             object: domain,
@@ -143,7 +133,7 @@ enum LaunchpadCLI {
         return 0
     }
 
-    private static func runValidate(_ options: Options) throws -> Int32 {
+    private static func runValidate(_ options: LaunchpadCLIInvocation.Options) throws -> Int32 {
         let data = try readInput(options.input)
         try LaunchpadLayoutImporter.validateJSONSize(data)
         let document = try LaunchpadLayoutDocument.makeDecoder().decode(
@@ -156,22 +146,18 @@ enum LaunchpadCLI {
 
     // MARK: - Domain
 
-    private static func resolveDomain(_ options: Options) throws -> String {
-        if let domain = options.domain?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !domain.isEmpty {
-            return domain
+    private static func resolveDomain(_ options: LaunchpadCLIInvocation.Options) throws -> String {
+        let appIdentifier: String?
+        if options.domain == nil, let appPath = options.app {
+            appIdentifier = try bundleIdentifier(fromAppPath: appPath)
+        } else {
+            appIdentifier = nil
         }
-        if let appPath = options.app {
-            return try bundleIdentifier(fromAppPath: appPath)
-        }
-        if options.dev {
-            return LaunchpadPreferenceStore.developmentDomain
-        }
-        if let identifier = Bundle.main.bundleIdentifier, knownDomains.contains(identifier) {
-            return identifier
-        }
-        throw CLIError.usage(
-            "preference domain is required when not running from a packaged QLaunch.app / QLaunch Dev.app; use --domain, --dev, or --app"
+        return try LaunchpadCLIInvocation.resolveDomain(
+            explicitDomain: options.domain,
+            appIdentifier: appIdentifier,
+            dev: options.dev,
+            bundledIdentifier: Bundle.main.bundleIdentifier
         )
     }
 
@@ -222,7 +208,7 @@ enum LaunchpadCLI {
         var hidden: Set<String>
     }
 
-    private static func scanAndReconcile(domain: String) -> Snapshot {
+    private static func scanAndReconcile(domain: String, failOnCorruptFolders: Bool) throws -> Snapshot {
         let extraRoots = LaunchpadPreferenceStore.readStringArray(
             domain: domain,
             key: LaunchpadPersistence.customSourcesKey
@@ -236,7 +222,19 @@ enum LaunchpadCLI {
             )
         }
         let persisted = LaunchpadPreferenceStore.readLayout(domain: domain)
-        let folders = (try? LaunchpadPreferenceStore.decodeFolders(persisted.foldersData)) ?? []
+        let folders: [AppFolder]
+        do {
+            folders = try LaunchpadPreferenceStore.decodePersistedFolders(persisted.foldersData)
+        } catch {
+            if failOnCorruptFolders {
+                throw CLIError.validate("corrupt launchpadFolders data: \(error.localizedDescription)")
+            }
+            fputs(
+                "warning: corrupt launchpadFolders data; exporting without folders: \(error.localizedDescription)\n",
+                stderr
+            )
+            folders = []
+        }
         let hidden = Set(persisted.hiddenIDs)
         let reconciled = LaunchpadLayoutReconciler.reconcile(
             apps: known,
@@ -285,7 +283,7 @@ enum LaunchpadCLI {
             guard seen.insert(id).inserted else { continue }
             if let folder = folderByID[id] {
                 items.append(.folder(id: folder.id, name: folder.name, apps: folder.appIDs))
-            } else {
+            } else if snapshot.apps.contains(where: { $0.id == id }) {
                 items.append(.app(id: id))
             }
         }
@@ -312,7 +310,7 @@ enum LaunchpadCLI {
         )
     }
 
-    private static func appVersion(_ options: Options) -> String? {
+    private static func appVersion(_ options: LaunchpadCLIInvocation.Options) -> String? {
         if let appPath = options.app {
             let url = appBundleURL(from: URL(fileURLWithPath: (appPath as NSString).expandingTildeInPath))
             if let bundle = Bundle(url: url),
@@ -377,18 +375,6 @@ enum LaunchpadCLI {
         path == nil || path == "-"
     }
 
-    private static func shouldPretty(_ options: Options, writingToStdout: Bool) throws -> Bool {
-        if options.pretty && options.compact {
-            throw CLIError.usage("--pretty and --compact are mutually exclusive")
-        }
-        if options.pretty { return true }
-        if options.compact { return false }
-        if writingToStdout {
-            return isatty(STDOUT_FILENO) != 0
-        }
-        return true
-    }
-
     private static func printReport(_ report: LaunchpadLayoutReport, wouldWriteDomain: String?) {
         let rootApps = max(0, report.importedRootItems - report.importedFolders)
         let referenced = report.resolvedApps + report.skippedUnknown.count
@@ -412,133 +398,6 @@ enum LaunchpadCLI {
 
     private static func formatList(_ ids: [String]) -> String {
         ids.isEmpty ? "(none)" : ids.joined(separator: ", ")
-    }
-
-    // MARK: - Args
-
-    private struct Options {
-        var out: String?
-        var input: String?
-        var pretty = false
-        var compact = false
-        var includeCatalog = true
-        var includePaths = true
-        var domain: String?
-        var app: String?
-        var dev = false
-        var merge = false
-        var replace = false
-        var strict = false
-        var dryRun = false
-        var help = false
-    }
-
-    private static func parseOptions(_ args: [String], command: String) throws -> Options {
-        var options = Options()
-        var index = 0
-        while index < args.count {
-            let arg = args[index]
-            if arg == "-h" || arg == "--help" {
-                options.help = true
-                index += 1
-                continue
-            }
-            switch arg {
-            case "--out":
-                options.out = try takeValue(arg, args: args, index: &index)
-            case "--in":
-                options.input = try takeValue(arg, args: args, index: &index)
-            case "--domain":
-                options.domain = try takeValue(arg, args: args, index: &index)
-            case "--app":
-                options.app = try takeValue(arg, args: args, index: &index)
-            case "--pretty":
-                options.pretty = true
-                index += 1
-            case "--compact":
-                options.compact = true
-                index += 1
-            case "--no-catalog":
-                options.includeCatalog = false
-                index += 1
-            case "--no-paths":
-                options.includePaths = false
-                index += 1
-            case "--dev":
-                options.dev = true
-                index += 1
-            case "--merge":
-                options.merge = true
-                index += 1
-            case "--replace":
-                options.replace = true
-                index += 1
-            case "--strict":
-                options.strict = true
-                index += 1
-            case "--dry-run":
-                options.dryRun = true
-                index += 1
-            default:
-                if arg.hasPrefix("--out=") {
-                    options.out = String(arg.dropFirst("--out=".count))
-                    index += 1
-                } else if arg.hasPrefix("--in=") {
-                    options.input = String(arg.dropFirst("--in=".count))
-                    index += 1
-                } else if arg.hasPrefix("--domain=") {
-                    options.domain = String(arg.dropFirst("--domain=".count))
-                    index += 1
-                } else if arg.hasPrefix("--app=") {
-                    options.app = String(arg.dropFirst("--app=".count))
-                    index += 1
-                } else {
-                    throw CLIError.usage("unexpected argument '\(arg)'")
-                }
-            }
-        }
-
-        switch command {
-        case "export":
-            if options.input != nil || options.merge || options.replace || options.strict || options.dryRun {
-                throw CLIError.usage("export does not accept --in / --merge / --replace / --strict / --dry-run")
-            }
-        case "import":
-            if options.out != nil || options.pretty || options.compact
-                || !options.includeCatalog || !options.includePaths {
-                throw CLIError.usage("import does not accept --out / --pretty / --compact / --no-catalog / --no-paths")
-            }
-        case "validate":
-            if options.out != nil || options.pretty || options.compact
-                || !options.includeCatalog || !options.includePaths
-                || options.domain != nil || options.app != nil || options.dev
-                || options.merge || options.replace || options.strict || options.dryRun {
-                throw CLIError.usage("validate only accepts --in")
-            }
-        default:
-            break
-        }
-
-        if options.pretty && options.compact {
-            throw CLIError.usage("--pretty and --compact are mutually exclusive")
-        }
-        if options.merge && options.replace {
-            throw CLIError.usage("--merge and --replace are mutually exclusive")
-        }
-        return options
-    }
-
-    private static func takeValue(_ flag: String, args: [String], index: inout Int) throws -> String {
-        let next = index + 1
-        guard next < args.count else {
-            throw CLIError.usage("\(flag) requires a value")
-        }
-        let value = args[next]
-        if value.hasPrefix("--") && value != "-" {
-            throw CLIError.usage("\(flag) requires a value")
-        }
-        index = next + 1
-        return value
     }
 
     private static func describe(_ error: LaunchpadLayoutError) -> String {
