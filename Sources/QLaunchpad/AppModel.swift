@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import QLaunchpadCore
 
 enum QLaunchpadPreferences {
     static let showMenuBarIconKey = "showMenuBarIcon"
@@ -129,20 +130,7 @@ enum QLaunchAppLauncher {
     }
 }
 
-/// A user-created group of applications. Folder membership is stored by the
-/// stable bundle identifier used by `AppInfo`, so rescanning applications does
-/// not invalidate folders.
-struct AppFolder: Identifiable, Hashable, Codable, Sendable {
-    let id: String
-    var name: String
-    var appIDs: [String]
-
-    init(id: String = "folder-\(UUID().uuidString)", name: String = "文件夹", appIDs: [String]) {
-        self.id = id
-        self.name = name
-        self.appIDs = appIDs
-    }
-}
+typealias AppFolder = QLaunchpadCore.AppFolder
 
 enum LaunchpadItem: Identifiable, Hashable {
     case app(AppInfo)
@@ -461,7 +449,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var customApplicationSourcePaths: [String]
     @Published var showHiddenAppsInSearch: Bool {
         didSet {
-            UserDefaults.standard.set(showHiddenAppsInSearch, forKey: Self.showHiddenAppsKey)
+            UserDefaults.standard.set(showHiddenAppsInSearch, forKey: LaunchpadPersistence.showHiddenAppsKey)
             refreshFilteredApps(resetPage: true)
             NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
         }
@@ -498,22 +486,16 @@ final class AppStore: ObservableObject {
     /// Points of scroll delta that equal one full page turn.
     private let pageScrollUnit: Double = 320
 
-    private static let hiddenAppsKey = "hiddenAppIdentifiers"
-    private static let customSourcesKey = "customApplicationSourcePaths"
-    private static let showHiddenAppsKey = "showHiddenAppsInSearch"
-    private static let foldersKey = "launchpadFolders"
-    private static let itemOrderKey = "launchpadItemOrder"
-
     private var itemOrderIDs: [String]
 
     init() {
         let defaults = UserDefaults.standard
-        hiddenAppIDs = Set(defaults.stringArray(forKey: Self.hiddenAppsKey) ?? [])
-        customApplicationSourcePaths = defaults.stringArray(forKey: Self.customSourcesKey) ?? []
-        showHiddenAppsInSearch = defaults.bool(forKey: Self.showHiddenAppsKey)
-        itemOrderIDs = defaults.stringArray(forKey: Self.itemOrderKey) ?? []
-        if let data = defaults.data(forKey: Self.foldersKey),
-           let savedFolders = try? JSONDecoder().decode([AppFolder].self, from: data) {
+        hiddenAppIDs = Set(defaults.stringArray(forKey: LaunchpadPersistence.hiddenAppsKey) ?? [])
+        customApplicationSourcePaths = defaults.stringArray(forKey: LaunchpadPersistence.customSourcesKey) ?? []
+        showHiddenAppsInSearch = defaults.bool(forKey: LaunchpadPersistence.showHiddenAppsKey)
+        itemOrderIDs = defaults.stringArray(forKey: LaunchpadPersistence.itemOrderKey) ?? []
+        if let data = defaults.data(forKey: LaunchpadPersistence.foldersKey),
+           let savedFolders = try? LaunchpadPersistence.decodeFolders(data) {
             folders = savedFolders
         }
     }
@@ -1273,11 +1255,14 @@ final class AppStore: ObservableObject {
     }
 
     private func persistHiddenApps() {
-        UserDefaults.standard.set(hiddenAppIDs.sorted(), forKey: Self.hiddenAppsKey)
+        let next = hiddenAppIDs.sorted()
+        let current = UserDefaults.standard.stringArray(forKey: LaunchpadPersistence.hiddenAppsKey) ?? []
+        guard next != current else { return }
+        UserDefaults.standard.set(next, forKey: LaunchpadPersistence.hiddenAppsKey)
     }
 
     private func persistApplicationSources() {
-        UserDefaults.standard.set(customApplicationSourcePaths, forKey: Self.customSourcesKey)
+        UserDefaults.standard.set(customApplicationSourcePaths, forKey: LaunchpadPersistence.customSourcesKey)
     }
 
     private func isApp(_ item: LaunchpadItem) -> Bool {
@@ -1286,40 +1271,26 @@ final class AppStore: ObservableObject {
     }
 
     private func reconcileLaunchpadItems() {
-        let validApps = Set(apps.map(\.id)).subtracting(hiddenAppIDs)
-        var usedAppIDs = Set<String>()
-        var sanitizedFolders: [AppFolder] = []
-        for folder in folders {
-            let members = folder.appIDs.filter { validApps.contains($0) && usedAppIDs.insert($0).inserted }
-            guard !members.isEmpty else { continue }
-            var sanitized = folder
-            sanitized.appIDs = members
-            sanitizedFolders.append(sanitized)
+        let known = apps.map {
+            LaunchpadKnownApp(
+                id: $0.id,
+                bundleIdentifier: $0.bundleIdentifier,
+                name: $0.name,
+                path: $0.url.standardizedFileURL.path
+            )
         }
-        folders = sanitizedFolders
-
-        let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
-        var validOrder: [String] = []
-        var seen = Set<String>()
-        for id in itemOrderIDs {
-            if let folder = folderByID[id], seen.insert(id).inserted {
-                validOrder.append(folder.id)
-            } else if validApps.contains(id), !usedAppIDs.contains(id), seen.insert(id).inserted {
-                validOrder.append(id)
-            }
-        }
-        for folder in folders where seen.insert(folder.id).inserted {
-            validOrder.append(folder.id)
-        }
-        for app in apps where validApps.contains(app.id)
-            && !usedAppIDs.contains(app.id)
-            && seen.insert(app.id).inserted {
-            validOrder.append(app.id)
-        }
-        itemOrderIDs = validOrder
+        let result = LaunchpadLayoutReconciler.reconcile(
+            apps: known,
+            folders: folders,
+            order: itemOrderIDs,
+            hidden: hiddenAppIDs
+        )
+        folders = result.folders
+        itemOrderIDs = result.order
         persistFolders()
         persistItemOrder()
-        launchpadItems = validOrder.compactMap { id in
+        let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        launchpadItems = itemOrderIDs.compactMap { id in
             if let folder = folderByID[id] { return .folder(folder) }
             guard let app = apps.first(where: { $0.id == id }) else { return nil }
             return .app(app)
@@ -1327,13 +1298,16 @@ final class AppStore: ObservableObject {
     }
 
     private func persistFolders() {
-        if let data = try? JSONEncoder().encode(folders) {
-            UserDefaults.standard.set(data, forKey: Self.foldersKey)
-        }
+        guard let data = try? LaunchpadPersistence.encodeFolders(folders) else { return }
+        let current = UserDefaults.standard.data(forKey: LaunchpadPersistence.foldersKey)
+        guard data != current else { return }
+        UserDefaults.standard.set(data, forKey: LaunchpadPersistence.foldersKey)
     }
 
     private func persistItemOrder() {
-        UserDefaults.standard.set(itemOrderIDs, forKey: Self.itemOrderKey)
+        let current = UserDefaults.standard.stringArray(forKey: LaunchpadPersistence.itemOrderKey) ?? []
+        guard itemOrderIDs != current else { return }
+        UserDefaults.standard.set(itemOrderIDs, forKey: LaunchpadPersistence.itemOrderKey)
     }
 
 }

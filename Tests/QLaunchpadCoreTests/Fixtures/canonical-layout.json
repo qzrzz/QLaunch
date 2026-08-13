@@ -1,0 +1,48 @@
+{
+  "appVersion" : "1.0.0",
+  "catalog" : [
+    {
+      "bundleIdentifier" : "com.apple.Safari",
+      "id" : "com.apple.Safari",
+      "name" : "Safari",
+      "path" : "\/System\/Cryptexes\/App\/System\/Applications\/Safari.app"
+    },
+    {
+      "bundleIdentifier" : "com.example.Foo",
+      "id" : "com.example.Foo#\/Users\/alex\/Applications\/Foo.app",
+      "name" : "Foo",
+      "path" : "\/Users\/alex\/Applications\/Foo.app"
+    }
+  ],
+  "exportedAt" : "2026-08-13T04:12:00Z",
+  "grid" : {
+    "columns" : 6,
+    "pageCapacity" : 24,
+    "preset" : "6x4-128",
+    "rows" : 4
+  },
+  "hidden" : [
+    "com.apple.Chess"
+  ],
+  "items" : [
+    {
+      "id" : "com.apple.Safari",
+      "type" : "app"
+    },
+    {
+      "apps" : [
+        "com.apple.dt.Xcode",
+        "com.microsoft.VSCode"
+      ],
+      "id" : "folder-550e8400-e29b-41d4-a716-446655440000",
+      "name" : "开发",
+      "type" : "folder"
+    },
+    {
+      "id" : "com.apple.Preview",
+      "type" : "app"
+    }
+  ],
+  "kind" : "qlaunchpad.layout",
+  "schemaVersion" : 1
+}
