@@ -1,8 +1,14 @@
 import AppKit
+import Darwin
 
 @main
 enum QLaunchpadMain {
     static func main() {
+        let args = Array(CommandLine.arguments.dropFirst())
+        if LaunchpadCLI.isInvocation(args) {
+            Darwin.exit(LaunchpadCLI.run(args))
+        }
+
         let application = NSApplication.shared
         // Packaged .app: use Icon Services (Assets.car / icns). Bare binary: flat PNG.
         if Bundle.main.bundleURL.pathExtension == "app" {
