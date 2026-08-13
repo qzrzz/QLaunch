@@ -486,6 +486,8 @@ final class AppStore: ObservableObject {
     private var lastScrollTime: CFTimeInterval = 0
     private var scanTask: Task<Void, Never>?
     private var layoutGeneration: UInt64 = 0
+    /// Bumped by import / external reload so Metal can drop an in-flight drag.
+    private(set) var dragGeneration: UInt64 = 0
 
     /// Points of scroll delta that equal one full page turn.
     private let pageScrollUnit: Double = 320
@@ -506,6 +508,7 @@ final class AppStore: ObservableObject {
         let defaults = UserDefaults.standard
         customApplicationSourcePaths = defaults.stringArray(forKey: LaunchpadPersistence.customSourcesKey) ?? []
         showHiddenAppsInSearch = defaults.bool(forKey: LaunchpadPersistence.showHiddenAppsKey)
+        rebuildLaunchpadItems()
     }
 
     deinit {
@@ -627,13 +630,19 @@ final class AppStore: ObservableObject {
     }
 
     func exportLayout(includeCatalog: Bool = true, includePaths: Bool = true) -> LaunchpadLayoutDocument {
-        let items: [LaunchpadLayoutItem] = launchpadItems.map { item in
-            switch item {
-            case .app(let app):
-                return .app(id: app.id)
-            case .folder(let folder):
-                return .folder(id: folder.id, name: folder.name, apps: folder.appIDs)
+        let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        var seen = Set<String>()
+        var items: [LaunchpadLayoutItem] = []
+        for id in itemOrderIDs {
+            guard seen.insert(id).inserted else { continue }
+            if let folder = folderByID[id] {
+                items.append(.folder(id: folder.id, name: folder.name, apps: folder.appIDs))
+            } else {
+                items.append(.app(id: id))
             }
+        }
+        for folder in folders where seen.insert(folder.id).inserted {
+            items.append(.folder(id: folder.id, name: folder.name, apps: folder.appIDs))
         }
         let catalog: [LaunchpadLayoutCatalogEntry]? = includeCatalog
             ? apps.map { app in
@@ -665,6 +674,9 @@ final class AppStore: ObservableObject {
         _ document: LaunchpadLayoutDocument,
         mode: LaunchpadLayoutImportMode
     ) throws -> LaunchpadLayoutReport {
+        guard !isLoading, !apps.isEmpty else {
+            throw LaunchpadLayoutError.malformed("application catalog is empty")
+        }
         let (applied, report) = try LaunchpadLayoutImporter.apply(
             document: document,
             mode: mode,
@@ -702,7 +714,11 @@ final class AppStore: ObservableObject {
     func reloadPersistedLayout() {
         layoutGeneration += 1
         adoptPersistedLayout()
-        reconcileLaunchpadItems()
+        if apps.isEmpty {
+            rebuildLaunchpadItems()
+        } else {
+            reconcileLaunchpadItems(persist: false)
+        }
         cancelActiveDrag()
         if let openedFolderID, folder(withID: openedFolderID) == nil {
             exitFolder()
@@ -1400,9 +1416,10 @@ final class AppStore: ObservableObject {
     private func cancelActiveDrag() {
         isDraggingFolderApp = false
         isFolderRemovalTargeted = false
+        dragGeneration += 1
     }
 
-    private func reconcileLaunchpadItems() {
+    private func reconcileLaunchpadItems(persist: Bool = true) {
         let result = LaunchpadLayoutReconciler.reconcile(
             apps: knownApps(),
             folders: folders,
@@ -1411,7 +1428,9 @@ final class AppStore: ObservableObject {
         )
         folders = result.folders
         itemOrderIDs = result.order
-        persistLayout()
+        if persist {
+            persistLayout()
+        }
         rebuildLaunchpadItems()
     }
 
@@ -1425,6 +1444,9 @@ final class AppStore: ObservableObject {
     }
 
     private func persistLayout() {
+        // An empty catalog is the first-scan window, not a real layout. Persisting
+        // a reconcile of `apps = []` would write an empty grid over a live import.
+        guard !apps.isEmpty else { return }
         guard let foldersData = try? LaunchpadPreferenceStore.encodeFolders(folders) else { return }
         LaunchpadPreferenceStore.writeLayout(
             domain: Self.preferenceDomain,

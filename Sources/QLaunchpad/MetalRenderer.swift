@@ -171,6 +171,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     private var dragSource: Int?
     private var draggedAppID: String?
+    private var dragGeneration: UInt64 = 0
     private var dragDestination: Int?
     private var dragStart: CGPoint = .zero
     /// Current pointer position in top-left view coordinates.
@@ -798,6 +799,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     @objc private func storeChanged() {
+        if isDragCancelledByLayout {
+            discardCancelledDrag()
+        }
         resourcePrewarmSignature = nil
         scheduleResourcePrewarmingIfNeeded(prune: true)
         startDisplayLink()
@@ -2409,9 +2413,24 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         contentTransitionPhase == .fadingOut ? frozenPageOffset : currentPageOffset
     }
 
+    private var isDragCancelledByLayout: Bool {
+        dragGeneration != store.dragGeneration
+    }
+
+    private func discardCancelledDrag() {
+        dragSource = nil
+        draggedAppID = nil
+        dragDestination = nil
+        dragHoverTargetID = nil
+        dragHoverVisualTargetID = nil
+        didDrag = false
+        store.setFolderDragState(isDragging: false)
+    }
+
     override func mouseDown(with event: NSEvent) {
         dragStart = convert(event.locationInWindow, from: nil)
         draggedAppID = nil
+        dragGeneration = store.dragGeneration
         dragPoint = CGPoint(x: dragStart.x, y: bounds.height - dragStart.y)
         dragGrabOffset = .zero
         edgePageDirection = 0
@@ -2680,6 +2699,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if isDragCancelledByLayout {
+            discardCancelledDrag()
+            return
+        }
         let point = convert(event.locationInWindow, from: nil)
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
         if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
@@ -2720,6 +2743,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             isPanningPage = false
             store.setFolderDragState(isDragging: false)
             needsDisplay = true
+        }
+        if isDragCancelledByLayout {
+            if isPanningPage {
+                store.endPagePan()
+            }
+            discardCancelledDrag()
+            return
         }
         if isPanningPage {
             store.endPagePan()

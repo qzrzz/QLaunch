@@ -47,6 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildLaunchpadPanel()
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(layoutDidChangeExternally(_:)),
+            name: .qlaunchpadLayoutDidChange,
+            object: nil
+        )
         store.load()
         installHotKey()
         applyDockIconPreference()
@@ -86,12 +92,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self,
             selector: #selector(hotKeyRecordingChanged(_:)),
             name: .qlaunchpadHotKeyRecordingChanged,
-            object: nil
-        )
-        DistributedNotificationCenter.default().addObserver(
-            self,
-            selector: #selector(layoutDidChangeExternally(_:)),
-            name: .qlaunchpadLayoutDidChange,
             object: nil
         )
     }
