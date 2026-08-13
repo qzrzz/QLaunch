@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import QLaunchpadCore
 
 /// Layout metrics for a Launchpad-style icon grid.
 /// Icon texture pixel size is `iconPointSize * IconRenderQuality.current.rasterScale`
@@ -10,7 +11,7 @@ enum GridLayoutPreset: String, CaseIterable, Identifiable {
     case sixByFour = "6x4-128"
     case sevenByFive = "7x5-128"
 
-    static let defaultsKey = "gridLayoutPreset"
+    static let defaultsKey = LaunchpadPersistence.gridLayoutPresetKey
     static let defaultPreset: Self = .sixByFour
 
     var id: Self { self }
