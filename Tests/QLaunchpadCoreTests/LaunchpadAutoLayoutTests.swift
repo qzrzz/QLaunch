@@ -71,6 +71,38 @@ final class LaunchpadAutoLayoutTests: XCTestCase {
         )
     }
 
+    func testCancelledSortReturnsNoStaleResult() {
+        let apps = [
+            app("z", name: "A"),
+            app("a", name: "Z"),
+            app("m", name: "M")
+        ]
+        XCTAssertNil(
+            LaunchpadAutoLayoutSorter.sortedIDs(
+                apps,
+                kind: .nameAscending,
+                cancellationCheck: { true }
+            )
+        )
+    }
+
+    func testCancellableSortMatchesRegularSort() {
+        let apps = [
+            app("c", name: "Safari"),
+            app("a", name: "Mail"),
+            app("b", name: "Xcode"),
+            app("d", name: "Mail", path: "/Z/Mail.app")
+        ]
+        XCTAssertEqual(
+            LaunchpadAutoLayoutSorter.sortedIDs(
+                apps,
+                kind: .nameAscending,
+                cancellationCheck: { false }
+            ),
+            LaunchpadAutoLayoutSorter.sortedIDs(apps, kind: .nameAscending)
+        )
+    }
+
     func testLayoutModeStorageRoundTrip() {
         XCTAssertEqual(LaunchpadLayoutMode(storageValue: nil), .user)
         XCTAssertEqual(LaunchpadLayoutMode(storageValue: "user"), .user)

@@ -559,6 +559,9 @@ final class AppStore: ObservableObject {
     private var autoLayoutFallbackItems: [LaunchpadItem] = []
     private var autoLayoutGeneration: [LaunchpadAutoLayoutKind: UInt64] = [:]
     private var autoLayoutTasks: [LaunchpadAutoLayoutKind: Task<Void, Never>] = [:]
+    /// Layouts whose last complete value remains readable until it can be
+    /// refreshed outside a presentation animation (currently recent launches).
+    private var deferredAutoLayoutKinds = Set<LaunchpadAutoLayoutKind>()
 
     private static var preferenceDomain: String {
         Bundle.main.bundleIdentifier ?? (kCFPreferencesCurrentApplication as String)
@@ -902,7 +905,13 @@ final class AppStore: ObservableObject {
 
     func recordAppLaunch(_ app: AppInfo) {
         recentLaunchDates[app.id] = Date()
-        invalidateAutoLayouts([.recentlyUsed])
+        // Keep the current order stable throughout dismissal. The refreshed
+        // recent layout is materialized after the window has become hidden.
+        invalidateAutoLayouts(
+            [.recentlyUsed],
+            keepStaleCache: true,
+            scheduleCurrent: false
+        )
         persistRecentLaunches()
     }
 
@@ -1698,6 +1707,11 @@ final class AppStore: ObservableObject {
         if !searchText.isEmpty {
             updateSearch("")
         }
+        // Work deliberately deferred by an app launch starts only after the
+        // dismissal animation has completed.
+        for kind in deferredAutoLayoutKinds {
+            scheduleAutoLayoutIfNeeded(kind)
+        }
     }
 
     private func normalized(_ value: String) -> String {
@@ -1835,7 +1849,7 @@ final class AppStore: ObservableObject {
     /// check makes cancellation race-safe when catalog metadata changes while a
     /// localized comparison sort is still running.
     private func scheduleAutoLayoutIfNeeded(_ kind: LaunchpadAutoLayoutKind) {
-        guard autoLayoutItemsByKind[kind] == nil,
+        guard autoLayoutItemsByKind[kind] == nil || deferredAutoLayoutKinds.contains(kind),
               autoLayoutTasks[kind] == nil,
               !apps.isEmpty else { return }
         if kind == .iconColor,
@@ -1850,8 +1864,10 @@ final class AppStore: ObservableObject {
         let launchDates = recentLaunchDates
         let colors = iconColorByAppID
         autoLayoutTasks[kind] = Task { @MainActor [weak self] in
-            let sortedIDs = await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) { () -> [String]? in
+                guard !Task.isCancelled else { return nil }
                 let visible = catalog.filter { !hidden.contains($0.id) }
+                guard !Task.isCancelled else { return nil }
                 let sortable = visible.map { app in
                     let lastUsedAt: Date?
                     switch (launchDates[app.id], app.lastUsedAt) {
@@ -1869,17 +1885,29 @@ final class AppStore: ObservableObject {
                         color: colors[app.id]
                     )
                 }
-                return LaunchpadAutoLayoutSorter.sortedIDs(sortable, kind: kind)
-            }.value
+                guard !Task.isCancelled else { return nil }
+                let ids = LaunchpadAutoLayoutSorter.sortedIDs(
+                    sortable,
+                    kind: kind,
+                    cancellationCheck: { Task.isCancelled }
+                )
+                return Task.isCancelled ? nil : ids
+            }
+            let sortedIDs = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
 
-            guard let self else { return }
+            guard let self, !Task.isCancelled, let sortedIDs else { return }
             guard self.autoLayoutGeneration[kind, default: 0] == generation else { return }
             self.autoLayoutTasks[kind] = nil
+            self.deferredAutoLayoutKinds.remove(kind)
             let currentByID = Dictionary(uniqueKeysWithValues: self.apps.map { ($0.id, $0) })
             self.autoLayoutItemsByKind[kind] = sortedIDs.compactMap { id in
                 currentByID[id].map(LaunchpadItem.app)
             }
-            if self.layoutMode == .auto(kind) {
+            if self.layoutMode == .auto(kind), self.isPresented {
                 // The cache itself is intentionally not @Published: send one
                 // invalidation only when the complete replacement is ready.
                 self.objectWillChange.send()
@@ -1887,13 +1915,24 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func invalidateAutoLayouts(_ kinds: Set<LaunchpadAutoLayoutKind>) {
+    private func invalidateAutoLayouts(
+        _ kinds: Set<LaunchpadAutoLayoutKind>,
+        keepStaleCache: Bool = false,
+        scheduleCurrent: Bool = true
+    ) {
         for kind in kinds {
             autoLayoutGeneration[kind, default: 0] &+= 1
-            autoLayoutItemsByKind.removeValue(forKey: kind)
             autoLayoutTasks.removeValue(forKey: kind)?.cancel()
+            if keepStaleCache {
+                deferredAutoLayoutKinds.insert(kind)
+            } else {
+                autoLayoutItemsByKind.removeValue(forKey: kind)
+                deferredAutoLayoutKinds.remove(kind)
+            }
         }
-        if case .auto(let currentKind) = layoutMode, kinds.contains(currentKind) {
+        if scheduleCurrent,
+           case .auto(let currentKind) = layoutMode,
+           kinds.contains(currentKind) {
             scheduleAutoLayoutIfNeeded(currentKind)
         }
     }
