@@ -1,18 +1,44 @@
 #!/usr/bin/env bun
 
+/**
+ * QLaunch 发布流程（自动更新对齐 QCopy / Qjiao）：
+ * 1. 同步 package.json 版本并递增 buildNumber
+ * 2. Release 编译 + 嵌入 Sparkle.framework + Developer ID 签名
+ * 3. notarize + staple
+ * 4. 生成 QLaunch-<version>.dmg（新用户安装）
+ * 5. 基于本机 release/ 历史做 delta，调用 generate_appcast 写出 appcast.xml
+ * 6. 上传 GitHub Release：DMG、ZIP、notes、appcast、delta
+ *
+ * 应用检查更新的 feed：
+ *   https://github.com/qzrzz/QLaunch/releases/latest/download/appcast.xml
+ *
+ * 依赖 .env：
+ *   MACOS_SIGNING_IDENTITY / APPLE_* / QLAUNCHPAD_NOTARY_PROFILE
+ *   SPARKLE_ACCOUNT            Keychain 账户（默认 qjiao，与内置公钥一致）
+ *   SPARKLE_PRIVATE_KEY_FILE   可选，私钥备份文件；默认读钥匙串
+ *   SPARKLE_BIN / SPARKLE_BIN_DIR  可选，generate_appcast 所在 bin
+ */
+
 import {
+  constants as fsConstants,
+  copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
 import {
+  SPARKLE_FEED_URL,
+  SPARKLE_PUBLIC_ED_KEY,
   buildApp,
   captureCommand,
   runCommand,
 } from "./build-app";
+import { generateAppcast } from "./generate-appcast";
 import {
   isSemVer,
   syncVersionAndBumpBuildNumber,
@@ -21,6 +47,28 @@ import {
 const ROOT_DIR = join(import.meta.dir, "..");
 const DEFAULT_NOTARY_PROFILE = "QLaunch-notary";
 const DEFAULT_GITHUB_REPOSITORY = "qzrzz/QLaunch";
+const ARTIFACT_PREFIX = "QLaunch";
+const UPDATES_DIR = join(ROOT_DIR, "build/updates");
+const RELEASE_CACHE_DIR = process.env.RELEASE_CACHE_DIR ?? join(ROOT_DIR, "release");
+const RELEASE_CACHE_ARCHIVES_DIR = join(RELEASE_CACHE_DIR, "archives");
+const RELEASE_CACHE_APPCAST_PATH = join(RELEASE_CACHE_DIR, "appcast.xml");
+const RELEASE_CACHE_MANIFEST_PATH = join(RELEASE_CACHE_DIR, "manifest.json");
+const MAX_DELTA_BASELINES = 3;
+
+interface ReleaseCacheEntry {
+  version: string;
+  build: string;
+  tag: string;
+  archiveName: string;
+  sha256: string;
+  size: number;
+  publishedAt: string;
+}
+
+interface ReleaseCacheManifest {
+  schemaVersion: 1;
+  entries: ReleaseCacheEntry[];
+}
 
 function loadEnv(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -141,6 +189,19 @@ async function createDMG(appPath: string, dmgPath: string): Promise<void> {
   }
 }
 
+function isValidSparklePublicKey(value: string): boolean {
+  return /^[A-Za-z0-9+/]{40,60}={0,2}$/.test(value) && !value.includes("REPLACE");
+}
+
+function requireSparklePublicKey(): string {
+  if (!isValidSparklePublicKey(SPARKLE_PUBLIC_ED_KEY)) {
+    throw new Error(
+      "SUPublicEDKey 无效。请设置 SPARKLE_PUBLIC_ED_KEY，或确认与钥匙串 SPARKLE_ACCOUNT 对应。",
+    );
+  }
+  return SPARKLE_PUBLIC_ED_KEY;
+}
+
 function releaseNotes(version: string): string {
   const changelogPath = join(ROOT_DIR, "CHANGELOG.md");
   if (!existsSync(changelogPath)) {
@@ -151,6 +212,290 @@ function releaseNotes(version: string): string {
   const target = sections.find((section) => section.startsWith("[" + version + "]") || section.startsWith(version));
   if (target) return target.trim();
   return sections[0]?.trim() || ("QLaunch " + version);
+}
+
+function copyFileAtomically(source: string, destination: string): void {
+  const temporaryPath = destination + "." + process.pid + ".tmp";
+  rmSync(temporaryPath, { force: true });
+  try {
+    copyFileSync(source, temporaryPath, fsConstants.COPYFILE_FICLONE);
+    renameSync(temporaryPath, destination);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+async function createFileSha256(path: string): Promise<string> {
+  const hash = new Bun.CryptoHasher("sha256");
+  for await (const chunk of Bun.file(path).stream()) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
+}
+
+function readReleaseCacheManifest(): ReleaseCacheManifest {
+  if (!existsSync(RELEASE_CACHE_MANIFEST_PATH)) {
+    return { schemaVersion: 1, entries: [] };
+  }
+  try {
+    const value = JSON.parse(readFileSync(RELEASE_CACHE_MANIFEST_PATH, "utf8")) as {
+      schemaVersion?: unknown;
+      entries?: unknown;
+    };
+    if (value.schemaVersion !== 1 || !Array.isArray(value.entries)) {
+      throw new Error("unsupported schema");
+    }
+    const entries = value.entries.filter(isReleaseCacheEntry);
+    return { schemaVersion: 1, entries };
+  } catch {
+    console.warn("⚠️ 忽略损坏的 release 缓存清单: " + RELEASE_CACHE_MANIFEST_PATH);
+    return { schemaVersion: 1, entries: [] };
+  }
+}
+
+function isReleaseCacheEntry(value: unknown): value is ReleaseCacheEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Partial<ReleaseCacheEntry>;
+  return (
+    typeof entry.version === "string" &&
+    entry.version.length > 0 &&
+    typeof entry.build === "string" &&
+    /^[1-9][0-9]*$/.test(entry.build) &&
+    typeof entry.tag === "string" &&
+    typeof entry.archiveName === "string" &&
+    basename(entry.archiveName) === entry.archiveName &&
+    entry.archiveName.endsWith(".zip") &&
+    typeof entry.sha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(entry.sha256) &&
+    typeof entry.size === "number" &&
+    Number.isSafeInteger(entry.size) &&
+    entry.size > 0 &&
+    typeof entry.publishedAt === "string" &&
+    Number.isFinite(Date.parse(entry.publishedAt))
+  );
+}
+
+async function validateReleaseCacheEntry(entry: ReleaseCacheEntry): Promise<boolean> {
+  const path = join(RELEASE_CACHE_ARCHIVES_DIR, entry.archiveName);
+  return (
+    existsSync(path) &&
+    Bun.file(path).size === entry.size &&
+    (await createFileSha256(path)) === entry.sha256
+  );
+}
+
+function assertBuildIsNewerThanCache(build: string, version: string): void {
+  const cachedBuilds = readReleaseCacheManifest().entries.map((entry) => BigInt(entry.build));
+  if (cachedBuilds.length === 0) return;
+  const latestBuild = cachedBuilds.reduce((left, right) => (right > left ? right : left));
+  if (BigInt(build) <= latestBuild) {
+    throw new Error(
+      "build " + build + " 不大于本地缓存的 build " + latestBuild +
+        "；发布 " + version + " 前请确认 package.json buildNumber 已递增",
+    );
+  }
+}
+
+async function prepareLocalDeltaBaselines(
+  currentBuild: string,
+  appcastPath: string,
+): Promise<void> {
+  const manifest = readReleaseCacheManifest();
+  if (existsSync(RELEASE_CACHE_APPCAST_PATH) && Bun.file(RELEASE_CACHE_APPCAST_PATH).size > 0) {
+    copyFileAtomically(RELEASE_CACHE_APPCAST_PATH, appcastPath);
+    console.log("▸ 使用本地 Sparkle 历史: " + RELEASE_CACHE_APPCAST_PATH);
+  }
+
+  const candidates = manifest.entries
+    .filter((entry) => entry.build !== currentBuild)
+    .sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt))
+    .slice(0, MAX_DELTA_BASELINES);
+
+  let copied = 0;
+  for (const entry of candidates) {
+    if (!(await validateReleaseCacheEntry(entry))) {
+      console.warn("⚠️ 忽略无效 delta 基线 " + entry.archiveName);
+      continue;
+    }
+    copyFileAtomically(
+      join(RELEASE_CACHE_ARCHIVES_DIR, entry.archiveName),
+      join(UPDATES_DIR, entry.archiveName),
+    );
+    copied += 1;
+    console.log(
+      "▸ delta 基线 " + copied + "/" + MAX_DELTA_BASELINES +
+        ": " + entry.archiveName + " (build " + entry.build + ")",
+    );
+  }
+  if (copied === 0) {
+    console.log("▸ 无有效本地基线，仅生成完整 ZIP 更新");
+  }
+}
+
+async function normalizeAppcastArchiveUrls(
+  path: string,
+  repository: string,
+): Promise<void> {
+  const original = readFileSync(path, "utf8");
+  const normalized = original.replace(/<item>[\s\S]*?<\/item>/g, (item): string => {
+    const version = item.match(
+      /<sparkle:shortVersionString>([^<]+)<\/sparkle:shortVersionString>/,
+    )?.[1];
+    if (!version || !/^[0-9A-Za-z.+-]+$/.test(version)) return item;
+    const archiveUrl =
+      "https://github.com/" + repository + "/releases/download/" +
+      "v" + version + "/" + ARTIFACT_PREFIX + "-" + version + ".zip";
+    return item
+      .replace(/<title>[^<]*<\/title>/, "<title>" + version + "</title>")
+      .replace(/(<enclosure\s+url=")[^"]+\.zip(")/, "$1" + archiveUrl + "$2");
+  });
+  if (normalized !== original) {
+    await Bun.write(path, normalized);
+  }
+}
+
+async function writeReleaseCacheManifest(manifest: ReleaseCacheManifest): Promise<void> {
+  mkdirSync(RELEASE_CACHE_DIR, { recursive: true });
+  const temporaryPath = RELEASE_CACHE_MANIFEST_PATH + "." + process.pid + ".tmp";
+  try {
+    await Bun.write(temporaryPath, JSON.stringify(manifest, null, 2) + "\n");
+    renameSync(temporaryPath, RELEASE_CACHE_MANIFEST_PATH);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+async function persistReleaseCache(
+  version: string,
+  build: string,
+  tag: string,
+  zipPath: string,
+  appcastPath: string,
+): Promise<void> {
+  if (!existsSync(zipPath) || Bun.file(zipPath).size === 0) {
+    throw new Error("无法缓存不完整的 Sparkle ZIP");
+  }
+  if (!existsSync(appcastPath) || Bun.file(appcastPath).size === 0) {
+    throw new Error("无法缓存不完整的 appcast");
+  }
+
+  mkdirSync(RELEASE_CACHE_ARCHIVES_DIR, { recursive: true });
+  const archiveName = basename(zipPath);
+  const entry: ReleaseCacheEntry = {
+    version,
+    build,
+    tag,
+    archiveName,
+    sha256: await createFileSha256(zipPath),
+    size: Bun.file(zipPath).size,
+    publishedAt: new Date().toISOString(),
+  };
+
+  copyFileAtomically(zipPath, join(RELEASE_CACHE_ARCHIVES_DIR, archiveName));
+  if (!(await validateReleaseCacheEntry(entry))) {
+    throw new Error("缓存 ZIP 校验失败: " + archiveName);
+  }
+  copyFileAtomically(appcastPath, RELEASE_CACHE_APPCAST_PATH);
+
+  const previous = readReleaseCacheManifest();
+  const entries = [
+    entry,
+    ...previous.entries.filter(
+      (cached) => cached.build !== entry.build && cached.archiveName !== entry.archiveName,
+    ),
+  ]
+    .sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt))
+    .slice(0, MAX_DELTA_BASELINES);
+  await writeReleaseCacheManifest({ schemaVersion: 1, entries });
+
+  const kept = new Set(entries.map((cached) => cached.archiveName));
+  for (const name of readdirSync(RELEASE_CACHE_ARCHIVES_DIR)) {
+    if (
+      name.startsWith(ARTIFACT_PREFIX + "-") &&
+      name.endsWith(".zip") &&
+      !kept.has(name)
+    ) {
+      rmSync(join(RELEASE_CACHE_ARCHIVES_DIR, name), { force: true });
+    }
+  }
+  console.log(
+    "▸ 已写入本地 Sparkle 历史 " + RELEASE_CACHE_DIR +
+      "（" + entries.length + "/" + MAX_DELTA_BASELINES + " 版）",
+  );
+}
+
+function listGeneratedDeltaPaths(): string[] {
+  if (!existsSync(UPDATES_DIR)) return [];
+  return readdirSync(UPDATES_DIR)
+    .filter((name) => name.endsWith(".delta"))
+    .sort()
+    .map((name) => join(UPDATES_DIR, name));
+}
+
+async function generateSparkleUpdates(options: {
+  appPath: string;
+  version: string;
+  buildNumber: string;
+  notes: string;
+  env: Record<string, string>;
+  repository: string;
+  sign: boolean;
+}): Promise<{ zipPath: string; notesPath: string; appcastPath: string }> {
+  const { appPath, version, buildNumber, notes, env, repository, sign } = options;
+  const tag = "v" + version;
+  const zipName = ARTIFACT_PREFIX + "-" + version + ".zip";
+  const notesName = ARTIFACT_PREFIX + "-" + version + ".md";
+  const zipPath = join(UPDATES_DIR, zipName);
+  const notesPath = join(UPDATES_DIR, notesName);
+  const appcastPath = join(UPDATES_DIR, "appcast.xml");
+
+  if (sign) {
+    assertBuildIsNewerThanCache(buildNumber, version);
+  }
+
+  rmSync(UPDATES_DIR, { recursive: true, force: true });
+  mkdirSync(UPDATES_DIR, { recursive: true });
+
+  if (sign && env.NO_HISTORY !== "1") {
+    await prepareLocalDeltaBaselines(buildNumber, appcastPath);
+  }
+
+  console.log("▸ 生成 Sparkle 完整更新 ZIP…");
+  await runCommand(["ditto", "-c", "-k", "--keepParent", appPath, zipPath]);
+  writeFileSync(notesPath, notes + "\n", "utf8");
+
+  if (sign) {
+    const account = env.SPARKLE_ACCOUNT?.trim() || env.SPARKLE_KEY_ACCOUNT?.trim() || "qjiao";
+    const privateKeyFile = env.SPARKLE_PRIVATE_KEY_FILE?.trim();
+    if (privateKeyFile && !existsSync(privateKeyFile)) {
+      throw new Error("SPARKLE_PRIVATE_KEY_FILE 指向的文件不存在");
+    }
+
+    console.log("▸ 调用 generate_appcast（签名 ZIP / 生成 delta / 更新 appcast）…");
+    await generateAppcast(
+      UPDATES_DIR,
+      {
+        downloadUrlPrefix: "https://github.com/" + repository + "/releases/download/" + tag + "/",
+        edKeyFile: privateKeyFile,
+        account,
+        versions: [buildNumber],
+      },
+      ROOT_DIR,
+    );
+    await normalizeAppcastArchiveUrls(appcastPath, repository);
+  } else {
+    writeFileSync(
+      appcastPath,
+      "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+        "<!-- unsigned local appcast for " + version + " (build " + buildNumber + ") -->\n",
+      "utf8",
+    );
+  }
+
+  if (!existsSync(appcastPath)) {
+    throw new Error("未生成 appcast: " + appcastPath);
+  }
+  return { zipPath, notesPath, appcastPath };
 }
 
 async function publishToGitHub(
@@ -191,6 +536,7 @@ async function publishToGitHub(
     await runCommand(["gh", "release", "upload", tag, asset, "--repo", repository, "--clobber"]);
   }
   console.log("✓ GitHub Release 已发布: " + tag);
+  console.log("  Sparkle feed: " + SPARKLE_FEED_URL);
 }
 
 async function main(): Promise<void> {
@@ -206,10 +552,13 @@ async function main(): Promise<void> {
   }
 
   const env = loadEnv();
+  requireSparklePublicKey();
   const { version, buildNumber } = syncVersionAndBumpBuildNumber(versionOverride);
   const publishing = !noPublish;
+  const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;
   console.log("\n📦 QLaunch " + (publishing ? "发布" : "本地构建") + "流程");
   console.log("▸ 版本: " + version + " | Build: " + buildNumber);
+  console.log("▸ Sparkle feed: " + SPARKLE_FEED_URL);
 
   const identity = await resolveSigningIdentity(env);
   const developerID = identity.includes("Developer ID Application");
@@ -236,25 +585,44 @@ async function main(): Promise<void> {
   }
 
   const dmgPath = join(ROOT_DIR, "build/QLaunch-" + version + ".dmg");
-  const zipPath = join(ROOT_DIR, "build/QLaunch-" + version + ".zip");
-  const notesPath = join(ROOT_DIR, "build/QLaunch-" + version + ".md");
   await createDMG(app.appPath, dmgPath);
-  rmSync(zipPath, { force: true });
-  await runCommand(["ditto", "-c", "-k", "--keepParent", app.appPath, zipPath]);
-  mkdirSync(join(ROOT_DIR, "build"), { recursive: true });
-  writeFileSync(notesPath, releaseNotes(version) + "\n", "utf8");
+  if (developerID && notarized) {
+    try {
+      await runCommand(["xcrun", "stapler", "staple", dmgPath]);
+    } catch {
+      console.warn("⚠️ DMG staple 失败（可稍后手动 stapler staple）");
+    }
+  }
+
+  const notes = releaseNotes(version);
+  const { zipPath, notesPath, appcastPath } = await generateSparkleUpdates({
+    appPath: app.appPath,
+    version,
+    buildNumber,
+    notes,
+    env,
+    repository,
+    sign: publishing,
+  });
 
   console.log("\n✓ 本地构建完成");
   console.log("  App: " + app.appPath);
   console.log("  DMG: " + dmgPath);
-  console.log("  ZIP: " + zipPath);
+  console.log("  Sparkle ZIP: " + zipPath);
+  console.log("  appcast: " + appcastPath);
   console.log("  Notes: " + notesPath);
   console.log("  签名: " + identity + " | 公证: " + (notarized ? "是" : "否"));
 
   if (publishing) {
-    await publishToGitHub(version, [dmgPath, zipPath, notesPath], notesPath, env);
+    await publishToGitHub(
+      version,
+      [dmgPath, zipPath, notesPath, appcastPath, ...listGeneratedDeltaPaths()],
+      notesPath,
+      env,
+    );
+    await persistReleaseCache(version, buildNumber, "v" + version, zipPath, appcastPath);
   } else {
-    console.log("ℹ️ 已跳过 GitHub Release 发布");
+    console.log("ℹ️ 已跳过 GitHub Release 与 release/ 缓存（--no-publish）");
   }
 }
 

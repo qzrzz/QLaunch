@@ -9,6 +9,9 @@ let package = Package(
     products: [
         .executable(name: "QLaunchpad", targets: ["QLaunchpad"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
+    ],
     targets: [
         .target(
             name: "QLaunchpadCore",
@@ -16,7 +19,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "QLaunchpad",
-            dependencies: ["QLaunchpadCore"],
+            dependencies: [
+                "QLaunchpadCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "Sources/QLaunchpad",
             resources: [
                 .process("Resources")

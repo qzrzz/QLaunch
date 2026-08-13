@@ -803,8 +803,9 @@ private struct AISettingsView: View {
 
 /// 关于页（参考 Qf `AboutSettingsView`：版本、作者与社区链接、版权）。
 private struct AboutSettingsView: View {
+    @ObservedObject private var updater = Updater.shared
+
     private static let githubURL = "https://github.com/qzrzz/QLaunch"
-    private static let releasesURL = "https://github.com/qzrzz/QLaunch/releases"
     private static let authorURL = "https://qzrzz.com/"
     private static let xURL = "https://x.com/qzrz256"
     private static let xiaohongshuURL = "https://www.xiaohongshu.com/"
@@ -879,10 +880,11 @@ private struct AboutSettingsView: View {
                 Spacer(minLength: 12)
 
                 Button("检查更新") {
-                    openURL(Self.releasesURL)
+                    updater.checkForUpdates()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(!updater.isCheckEnabled)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)

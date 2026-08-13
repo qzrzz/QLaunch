@@ -94,6 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: .qlaunchpadHotKeyRecordingChanged,
             object: nil
         )
+        // 提前武装 Sparkle，自动检查不依赖是否打开关于页。
+        _ = Updater.shared
     }
 
     func applicationWillTerminate(_ notification: Notification) {
