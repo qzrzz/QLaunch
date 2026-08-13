@@ -64,6 +64,7 @@
   letter-spacing: -0.01em;
   line-height: 1.45;
   overflow-wrap: break-word;
+  text-wrap: balance;
 }
 
 .heroActions {

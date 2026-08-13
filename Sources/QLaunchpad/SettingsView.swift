@@ -80,7 +80,6 @@ struct SettingsView: View {
 
 private struct GeneralSettingsView: View {
     @ObservedObject var store: AppStore
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage(QLaunchpadPreferences.showMenuBarIconKey)
     private var showMenuBarIcon = QLaunchpadPreferences.defaultShowMenuBarIcon
     @AppStorage(QLaunchpadPreferences.showDockIconKey)
@@ -92,13 +91,27 @@ private struct GeneralSettingsView: View {
     private var iconRenderQuality = IconRenderQuality.defaultQuality.rawValue
     @AppStorage(LaunchpadAnimationStyle.defaultsKey)
     private var presentationAnimationStyle = LaunchpadAnimationStyle.fly.rawValue
+    @State private var launchAtLogin = LaunchAtLogin.isEnabled || LaunchAtLogin.needsApproval
+    @State private var launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
     @State private var didClearCache = false
 
     var body: some View {
         Form {
             Section("启动") {
-                Toggle("登录时启动 QLaunch", isOn: $launchAtLogin)
-                    .disabled(true)
+                Toggle(isOn: launchAtLoginBinding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("登录时启动 QLaunch")
+                        Text(
+                            launchAtLoginNeedsApproval
+                                ? "已请求登录项，请在系统设置中允许"
+                                : "开机后在后台运行，不会打开主界面"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .toggleStyle(.switch)
 
                 Toggle(isOn: $showDockIcon) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -207,6 +220,51 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear(perform: refreshLaunchAtLogin)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshLaunchAtLogin()
+        }
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLogin },
+            set: { setLaunchAtLogin($0) }
+        )
+    }
+
+    private func refreshLaunchAtLogin() {
+        launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
+        launchAtLogin = LaunchAtLogin.isEnabled || launchAtLoginNeedsApproval
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try LaunchAtLogin.setEnabled(enabled)
+            refreshLaunchAtLogin()
+            if enabled, LaunchAtLogin.needsApproval {
+                LaunchAtLogin.openSystemSettings()
+            }
+        } catch {
+            refreshLaunchAtLogin()
+            presentLaunchAtLoginError(error)
+        }
+    }
+
+    private func presentLaunchAtLoginError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "无法更改登录项"
+        alert.informativeText = """
+        \(error.localizedDescription)
+
+        请将 QLaunch 放到「应用程序」文件夹后再试。
+        """
+        alert.addButton(withTitle: "好")
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func notifyAppearanceChanged() {
