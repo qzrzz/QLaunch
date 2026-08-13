@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "qlaunchpad.layout.schema.v1",
+  "title": "QLaunchpad layout document",
+  "description": "Versioned Launchpad layout (schemaVersion 1). Kind must be qlaunchpad.layout. Does not include settings such as customApplicationSourcePaths, hotkeys, or gridLayoutPreset writes. Import never applies catalog as layout.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "items"],
+  "properties": {
+    "kind": {
+      "const": "qlaunchpad.layout",
+      "description": "Magic string. Any other value is rejected."
+    },
+    "schemaVersion": {
+      "const": 1,
+      "description": "Positive integer. v1 decoder accepts only 1; missing or greater than 1 is rejected."
+    },
+    "exportedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp from export. Import ignores this field."
+    },
+    "appVersion": {
+      "type": "string",
+      "description": "CFBundleShortVersionString of the exporting binary. Import ignores this field."
+    },
+    "grid": {
+      "$ref": "#/$defs/grid",
+      "description": "Read-only snapshot of the target domain gridLayoutPreset. Import does not write this setting. Page 1 is items[0 .. pageCapacity)."
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 10000,
+      "description": "Root grid left-to-right, top-to-bottom, continuous across pages. Same identity space as launchpadItemOrder.",
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "hidden": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "If present, replaces hiddenAppIdentifiers with the resolved ids. If omitted, keep the live hidden set minus ids claimed by items / folder apps (implicit unhide). Must not overlap items or folder apps.",
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "catalog": {
+      "type": "array",
+      "maxItems": 10000,
+      "description": "Scanned apps at export time, including hidden ones. Import never adds catalog entries to the grid; catalog is only a resolver hint (step 3) and a name lookup for agents.",
+      "items": {
+        "$ref": "#/$defs/catalogEntry"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preset", "columns", "rows", "pageCapacity"],
+      "properties": {
+        "preset": {
+          "type": "string",
+          "description": "GridLayoutPreset raw value, e.g. 6x4-128. Unknown or missing values export as 6x4-128."
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pageCapacity": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "columns * rows. Typical values: 8 (4x2-256), 20 (5x4-128), 24 (6x4-128), 35 (7x5-128)."
+        }
+      }
+    },
+    "item": {
+      "oneOf": [
+        { "$ref": "#/$defs/appItem" },
+        { "$ref": "#/$defs/folderItem" }
+      ]
+    },
+    "appItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "const": "app" },
+        "id": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "AppInfo.id (bundle identifier, or bundle#standardizedPath for extra copies). Not the display name."
+        }
+      }
+    },
+    "folderItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name", "apps"],
+      "properties": {
+        "type": { "const": "folder" },
+        "id": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "Optional. Missing or blank becomes folder-<UUID> on import. Prefer keeping an existing folder id."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Required. Non-strict import maps a blank trimmed name to 文件夹. --strict fails on a blank name."
+        },
+        "apps": {
+          "type": "array",
+          "maxItems": 500,
+          "description": "Member AppInfo.id values in folder order. Must not reference another folder id. Empty folders are dropped by reconcile.",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    },
+    "catalogEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "bundleIdentifier", "name"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "bundleIdentifier": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "Display name for humans / agents. Never used as a primary key."
+        },
+        "path": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "Omitted when exporting with --no-paths."
+        }
+      }
+    }
+  }
+}
