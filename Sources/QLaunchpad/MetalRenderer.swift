@@ -1096,6 +1096,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // Unrestricted baking — always clear the allow-list first so a previous
         // low-memory session cannot block resident uploads.
         iconTextures.setAllowedAppIDs(nil)
+        folderIconTextures.setAllowedFolderIDs(nil)
 
         // Skip only while the same full-catalog job is already running or done.
         if signature == resourcePrewarmSignature {
@@ -1158,6 +1159,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 }
             }
 
+            // Reveal the visible batch once. Remaining off-page resident bakes
+            // must not wake the main thread once per completed texture.
+            guard !Task.isCancelled else { return }
+            await refreshAfterPriorityPrewarming(expectedSignature: signature)
+
             for app in remainingApps {
                 guard !Task.isCancelled else { return }
                 autoreleasepool { _ = textureStore.texture(for: app, allowCreate: true) }
@@ -1206,6 +1212,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             lastTextureWindowPage = targetPage
         } else {
             iconTextures.expandAllowedAppIDs(window.appIDs)
+            folderIconTextures.expandAllowedFolderIDs(window.folderIDs)
         }
 
         if signature == resourcePrewarmSignature, resourcePrewarmTask != nil {
@@ -1394,6 +1401,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         resourcePrewarmTask = nil
         store.setApplyingRenderQuality(false)
         suppressLazyIconReveal = false
+        startDisplayLink()
+        needsDisplay = true
+    }
+
+    private func refreshAfterPriorityPrewarming(expectedSignature: IconPrewarmSignature) {
+        guard !isResourcePrewarmingPaused,
+              resourcePrewarmSignature == expectedSignature else { return }
+        startDisplayLink()
         needsDisplay = true
     }
 

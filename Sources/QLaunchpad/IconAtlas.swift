@@ -217,9 +217,6 @@ final class IconTextureStore: @unchecked Sendable {
         cacheLock.lock()
         inflightBakes.remove(flight)
         cacheLock.unlock()
-        if texture != nil {
-            scheduleBakeNotification()
-        }
         return texture
     }
 
@@ -410,7 +407,7 @@ typealias IconAtlas = IconTextureStore
 /// reordering an app automatically rasterizes a new preview. Once created, the
 /// renderer can treat this exactly like an application icon and apply the same
 /// entrance, zoom, drag, and opacity animations to the whole image.
-final class FolderIconTextureStore {
+final class FolderIconTextureStore: @unchecked Sendable {
     private struct CacheKey: Hashable {
         let folderID: String
         let appIDs: [String]
@@ -420,8 +417,15 @@ final class FolderIconTextureStore {
 
     private let device: MTLDevice
     private let iconCache = AppIconCache()
+    private let cacheLock = NSLock()
+    private let bakeLock = NSLock()
     private var cache: [CacheKey: MTLTexture] = [:]
     private var backgroundCache: [String: MTLTexture] = [:]
+    /// Generation-tagged producers prevent a bake invalidated by `clear()` from
+    /// removing or overwriting a newer producer for the same folder key.
+    private var inflightBakes: [CacheKey: UInt64] = [:]
+    private var cacheGeneration: UInt64 = 0
+    private var allowedFolderIDs: Set<String>?
 
     private static let linearDisplayP3 = CGColorSpace(
         name: CGColorSpace.extendedLinearDisplayP3
@@ -432,30 +436,71 @@ final class FolderIconTextureStore {
     }
 
     func clear() {
+        cacheLock.lock()
+        cacheGeneration &+= 1
         cache.removeAll(keepingCapacity: true)
         backgroundCache.removeAll(keepingCapacity: true)
+        inflightBakes.removeAll(keepingCapacity: true)
+        allowedFolderIDs = nil
+        cacheLock.unlock()
+    }
+
+    func setAllowedFolderIDs(_ ids: Set<String>?) {
+        cacheLock.lock()
+        allowedFolderIDs = ids
+        cacheLock.unlock()
+    }
+
+    func expandAllowedFolderIDs(_ ids: Set<String>) {
+        cacheLock.lock()
+        if let existing = allowedFolderIDs {
+            allowedFolderIDs = existing.union(ids)
+        } else {
+            allowedFolderIDs = ids
+        }
+        cacheLock.unlock()
     }
 
     /// Keep only the listed folder textures (plus shared backgrounds).
     func retainOnly(folderIDs: Set<String>) {
+        cacheLock.lock()
+        allowedFolderIDs = folderIDs
         for key in cache.keys where !folderIDs.contains(key.folderID) {
             cache.removeValue(forKey: key)
         }
+        cacheLock.unlock()
     }
 
     func backgroundTexture(for preset: GridLayoutPreset) -> MTLTexture? {
         let quality = IconRenderQuality.current
         let pixelSize = Int(preset.iconPointSize * quality.rasterScale)
         let key = "\(quality.rawValue)|\(pixelSize)"
-        if let texture = backgroundCache[key] { return texture }
-        guard let padImage = padImage(for: preset),
-              let texture = makeTexture(
+        cacheLock.lock()
+        if let texture = backgroundCache[key] {
+            cacheLock.unlock()
+            return texture
+        }
+        let generation = cacheGeneration
+        cacheLock.unlock()
+        bakeLock.lock()
+        let built: MTLTexture?
+        if let padImage = padImage(for: preset) {
+            built = makeTexture(
                 padImage: padImage,
                 members: [],
                 pixelSize: pixelSize,
                 iconPointSize: preset.iconPointSize,
                 quality: quality
-              ) else { return nil }
+            )
+        } else {
+            built = nil
+        }
+        bakeLock.unlock()
+        guard let texture = built else { return nil }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard cacheGeneration == generation else { return nil }
+        if let existing = backgroundCache[key] { return existing }
         backgroundCache[key] = texture
         return texture
     }
@@ -476,20 +521,50 @@ final class FolderIconTextureStore {
             pixelSize: pixelSize,
             quality: quality.rawValue
         )
-        if let texture = cache[key] { return texture }
+        cacheLock.lock()
+        if let texture = cache[key] {
+            cacheLock.unlock()
+            return texture
+        }
         // Folder composites are rarer; never block the draw loop on a miss.
-        guard allowCreate else { return nil }
+        guard allowCreate,
+              allowedFolderIDs?.contains(folder.id) ?? true else {
+            cacheLock.unlock()
+            return nil
+        }
+        let generation = cacheGeneration
+        if inflightBakes[key] == generation {
+            cacheLock.unlock()
+            return nil
+        }
+        inflightBakes[key] = generation
+        cacheLock.unlock()
 
-        guard let padImage = padImage(for: preset),
-              let texture = makeTexture(
+        bakeLock.lock()
+        let texture: MTLTexture?
+        if let padImage = padImage(for: preset) {
+            texture = makeTexture(
                 padImage: padImage,
                 members: previewMembers,
                 pixelSize: pixelSize,
                 iconPointSize: preset.iconPointSize,
                 quality: quality
-              ) else {
-            return nil
+            )
+        } else {
+            texture = nil
         }
+        bakeLock.unlock()
+        cacheLock.lock()
+        defer {
+            if inflightBakes[key] == generation {
+                inflightBakes.removeValue(forKey: key)
+            }
+            cacheLock.unlock()
+        }
+        guard let texture,
+              cacheGeneration == generation,
+              allowedFolderIDs?.contains(folder.id) ?? true else { return nil }
+        if let existing = cache[key] { return existing }
         for oldKey in cache.keys where oldKey.folderID == folder.id && oldKey != key {
             cache.removeValue(forKey: oldKey)
         }

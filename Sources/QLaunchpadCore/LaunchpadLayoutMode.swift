@@ -124,6 +124,62 @@ public enum LaunchpadAutoLayoutSorter {
         }.map(\.id)
     }
 
+    /// Cancellable bottom-up merge sort used by background materialization.
+    /// Cancellation is checked between small comparison batches, so abandoning
+    /// a stale layout does not leave a full localized sort consuming CPU.
+    public static func sortedIDs(
+        _ apps: [LaunchpadAutoLayoutApp],
+        kind: LaunchpadAutoLayoutKind,
+        cancellationCheck: @Sendable () -> Bool
+    ) -> [String]? {
+        guard !cancellationCheck() else { return nil }
+        guard apps.count > 1 else { return apps.map(\.id) }
+
+        var source = apps
+        var destination = apps
+        var width = 1
+        var comparisonCount = 0
+
+        while width < source.count {
+            var start = 0
+            while start < source.count {
+                guard !cancellationCheck() else { return nil }
+                let middle = min(start + width, source.count)
+                let end = min(start + width * 2, source.count)
+                var left = start
+                var right = middle
+                var output = start
+
+                while left < middle, right < end {
+                    comparisonCount &+= 1
+                    if comparisonCount & 63 == 0, cancellationCheck() { return nil }
+                    if compare(source[right], source[left], kind: kind) {
+                        destination[output] = source[right]
+                        right += 1
+                    } else {
+                        destination[output] = source[left]
+                        left += 1
+                    }
+                    output += 1
+                }
+                while left < middle {
+                    destination[output] = source[left]
+                    left += 1
+                    output += 1
+                }
+                while right < end {
+                    destination[output] = source[right]
+                    right += 1
+                    output += 1
+                }
+                start = end
+            }
+            swap(&source, &destination)
+            width *= 2
+        }
+        return cancellationCheck() ? nil : source.map(\.id)
+    }
+
     public static func compare(
         _ lhs: LaunchpadAutoLayoutApp,
         _ rhs: LaunchpadAutoLayoutApp,
