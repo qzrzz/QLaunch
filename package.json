@@ -13,9 +13,6 @@
     "release": "bun scripts/release.ts",
     "run": "bun scripts/dev.ts",
     "clean": "bun scripts/clean.ts",
-    "check": "SWIFT_MODULECACHE_PATH=/private/tmp/qlaunchpad-swift-module-cache CLANG_MODULE_CACHE_PATH=/private/tmp/qlaunchpad-clang-module-cache swift package describe",
-    "layout:export": "bun scripts/layout.ts export",
-    "layout:import": "bun scripts/layout.ts import",
-    "layout:validate": "bun scripts/layout.ts validate"
+    "check": "SWIFT_MODULECACHE_PATH=/private/tmp/qlaunchpad-swift-module-cache CLANG_MODULE_CACHE_PATH=/private/tmp/qlaunchpad-clang-module-cache swift package describe"
   }
 }

@@ -57,6 +57,13 @@ const ICON_CACHE_MANIFEST = join(ICON_CACHE_DIR, "manifest.json");
 const FORCE_ICON_REBUILD = Bun.env.QLAUNCHPAD_FORCE_ICON === "1";
 const DEFAULT_SWIFT_MODULE_CACHE = "/private/tmp/qlaunchpad-swift-module-cache";
 const DEFAULT_CLANG_MODULE_CACHE = "/private/tmp/qlaunchpad-clang-module-cache";
+/** 与 Qjiao / QCopy 共用的 Sparkle EdDSA 公钥；发布时 SPARKLE_ACCOUNT 默认 qjiao。 */
+export const SPARKLE_PUBLIC_ED_KEY =
+  Bun.env.SPARKLE_PUBLIC_ED_KEY?.trim() || "rIu1scWZ0i+1pucGPQPhBmKpHUNjrJuiU2jDHHRAA20=";
+export const SPARKLE_FEED_URL =
+  Bun.env.SPARKLE_FEED_URL?.trim() ||
+  "https://github.com/qzrzz/QLaunch/releases/latest/download/appcast.xml";
+const SPARKLE_RPATH = "@executable_path/../Frameworks";
 
 const commandEnvironment = {
   ...Bun.env,
@@ -587,6 +594,12 @@ function makeInfoPlist(
     "  <true/>",
     "  <key>NSPrincipalClass</key>",
     "  <string>NSApplication</string>",
+    "  <key>SUFeedURL</key>",
+    "  <string>" + SPARKLE_FEED_URL + "</string>",
+    "  <key>SUPublicEDKey</key>",
+    "  <string>" + SPARKLE_PUBLIC_ED_KEY + "</string>",
+    "  <key>SUEnableAutomaticChecks</key>",
+    "  <true/>",
     "</dict>",
     "</plist>",
     "",
@@ -610,6 +623,67 @@ function makeDebugEntitlements(): string {
     "</plist>",
     "",
   ].join("\n");
+}
+
+function findSparkleFramework(scratchPath: string): string {
+  const roots = [
+    join(scratchPath, "artifacts"),
+    join(ROOT_DIR, ".build/artifacts"),
+  ];
+  const hits: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 8 || !existsSync(dir)) return;
+    let entries: ReturnType<typeof readdirSync>;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "Sparkle.framework") {
+          const binary = join(full, "Sparkle");
+          if (existsSync(binary) || existsSync(join(full, "Versions/Current/Sparkle"))) {
+            hits.push(full);
+          }
+          continue;
+        }
+        if (entry.name === "dSYMs" || entry.name === ".git") continue;
+        walk(full, depth + 1);
+      }
+    }
+  };
+  for (const root of roots) walk(root, 0);
+  const preferred = hits.find((path) => path.includes("macos-arm64") || path.includes("macos-"));
+  const found = preferred ?? hits[0];
+  if (!found) {
+    throw new Error(
+      "未找到 Sparkle.framework。请确认 Package.swift 已声明 Sparkle，并先完成 swift build。",
+    );
+  }
+  return found;
+}
+
+function embedSparkleFramework(appPath: string, scratchPath: string): string {
+  const source = findSparkleFramework(scratchPath);
+  const frameworksPath = join(appPath, "Contents/Frameworks");
+  const destination = join(frameworksPath, "Sparkle.framework");
+  mkdirSync(frameworksPath, { recursive: true });
+  rmSync(destination, { recursive: true, force: true });
+  cpSync(source, destination, { recursive: true });
+  return destination;
+}
+
+async function ensureExecutableRpath(executablePath: string, rpath: string): Promise<void> {
+  const loadCommands = await captureCommand(["otool", "-l", executablePath]);
+  if (loadCommands.includes(rpath)) return;
+  try {
+    await runCommand(["install_name_tool", "-add_rpath", rpath, executablePath]);
+  } catch {
+    await runCommand(["codesign", "--remove-signature", executablePath]);
+    await runCommand(["install_name_tool", "-add_rpath", rpath, executablePath]);
+  }
 }
 
 async function signApp(
@@ -710,6 +784,10 @@ export async function buildApp(options: AppBuildOptions): Promise<AppBuildResult
       (iconInstall.cacheHit ? " [缓存]" : "") +
       (iconInstall.normalized ? " [已兼容规范化]" : ""),
   );
+
+  const sparklePath = embedSparkleFramework(appPath, scratchPath);
+  await ensureExecutableRpath(executablePath, SPARKLE_RPATH);
+  console.log("✓ 已嵌入 Sparkle: " + relative(ROOT_DIR, sparklePath));
 
   if (options.signIdentity) {
     const allowDebugger = configuration === "debug";
