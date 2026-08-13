@@ -1,7 +1,8 @@
 import qlaunchpadIcon from "../../assets/qlaunchpad-icon.png";
 import { LanguageSwitcher } from "../../components/LanguageSwitcher";
 import { getSectionsContent } from "../../content";
-import { DOWNLOAD_URL, GITHUB_URL, uiDictMap, type SupportedLang } from "../../i18n/dict";
+import { DownloadAnchor } from "../../download";
+import { GITHUB_URL, uiDictMap, type SupportedLang } from "../../i18n/dict";
 import "./StickyHeader.css";
 
 interface StickyHeaderProps {
@@ -36,14 +37,9 @@ export function StickyHeader({ lang = "en" }: StickyHeaderProps) {
             {dict.viewOnGithub}
           </a>
 
-          <a
-            className="stickyHeaderLink stickyHeaderLink--action"
-            href={DOWNLOAD_URL}
-            target="_blank"
-            rel="noreferrer"
-          >
+          <DownloadAnchor className="stickyHeaderLink stickyHeaderLink--action">
             {dict.download}
-          </a>
+          </DownloadAnchor>
         </nav>
         <LanguageSwitcher currentLang={lang} />
       </div>

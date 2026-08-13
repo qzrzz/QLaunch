@@ -7,6 +7,7 @@ import { Hero } from "./Feature/Hero";
 import heroVideoAv1 from "./assets/v1-av1.mp4";
 import heroVideo from "./assets/v1.mp4";
 import heroVideoPoster from "./assets/v1-p.png";
+import { DownloadProvider } from "./download";
 import {
   autoRedirectDefaultLanguage,
   getCurrentLang,
@@ -39,30 +40,32 @@ export function App({ lang }: AppProps) {
 
   return (
     <main className="homePage" id="top">
-      <StickyHeader lang={currentLang} />
-      <Hero lang={currentLang} />
+      <DownloadProvider lang={currentLang}>
+        <StickyHeader lang={currentLang} />
+        <Hero lang={currentLang} />
 
-      <div className="heroVideo">
-        <video
-          className="heroVideo__media"
-          poster={heroVideoPoster}
-          autoPlay
-          loop
-          muted
-          playsInline
-          preload="metadata"
-          aria-label="QLaunch product preview"
-        >
-          <source src={heroVideoAv1} type='video/mp4; codecs="av01"' />
-          <source src={heroVideo} type="video/mp4" />
-        </video>
-      </div>
+        <div className="heroVideo">
+          <video
+            className="heroVideo__media"
+            poster={heroVideoPoster}
+            autoPlay
+            loop
+            muted
+            playsInline
+            preload="metadata"
+            aria-label="QLaunch product preview"
+          >
+            <source src={heroVideoAv1} type='video/mp4; codecs="av01"' />
+            <source src={heroVideo} type="video/mp4" />
+          </video>
+        </div>
 
-      {sections.map((section) => (
-        <FeatureSection key={section.id} section={section} />
-      ))}
+        {sections.map((section) => (
+          <FeatureSection key={section.id} section={section} />
+        ))}
 
-      <Footer lang={currentLang} />
+        <Footer lang={currentLang} />
+      </DownloadProvider>
     </main>
   );
 }
