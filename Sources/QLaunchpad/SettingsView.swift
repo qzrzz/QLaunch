@@ -55,7 +55,7 @@ struct SettingsView: View {
                 Group {
                     switch selection {
                     case .general:
-                        GeneralSettingsView()
+                        GeneralSettingsView(store: store)
                     case .applications:
                         ApplicationSettingsView(store: store)
                     case .about:
@@ -73,6 +73,7 @@ struct SettingsView: View {
 }
 
 private struct GeneralSettingsView: View {
+    @ObservedObject var store: AppStore
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage(QLaunchpadPreferences.showMenuBarIconKey)
     private var showMenuBarIcon = QLaunchpadPreferences.defaultShowMenuBarIcon
@@ -132,17 +133,23 @@ private struct GeneralSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                .disabled(store.isApplyingRenderQuality)
                 .onChange(of: iconRenderQuality) { _, newValue in
-                    // Explicit notification so Metal rebuilds immediately;
-                    // UserDefaults.didChangeNotification alone can lag behind
-                    // @AppStorage or coalesce with other preference writes.
                     UserDefaults.standard.set(newValue, forKey: IconRenderQuality.defaultsKey)
                     NotificationCenter.default.post(
                         name: .qlaunchpadRenderQualityChanged,
                         object: nil
                     )
                 }
-                if let quality = IconRenderQuality(rawValue: iconRenderQuality) {
+                if store.isApplyingRenderQuality {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("正在应用渲染质量…")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if let quality = IconRenderQuality(rawValue: iconRenderQuality) {
                     Text(quality.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
