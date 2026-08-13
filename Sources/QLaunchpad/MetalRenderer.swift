@@ -90,14 +90,16 @@ private struct AppListSignature: Equatable, Sendable {
 private struct TextAtlasSignature: Equatable, Sendable {
     let apps: AppListSignature
     let scale: CGFloat
+    let options: TextAtlas.Options
 
-    init(apps: [AppInfo], scale: CGFloat) {
+    init(apps: [AppInfo], scale: CGFloat, options: TextAtlas.Options) {
         self.apps = AppListSignature(apps: apps)
         self.scale = scale
+        self.options = options
     }
 
-    func matches(_ displayedApps: [AppInfo], scale: CGFloat) -> Bool {
-        self.scale == scale && apps.matches(displayedApps)
+    func matches(_ displayedApps: [AppInfo], scale: CGFloat, options: TextAtlas.Options) -> Bool {
+        self.scale == scale && self.options == options && apps.matches(displayedApps)
     }
 }
 
@@ -127,8 +129,10 @@ private final class FrameResources {
 final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private let store: AppStore
     private let commandQueue: MTLCommandQueue
-    private let iconPipeline: MTLRenderPipelineState
-    private let textPipeline: MTLRenderPipelineState
+    private let iconPipelineFloat16: MTLRenderPipelineState
+    private let textPipelineFloat16: MTLRenderPipelineState
+    private let iconPipelineUnorm8: MTLRenderPipelineState
+    private let textPipelineUnorm8: MTLRenderPipelineState
     private let iconTextures: IconTextureStore
     private let folderIconTextures: FolderIconTextureStore
     private let textAtlas: TextAtlas
@@ -146,6 +150,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var resourcePrewarmTask: Task<Void, Never>?
     private var isResourcePrewarmingPaused = false
     private var lastTextureWindowPage: Int = -1
+    /// Low-memory only: IDs whose texture was missing on a previous drawn frame.
+    private var iconsMissingTexture: Set<String> = []
+    /// Low-memory only: fade-in start time after an async bake lands.
+    private var iconRevealStartedAt: [String: CFTimeInterval] = [:]
+    private let iconRevealDuration: CFTimeInterval = 0.2
+    /// True while a quality switch is filling caches — skip fade so modes compare cleanly.
+    private var suppressLazyIconReveal = false
     private var firstFrameWaiters: [() -> Void] = []
     private var isFirstFrameCompletionScheduled = false
 
@@ -244,31 +255,30 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             fatalError("Unable to compile QLaunch shaders")
         }
 
-        let desc = MTLRenderPipelineDescriptor()
-        desc.vertexFunction = vertex
-        desc.fragmentFunction = iconFrag
-        // Keep the drawable linear all the way through Core Animation. With an
-        // sRGB attachment Metal gamma-encodes RGB after blending while alpha
-        // stays linear, which breaks the premultiplied relationship whenever a
-        // shared transition opacity is below one and makes icons flash brighter.
-        desc.colorAttachments[0].pixelFormat = .rgba16Float
-        desc.colorAttachments[0].isBlendingEnabled = true
-        // Premultiplied alpha blending (atlas + loader produce premultiplied content).
-        desc.colorAttachments[0].sourceRGBBlendFactor = .one
-        desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        desc.colorAttachments[0].sourceAlphaBlendFactor = .one
-        desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-
-        guard let iconPipeline = try? device.makeRenderPipelineState(descriptor: desc) else {
-            fatalError("Unable to create icon pipeline")
+        // Quality / performance stay on linear float16. Low memory uses 8-bit
+        // BGRA (not sRGB) so blending stays premultiplied and framebuffers shrink.
+        guard
+            let pipelines16 = Self.makeSpritePipelines(
+                device: device,
+                vertex: vertex,
+                iconFragment: iconFrag,
+                textFragment: textFrag,
+                pixelFormat: .rgba16Float
+            ),
+            let pipelines8 = Self.makeSpritePipelines(
+                device: device,
+                vertex: vertex,
+                iconFragment: iconFrag,
+                textFragment: textFrag,
+                pixelFormat: .bgra8Unorm
+            )
+        else {
+            fatalError("Unable to create sprite pipelines")
         }
-        self.iconPipeline = iconPipeline
-
-        desc.fragmentFunction = textFrag
-        guard let textPipeline = try? device.makeRenderPipelineState(descriptor: desc) else {
-            fatalError("Unable to create text pipeline")
-        }
-        self.textPipeline = textPipeline
+        iconPipelineFloat16 = pipelines16.icon
+        textPipelineFloat16 = pipelines16.text
+        iconPipelineUnorm8 = pipelines8.icon
+        textPipelineUnorm8 = pipelines8.text
 
         super.init(frame: .zero, device: device)
         delegate = self
@@ -276,14 +286,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         isPaused = true
         preferredFramesPerSecond = min(120, NSScreen.main?.maximumFramesPerSecond ?? 60)
         framebufferOnly = false
-        colorPixelFormat = .rgba16Float
         clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         wantsLayer = true
         layer?.isOpaque = false
-        (layer as? CAMetalLayer)?.colorspace = CGColorSpace(
-            name: CGColorSpace.extendedLinearDisplayP3
-        )
         autoResizeDrawable = true
+        applyDrawableConfiguration(for: IconRenderQuality.current)
 
         let iconSamp = MTLSamplerDescriptor()
         iconSamp.minFilter = .linear
@@ -334,6 +341,67 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         resourcePrewarmTask?.cancel()
         displayLink?.invalidate()
         NotificationCenter.default.removeObserver(self)
+    }
+
+    private var activeIconPipeline: MTLRenderPipelineState {
+        IconRenderQuality.current.usesUnorm8Drawable ? iconPipelineUnorm8 : iconPipelineFloat16
+    }
+
+    private var activeTextPipeline: MTLRenderPipelineState {
+        IconRenderQuality.current.usesUnorm8Drawable ? textPipelineUnorm8 : textPipelineFloat16
+    }
+
+    private static func makeSpritePipelines(
+        device: MTLDevice,
+        vertex: MTLFunction,
+        iconFragment: MTLFunction,
+        textFragment: MTLFunction,
+        pixelFormat: MTLPixelFormat
+    ) -> (icon: MTLRenderPipelineState, text: MTLRenderPipelineState)? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vertex
+        desc.fragmentFunction = iconFragment
+        desc.colorAttachments[0].pixelFormat = pixelFormat
+        desc.colorAttachments[0].isBlendingEnabled = true
+        desc.colorAttachments[0].sourceRGBBlendFactor = .one
+        desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        desc.colorAttachments[0].sourceAlphaBlendFactor = .one
+        desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        guard let icon = try? device.makeRenderPipelineState(descriptor: desc) else {
+            return nil
+        }
+        desc.fragmentFunction = textFragment
+        guard let text = try? device.makeRenderPipelineState(descriptor: desc) else {
+            return nil
+        }
+        return (icon, text)
+    }
+
+    /// Match the layer to the active quality. Performance / low memory: 8-bit drawable.
+    /// Only `colorPixelFormat` is updated live — replacing `CAMetalLayer` breaks
+    /// MTKView's drawable until relaunch. Drawable count is init-only.
+    private func applyDrawableConfiguration(for quality: IconRenderQuality) {
+        let format: MTLPixelFormat = quality.usesUnorm8Drawable ? .bgra8Unorm : .rgba16Float
+        colorPixelFormat = format
+        guard let metalLayer = layer as? CAMetalLayer else { return }
+        metalLayer.pixelFormat = format
+        if appliedDrawableCount == nil {
+            metalLayer.maximumDrawableCount = quality.maximumDrawableCount
+            appliedDrawableCount = quality.maximumDrawableCount
+        }
+        metalLayer.framebufferOnly = false
+        metalLayer.isOpaque = false
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+    }
+
+    private var appliedDrawableCount: Int?
+
+    private var textAtlasOptions: TextAtlas.Options {
+        switch IconRenderQuality.current {
+        case .quality: .standard
+        case .performance: .performance
+        case .lowMemory: .lowMemory
+        }
     }
 
     // MARK: Shader source
@@ -482,6 +550,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             && !dragInteractionActive
             && dragReleaseAnimation == nil
             && dragHoverProgress < 0.001
+            && iconRevealStartedAt.isEmpty
         {
             displayLink?.invalidate()
             displayLink = nil
@@ -753,40 +822,35 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         startDisplayLink()
     }
 
-    /// Rebuild icon textures at the active scale and redraw immediately so
-    /// Settings changes are visible under the settings window without relaunch.
+    /// Drop GPU caches and rebuild off the main thread so Settings stays responsive.
     private func applyRenderQualityChange() {
         let quality = IconRenderQuality.current
+        if quality == lastRenderQuality, store.isApplyingRenderQuality {
+            return
+        }
         lastRenderQuality = quality
+        store.setApplyingRenderQuality(true)
+        suppressLazyIconReveal = true
+        applyDrawableConfiguration(for: quality)
 
         pauseResourcePrewarming()
         iconTextures.resetForRenderQualityChange()
         folderIconTextures.clear()
+        textAtlas.clear()
+        lastTextSignature = nil
+        iconsMissingTexture.removeAll(keepingCapacity: true)
+        iconRevealStartedAt.removeAll(keepingCapacity: true)
         lastCatalogSignature = nil
         resourcePrewarmSignature = nil
         isResourcePrewarmingPaused = false
 
-        // Bake the currently visible page on the main thread so the next frame
-        // already shows the new quality instead of empty placeholders.
-        let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
-        let page = max(0, Int(currentPageOffset.rounded()))
-        let capacity = max(store.pageCapacity, 1)
-        let start = min(items.count, page * capacity)
-        let end = min(items.count, start + capacity)
-        if start < end {
-            for item in items[start..<end] {
-                _ = iconTexture(for: item, allowCreate: true)
-            }
-        }
-
         scheduleResourcePrewarmingIfNeeded(prune: true)
+        if resourcePrewarmTask == nil {
+            store.setApplyingRenderQuality(false)
+            suppressLazyIconReveal = false
+        }
         startDisplayLink()
         needsDisplay = true
-        // MTKView is paused; force one draw now so the Launchpad under Settings
-        // updates without waiting for the next event loop tick.
-        if window != nil, bounds.width > 1, bounds.height > 1 {
-            draw()
-        }
     }
 
     @objc private func clearCacheRequested() {
@@ -875,21 +939,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         pruneIconTextureCaches(appIDs: window.appIDs, folderIDs: window.folderIDs)
         lastTextureWindowPage = page
 
-        // Keep labels for the same page; drop other glyph sheets via rebuild.
-        let capacity = max(store.pageCapacity, 1)
-        let start = min(items.count, page * capacity)
-        let end = min(items.count, start + capacity)
-        let pageItems = start < end ? Array(items[start..<end]) : []
-        let labelApps = textAtlasApps(for: pageItems)
-        if labelApps.isEmpty {
-            textAtlas.clear()
-            lastTextSignature = nil
-        } else {
-            let scale = windowScale
-            let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
-            textAtlas.rebuild(with: labelApps, scale: scale)
-            lastTextSignature = textSignature
-        }
+        // Labels are cheap to rebuild on the next open; drop the sheet now.
+        textAtlas.clear()
+        lastTextSignature = nil
+        iconsMissingTexture.removeAll(keepingCapacity: true)
+        iconRevealStartedAt.removeAll(keepingCapacity: true)
 
         // Low-memory: re-plan neighbor prewarm on next show; keep current-page cache.
         resourcePrewarmSignature = nil
@@ -1026,7 +1080,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let preset = GridLayoutPreset.current
         let scale = windowScale
         let labelApps = textAtlasApps(for: items)
-        let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
+        let textSignature = TextAtlasSignature(
+            apps: labelApps,
+            scale: scale,
+            options: textAtlasOptions
+        )
 
         resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
             for app in firstPageApps {
@@ -1143,9 +1201,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let folderStore = folderIconTextures
         let preset = GridLayoutPreset.current
         let scale = windowScale
-        let labelSource = store.isSearching ? Array(items.prefix(searchCap)) : pageItems
+        let labelSource = store.isSearching
+            ? Array(items.prefix(searchCap))
+            : itemsForPages(around: targetPage, radius: 1, in: items)
         let labelApps = textAtlasApps(for: labelSource)
-        let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
+        let textSignature = TextAtlasSignature(
+            apps: labelApps,
+            scale: scale,
+            options: textAtlasOptions
+        )
 
         resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
             for app in priorityApps {
@@ -1267,9 +1331,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard !isResourcePrewarmingPaused,
               resourcePrewarmSignature == expectedSignature else { return }
         if lastTextSignature != textSignature {
-            textAtlas.rebuild(with: apps, scale: scale)
+            textAtlas.rebuild(with: apps, scale: scale, options: textAtlasOptions)
             lastTextSignature = textSignature
         }
+        store.setApplyingRenderQuality(false)
         needsDisplay = true
     }
 
@@ -1277,6 +1342,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard !isResourcePrewarmingPaused,
               resourcePrewarmSignature == expectedSignature else { return }
         resourcePrewarmTask = nil
+        store.setApplyingRenderQuality(false)
+        suppressLazyIconReveal = false
         needsDisplay = true
     }
 
@@ -1362,20 +1429,18 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             case .app(let app):
                 append(app)
             case .folder(let folder):
-                guard let member = folder.appIDs.lazy.compactMap({ self.store.app(withID: $0) }).first else {
-                    continue
-                }
+                // Closed folders only show the folder title. Member names are
+                // baked when the folder is opened (`displayedItems` become those apps).
+                let memberURL = folder.appIDs.lazy.compactMap { self.store.app(withID: $0)?.url }.first
+                    ?? URL(fileURLWithPath: "/Applications")
                 append(
                     AppInfo(
                         id: folder.id,
                         name: folder.name,
-                        url: member.url,
+                        url: memberURL,
                         bundleIdentifier: folder.id
                     )
                 )
-                for appID in folder.appIDs {
-                    if let app = store.app(withID: appID) { append(app) }
-                }
             }
         }
         return result
@@ -1585,7 +1650,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         // Text atlas: resident modes keep labels for the full item list;
-        // low-memory builds search results or pages near the camera.
+        // low-memory bakes the visible page ± 1 (same window as icons).
         let scale = windowScale
         let labelItems: [LaunchpadItem]
         if quality.usesLazyTextureLoading {
@@ -1600,11 +1665,19 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             labelItems = displayedItems
         }
         let labelApps = textAtlasApps(for: labelItems)
-        if lastTextSignature?.matches(labelApps, scale: scale) != true,
+        if lastTextSignature?.matches(labelApps, scale: scale, options: textAtlasOptions) != true,
            !labelApps.isEmpty {
-            let textSignature = TextAtlasSignature(apps: labelApps, scale: scale)
-            textAtlas.rebuild(with: labelApps, scale: scale)
-            lastTextSignature = textSignature
+            let textSignature = TextAtlasSignature(
+                apps: labelApps,
+                scale: scale,
+                options: textAtlasOptions
+            )
+            // Full-catalog atlases are built on the prewarm queue. Doing them
+            // here freezes Settings when switching to performance / quality.
+            if textAtlasOptions.fitToContent || !store.isApplyingRenderQuality {
+                textAtlas.rebuild(with: labelApps, scale: scale, options: textAtlasOptions)
+                lastTextSignature = textSignature
+            }
         }
 
         let now = CACurrentMediaTime()
@@ -1663,6 +1736,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard let drawable = currentDrawable,
               let passDescriptor = currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
+            if !firstFrameWaiters.isEmpty {
+                startDisplayLink()
+                needsDisplay = true
+            }
             return
         }
 
@@ -1703,6 +1780,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             items: displayedItems,
             pageOffset: pageOffset,
             alphaScale: gridAlpha,
+            now: now,
             metrics: metrics,
             midX: midX,
             midY: midY,
@@ -1733,7 +1811,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             index: 1
         )
 
-        encoder.setRenderPipelineState(iconPipeline)
+        encoder.setRenderPipelineState(activeIconPipeline)
         encoder.setFragmentSamplerState(iconSampler, index: 0)
         if let iconBuffer = frameSlot.iconBuffer {
             for index in iconSprites.indices {
@@ -1754,7 +1832,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         if let textBuffer = frameSlot.textBuffer {
-            encoder.setRenderPipelineState(textPipeline)
+            encoder.setRenderPipelineState(activeTextPipeline)
             encoder.setFragmentSamplerState(textSampler, index: 0)
             for batch in textBatches {
                 guard batch.sheet < textAtlas.sheets.count else { continue }
@@ -2002,6 +2080,37 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         )
     }
 
+    /// Fade an icon that just arrived from the low-memory async bake. Cached
+    /// textures (already present on first draw) stay at full opacity.
+    private func lazyIconRevealAlpha(
+        id: String,
+        hasTexture: Bool,
+        now: CFTimeInterval
+    ) -> Float {
+        guard IconRenderQuality.current.usesLazyTextureLoading else { return 1 }
+        if suppressLazyIconReveal || store.isApplyingRenderQuality {
+            iconRevealStartedAt.removeValue(forKey: id)
+            return hasTexture ? 1 : 0
+        }
+        if !hasTexture {
+            iconsMissingTexture.insert(id)
+            iconRevealStartedAt.removeValue(forKey: id)
+            return 0
+        }
+        if iconsMissingTexture.contains(id) {
+            iconsMissingTexture.remove(id)
+            iconRevealStartedAt[id] = now
+        }
+        guard let start = iconRevealStartedAt[id] else { return 1 }
+        let t = (now - start) / iconRevealDuration
+        if t >= 1 {
+            iconRevealStartedAt.removeValue(forKey: id)
+            return 1
+        }
+        let x = min(1, max(0, t))
+        return Float(x * x * (3 - 2 * x))
+    }
+
     /// - Parameter allowCreate: `false` during interactive frames so paging never
     ///   stalls on CG→Metal uploads (those run on the icon bake queue).
     private func iconTexture(for item: LaunchpadItem, allowCreate: Bool = false) -> MTLTexture? {
@@ -2027,6 +2136,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         items: [LaunchpadItem],
         pageOffset: Double,
         alphaScale: Float,
+        now: CFTimeInterval,
         metrics: GridMetrics,
         midX: CGFloat,
         midY: CGFloat,
@@ -2182,6 +2292,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 // so every item below follows the exact same sprite path.
                 let texture = primedTexture
                     ?? iconTexture(for: item, allowCreate: allowCreate)
+                let reveal = lazyIconRevealAlpha(
+                    id: itemID,
+                    hasTexture: texture != nil,
+                    now: now
+                )
+                let drawnAlpha = alpha * reveal
 
                 // Preserve the exact 40% pressed opacity while the launched
                 // icon fades. Clearing dragSource on mouse-up must not briefly
@@ -2211,7 +2327,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                                 center: c,
                                 size: metrics.iconSize * itemScale * previewScale,
                                 uv: fullUV,
-                                alpha: alpha * Float(hoverProgress),
+                                alpha: drawnAlpha * Float(hoverProgress),
                                 pressed: false
                             )
                         )
@@ -2223,7 +2339,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                         // every icon and can never cover a neighbouring sprite.
                         iconDrawTextures.insert(texture, at: 0)
                         iconSprites.insert(
-                            .focus(center: c, size: iconSize * 1.06, alpha: alpha),
+                            .focus(center: c, size: iconSize * 1.06, alpha: drawnAlpha),
                             at: 0
                         )
                     }
@@ -2231,7 +2347,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                         center: c,
                         size: iconSize,
                         uv: fullUV,
-                        alpha: alpha,
+                        alpha: drawnAlpha,
                         pressed: pressed
                     )
                     if isDragged || isReturning {
@@ -2260,7 +2376,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                                 height: label.heightPoints * itemScale
                             ),
                             uv: label.uv,
-                            alpha: alpha * 0.9
+                            alpha: drawnAlpha * 0.9
                         )
                     )
                 }

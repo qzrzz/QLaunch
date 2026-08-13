@@ -10,8 +10,8 @@ private var iconTextureRasterScale: CGFloat {
 /// One linear Display P3 texture per app.
 ///
 /// - **Quality:** `RGBA16Float`, 4× raster.
-/// - **Performance / low memory:** same linear Display P3 bake, quantized to
-///   `RGBA8Unorm`, 2× raster (residency policy is chosen by the renderer).
+/// - **Performance:** linear Display P3 quantized to `RGBA8Unorm`, 2× raster.
+/// - **Low memory:** same 2× RGBA8 bake as performance (residency is page-windowed).
 final class IconTextureStore: @unchecked Sendable {
     private struct CacheKey: Hashable {
         let appID: String

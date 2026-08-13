@@ -328,11 +328,11 @@ enum IconRenderQuality: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .quality:
-            "最高画质渲染，内存消耗更高"
+            "最高画质，设计师必备，内存消耗更高"
         case .performance:
             "常规画质，与系统显示效果相当"
         case .lowMemory:
-            "减小内存消耗，但图标加载会更慢"
+            "常规画质，为减小内存消耗，滚动页面时图标加载会更慢"
         }
     }
 
@@ -367,6 +367,17 @@ enum IconRenderQuality: String, CaseIterable, Identifiable {
         case .performance, .lowMemory: 0
         }
     }
+
+    /// Quality keeps a float16 drawable. Performance and low memory present 8-bit.
+    var usesUnorm8Drawable: Bool {
+        switch self {
+        case .quality: false
+        case .performance, .lowMemory: true
+        }
+    }
+
+    /// Triple buffer for fluent animation; double buffer to drop one 4K surface.
+    var maximumDrawableCount: Int { self == .lowMemory ? 2 : 3 }
 
     static var current: Self {
         guard let rawValue = UserDefaults.standard.string(forKey: defaultsKey),
@@ -443,6 +454,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var isFolderRemovalTargeted = false
     @Published private(set) var searchText = ""
     @Published private(set) var isLoading = true
+    @Published private(set) var isApplyingRenderQuality = false
     @Published private(set) var keyboardFocusID: String?
     @Published private(set) var isKeyboardNavigationActive = false
     @Published private(set) var hiddenAppIDs: Set<String>
@@ -473,6 +485,12 @@ final class AppStore: ObservableObject {
     @Published private(set) var isPageGestureActive = false
 
     var pageCapacity: Int { GridMetrics.pageCapacity }
+
+    func setApplyingRenderQuality(_ applying: Bool) {
+        if isApplyingRenderQuality != applying {
+            isApplyingRenderQuality = applying
+        }
+    }
     private var scrollAccumulated: Double = 0
     private var lastScrollTime: CFTimeInterval = 0
     private var scanTask: Task<Void, Never>?

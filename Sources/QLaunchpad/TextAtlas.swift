@@ -15,12 +15,30 @@ struct LabelLayout {
 /// Linear Display P3 system-font atlas with grayscale antialiasing and drop shadow.
 @MainActor
 final class TextAtlas {
+    struct Options: Equatable, Sendable {
+        var useUnorm8: Bool
+        var maxWidth: Int
+        var maxHeight: Int
+        var fitToContent: Bool
+
+        /// Quality: fixed 2048² float16.
+        static let standard = Options(
+            useUnorm8: false, maxWidth: 2048, maxHeight: 2048, fitToContent: false
+        )
+        /// Performance: fixed 2048² 8-bit, full catalog.
+        static let performance = Options(
+            useUnorm8: true, maxWidth: 2048, maxHeight: 2048, fitToContent: false
+        )
+        /// Low memory: 8-bit sheet sized to the current page window.
+        static let lowMemory = Options(
+            useUnorm8: true, maxWidth: 1024, maxHeight: 1024, fitToContent: true
+        )
+    }
+
     private(set) var sheets: [MTLTexture] = []
     private(set) var layouts: [String: LabelLayout] = [:]
 
     private let device: MTLDevice
-    private let atlasWidth = 2048
-    private let atlasHeight = 2048
 
     static let pointSize: CGFloat = 14
     static let maxWidthPoints: CGFloat = 152
@@ -37,7 +55,7 @@ final class TextAtlas {
         sheets.removeAll(keepingCapacity: true)
     }
 
-    func rebuild(with apps: [AppInfo], scale: CGFloat) {
+    func rebuild(with apps: [AppInfo], scale: CGFloat, options: Options = .standard) {
         clear()
         guard !apps.isEmpty else { return }
 
@@ -58,10 +76,15 @@ final class TextAtlas {
             nil
         )
 
-        let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
+        // 8-bit bitmaps cannot use extendedLinearDisplayP3 (CGContext is nil).
+        let colorSpace = CGColorSpace(
+            name: options.useUnorm8
+                ? CGColorSpace.linearDisplayP3
+                : CGColorSpace.extendedLinearDisplayP3
+        )!
         let textColor = CGColor(colorSpace: colorSpace, components: [1, 1, 1, 1])!
         let shadowColor = CGColor(colorSpace: colorSpace, components: [0, 0, 0, Self.shadowOpacity])!
-        let bytesPerRow = atlasWidth * 4 * MemoryLayout<Float16>.size
+        let bytesPerPixel = options.useUnorm8 ? 4 : 4 * MemoryLayout<Float16>.size
 
         struct Prepared {
             let id: String
@@ -128,6 +151,33 @@ final class TextAtlas {
             ))
         }
 
+        let atlasWidth: Int
+        let atlasHeight: Int
+        if options.fitToContent {
+            let sizes = prepared.map { (
+                min($0.pixelWidth, options.maxWidth),
+                min($0.pixelHeight, options.maxHeight)
+            ) }
+            let fitted = Self.compactAtlasSize(
+                glyphs: sizes,
+                maxWidth: options.maxWidth,
+                maxHeight: options.maxHeight
+            )
+            atlasWidth = fitted.width
+            atlasHeight = fitted.height
+        } else {
+            atlasWidth = options.maxWidth
+            atlasHeight = options.maxHeight
+        }
+        let bytesPerRow = atlasWidth * bytesPerPixel
+        let bitsPerComponent = options.useUnorm8 ? 8 : 16
+        let bitmapInfo = options.useUnorm8
+            ? CGImageAlphaInfo.premultipliedLast.rawValue
+            : CGImageAlphaInfo.premultipliedLast.rawValue
+                | CGBitmapInfo.byteOrder16Little.rawValue
+                | CGBitmapInfo.floatComponents.rawValue
+        let pixelFormat: MTLPixelFormat = options.useUnorm8 ? .rgba8Unorm : .rgba16Float
+
         var sheetIndex = 0
         var cursorX = 0
         var cursorY = 0
@@ -139,12 +189,10 @@ final class TextAtlas {
                 data: nil,
                 width: atlasWidth,
                 height: atlasHeight,
-                bitsPerComponent: 16,
+                bitsPerComponent: bitsPerComponent,
                 bytesPerRow: bytesPerRow,
                 space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-                    | CGBitmapInfo.byteOrder16Little.rawValue
-                    | CGBitmapInfo.floatComponents.rawValue
+                bitmapInfo: bitmapInfo
             ) else { return false }
             context.clear(CGRect(x: 0, y: 0, width: atlasWidth, height: atlasHeight))
             // Transparent compositing needs grayscale coverage, not legacy LCD
@@ -171,7 +219,7 @@ final class TextAtlas {
             }
 
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba16Float,
+                pixelFormat: pixelFormat,
                 width: atlasWidth,
                 height: atlasHeight,
                 mipmapped: false
@@ -253,5 +301,62 @@ final class TextAtlas {
         }
 
         finishSheet()
+    }
+
+    private static func nextPowerOfTwo(_ value: Int) -> Int {
+        var size = 64
+        while size < value { size *= 2 }
+        return size
+    }
+
+    /// Pack into the smallest POT sheet that holds every glyph (one sheet if possible).
+    private static func compactAtlasSize(
+        glyphs: [(width: Int, height: Int)],
+        maxWidth: Int,
+        maxHeight: Int
+    ) -> (width: Int, height: Int) {
+        var packWidth = min(512, maxWidth)
+        while true {
+            let packed = simulatePack(glyphs, atlasWidth: packWidth, atlasHeight: maxHeight)
+            if packed.sheetCount == 1 {
+                let height = min(maxHeight, nextPowerOfTwo(max(packed.usedHeight, 64)))
+                return (packWidth, height)
+            }
+            if packWidth >= maxWidth {
+                return (maxWidth, maxHeight)
+            }
+            packWidth = min(maxWidth, packWidth * 2)
+        }
+    }
+
+    private static func simulatePack(
+        _ glyphs: [(width: Int, height: Int)],
+        atlasWidth: Int,
+        atlasHeight: Int
+    ) -> (sheetCount: Int, usedHeight: Int) {
+        var sheets = 1
+        var cursorX = 0
+        var cursorY = 0
+        var rowHeight = 0
+        var usedHeight = 0
+        for glyph in glyphs {
+            let width = min(glyph.width, atlasWidth)
+            let height = min(glyph.height, atlasHeight)
+            if cursorX + width > atlasWidth {
+                cursorX = 0
+                cursorY += rowHeight
+                rowHeight = 0
+            }
+            if cursorY + height > atlasHeight {
+                sheets += 1
+                cursorX = 0
+                cursorY = 0
+                rowHeight = 0
+            }
+            cursorX += width
+            rowHeight = max(rowHeight, height)
+            usedHeight = max(usedHeight, cursorY + rowHeight)
+        }
+        return (sheets, max(usedHeight, 64))
     }
 }

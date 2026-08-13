@@ -3,7 +3,7 @@ import Foundation
 
 /// Layout metrics for a Launchpad-style icon grid.
 /// Icon texture pixel size is `iconPointSize * IconRenderQuality.current.rasterScale`
-/// (2× performance or 4× quality).
+/// (4× quality, 2× performance / low memory).
 enum GridLayoutPreset: String, CaseIterable, Identifiable {
     case fourByTwo = "4x2-256"
     case fiveByFour = "5x4-128"
