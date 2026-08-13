@@ -1,5 +1,7 @@
 import AppKit
+import QLaunchpadCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "通用"
@@ -330,6 +332,7 @@ private final class HotKeyRecorderNSView: NSView {
 private struct ApplicationSettingsView: View {
     @ObservedObject var store: AppStore
     @State private var selectedSource: String?
+    @State private var importStatusMessage: String?
 
     var body: some View {
         Form {
@@ -397,6 +400,29 @@ private struct ApplicationSettingsView: View {
                     ForEach(store.hiddenApps) { app in
                         hiddenAppRow(app)
                     }
+                }
+            }
+
+            Section("导入与导出") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("布局文件")
+                        Text("导出或导入当前排序和分组")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("导出…") { exportLayoutFile() }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isLoading || store.apps.isEmpty)
+                    Button("导入…") { importLayoutFile() }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isLoading || store.apps.isEmpty)
+                }
+                if let importStatusMessage {
+                    Text(importStatusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -467,6 +493,124 @@ private struct ApplicationSettingsView: View {
         if panel.runModal() == .OK, let url = panel.url {
             store.addApplicationSource(url)
             selectedSource = url.standardizedFileURL.path
+        }
+    }
+
+    private var layoutBackupDirectoryLabel: String {
+        let domain = Bundle.main.bundleIdentifier ?? (kCFPreferencesCurrentApplication as String)
+        let folderName = LaunchpadPreferenceStore.layoutBackupFileURL(domain: domain)
+            .deletingLastPathComponent()
+            .lastPathComponent
+        return "应用程序支持/\(folderName)"
+    }
+
+    private func exportLayoutFile() {
+        guard !store.isLoading, !store.apps.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.title = "导出布局"
+        panel.nameFieldStringValue = "QLaunch-layout.json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try LaunchpadLayoutDocument.makeEncoder(pretty: true).encode(store.exportLayout())
+            try data.write(to: url, options: .atomic)
+        } catch {
+            presentAlert(title: "无法导出布局", message: layoutErrorMessage(error))
+        }
+    }
+
+    private func importLayoutFile() {
+        guard !store.isLoading, !store.apps.isEmpty else { return }
+        importStatusMessage = nil
+        let panel = NSOpenPanel()
+        panel.title = "导入布局"
+        panel.prompt = "打开"
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let document: LaunchpadLayoutDocument
+        do {
+            let data = try Data(contentsOf: url)
+            try LaunchpadLayoutImporter.validateJSONSize(data)
+            document = try LaunchpadLayoutDocument.makeDecoder().decode(
+                LaunchpadLayoutDocument.self,
+                from: data
+            )
+            try LaunchpadLayoutImporter.validate(document)
+        } catch {
+            presentAlert(title: "无法读取布局文件", message: layoutErrorMessage(error))
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "导入布局？"
+        alert.informativeText = """
+        将按文件重排当前排序和分组。文件中未出现的应用会排到最后。隐藏列表仅在文件含 `hidden` 时整表替换；省略 `hidden` 时，写进文件的应用会取消隐藏，其余隐藏项保留。导入前会把当前布局备份到「\(layoutBackupDirectoryLabel)/layout.backup.json」，可再导入该文件恢复。
+        """
+        alert.addButton(withTitle: "导入")
+        alert.addButton(withTitle: "取消")
+
+        let complete: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .alertFirstButtonReturn else { return }
+            self.applyImportedLayout(document)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: complete)
+        } else {
+            complete(alert.runModal())
+        }
+    }
+
+    private func applyImportedLayout(_ document: LaunchpadLayoutDocument) {
+        do {
+            let report = try store.applyLayout(document, mode: .merge)
+            importStatusMessage = "已导入 \(report.importedRootItems) 项，跳过 \(report.skippedUnknown.count) 个未知应用，追加 \(report.appendedLeftover.count) 个新应用"
+        } catch {
+            importStatusMessage = nil
+            presentAlert(title: "无法导入布局", message: layoutErrorMessage(error))
+        }
+    }
+
+    private func layoutErrorMessage(_ error: Error) -> String {
+        guard let error = error as? LaunchpadLayoutError else {
+            return error.localizedDescription
+        }
+        switch error {
+        case .invalidKind:
+            return "不是 QLaunch 布局文件。"
+        case .unsupportedSchemaVersion:
+            return "不支持的布局文件版本。"
+        case .malformed(let reason):
+            if reason == "application catalog is empty" {
+                return "应用列表尚未就绪，请等待扫描完成后再导入。"
+            }
+            return "布局文件格式无效。"
+        case .limitExceeded(let limit):
+            return limit == "json" ? "布局文件过大。" : "布局文件超出限制。"
+        case .duplicateID:
+            return "布局文件包含重复项。"
+        case .nestedFolder:
+            return "布局文件包含嵌套文件夹。"
+        case .itemHiddenOverlap:
+            return "应用不能同时出现在布局和隐藏列表中。"
+        case .strictUnresolved:
+            return "布局文件包含无法识别的应用。"
+        }
+    }
+
+    private func presentAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
         }
     }
 
