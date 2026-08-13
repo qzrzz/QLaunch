@@ -1,4 +1,5 @@
 import AppKit
+import QLaunchpadCore
 import SwiftUI
 
 final class LaunchpadPanel: NSPanel {
@@ -44,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var presentationGeneration: UInt = 0
     private var activeAnimationStyle: LaunchpadAnimationStyle = .fly
     private var isRecordingHotKey = false
+    private var launchReason: LaunchpadLaunchReason = .user
+    private var ignoreReopenUntil: Date?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // The login-item Apple Event is only reliable while launch is in flight.
+        launchReason = LaunchpadLaunchProbe.currentReason()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildLaunchpadPanel()
@@ -96,6 +104,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         // 提前武装 Sparkle，自动检查不依赖是否打开关于页。
         _ = Updater.shared
+
+        // User-initiated starts (first install and later Finder / Spotlight /
+        // `open -a`) present the launchpad. A login-item start stays in the
+        // background so it does not interrupt the desktop coming up.
+        if launchReason.shouldPresentLaunchpad, launchpadPanel != nil {
+            ignoreReopenUntil = Date().addingTimeInterval(0.8)
+            showLaunchpad()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -122,6 +138,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
+        // The same launch can deliver reopen immediately after
+        // applicationDidFinishLaunching. Ignore that echo so a user start
+        // that already presented the launchpad is not toggled closed.
+        if let ignoreReopenUntil, Date() < ignoreReopenUntil {
+            return true
+        }
         toggleLaunchpad()
         return true
     }

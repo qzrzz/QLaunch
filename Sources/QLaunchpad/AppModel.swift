@@ -11,10 +11,9 @@ enum QLaunchpadPreferences {
     static let showMenuBarIconKey = "showMenuBarIcon"
     static let showDockIconKey = "showDockIcon"
 
-    // Preserve the existing status-bar entry for users upgrading from the
-    // original build, while keeping the Dock hidden unless explicitly enabled.
-    static let defaultShowMenuBarIcon = true
-    static let defaultShowDockIcon = false
+    // Default to a Dock-visible app. The menu bar icon is opt-in.
+    static let defaultShowMenuBarIcon = false
+    static let defaultShowDockIcon = true
 }
 
 enum LaunchpadHotKeyPreferences {
