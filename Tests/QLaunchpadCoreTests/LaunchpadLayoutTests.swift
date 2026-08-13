@@ -271,6 +271,81 @@ final class LaunchpadLayoutTests: XCTestCase {
         XCTAssertEqual(folders.first?.appIDs, ["com.apple.dt.Xcode", "com.microsoft.VSCode"])
     }
 
+    func testDecodeFoldersAcceptsHistoricalJSONEncoderPayload() throws {
+        let historical = Data(
+            #"[{"id":"folder-550e8400-e29b-41d4-a716-446655440000","appIDs":["com.example.Foo#\/Users\/alex\/Applications\/Foo.app"],"name":"开发"}]"#.utf8
+        )
+        let folders = try LaunchpadPersistence.decodeFolders(historical)
+        XCTAssertEqual(folders.map(\.id), ["folder-550e8400-e29b-41d4-a716-446655440000"])
+        XCTAssertEqual(folders.first?.name, "开发")
+        XCTAssertEqual(
+            folders.first?.appIDs,
+            ["com.example.Foo#/Users/alex/Applications/Foo.app"]
+        )
+    }
+
+    func testTrimmedFolderIDsAreUnique() {
+        let document = LaunchpadLayoutDocument(items: [
+            .folder(id: "folder-a", name: "A", apps: ["com.alpha"]),
+            .folder(id: " folder-a", name: "B", apps: ["com.bravo"])
+        ])
+        XCTAssertThrowsError(
+            try LaunchpadLayoutImporter.apply(
+                document: document,
+                mode: .merge,
+                strict: false,
+                scanned: known(
+                    ("com.alpha", "Alpha", "/A/Alpha.app"),
+                    ("com.bravo", "Bravo", "/B/Bravo.app")
+                ),
+                currentHidden: []
+            )
+        ) { error in
+            XCTAssertEqual(error as? LaunchpadLayoutError, .duplicateID("folder-a"))
+        }
+    }
+
+    func testFolderIDCollidingWithLeftoverScannedAppRejected() {
+        let document = LaunchpadLayoutDocument(items: [
+            .folder(id: "folder-collide", name: "X", apps: ["com.alpha"])
+        ])
+        XCTAssertThrowsError(
+            try LaunchpadLayoutImporter.apply(
+                document: document,
+                mode: .merge,
+                strict: false,
+                scanned: known(
+                    ("com.alpha", "Alpha", "/A/Alpha.app"),
+                    ("folder-collide", "Collide", "/C/Collide.app")
+                ),
+                currentHidden: []
+            )
+        ) { error in
+            XCTAssertEqual(error as? LaunchpadLayoutError, .duplicateID("folder-collide"))
+        }
+    }
+
+    func testResolvedIDAliasesRejectedAsDuplicate() {
+        let scanned = known(
+            ("com.example.Foo", "Foo", "/Users/alex/Applications/Foo.app")
+        )
+        let document = LaunchpadLayoutDocument(items: [
+            .app(id: "com.example.Foo"),
+            .app(id: "com.example.Foo#/Users/alex/Applications/Foo.app")
+        ])
+        XCTAssertThrowsError(
+            try LaunchpadLayoutImporter.apply(
+                document: document,
+                mode: .merge,
+                strict: false,
+                scanned: scanned,
+                currentHidden: []
+            )
+        ) { error in
+            XCTAssertEqual(error as? LaunchpadLayoutError, .duplicateID("com.example.Foo"))
+        }
+    }
+
     private func known(_ items: (String, String, String)...) -> [LaunchpadKnownApp] {
         items
             .map { LaunchpadKnownApp(id: $0.0, bundleIdentifier: $0.0, name: $0.1, path: $0.2) }
