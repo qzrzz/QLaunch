@@ -1,12 +1,7 @@
 import qlaunchpadIcon from "../../assets/qlaunchpad-icon.png";
 import { LanguageSwitcher } from "../../components/LanguageSwitcher";
 import { getSectionsContent } from "../../content";
-import {
-  DOWNLOAD_URL,
-  GITHUB_URL,
-  uiDictMap,
-  type SupportedLang,
-} from "../../i18n/dict";
+import { DOWNLOAD_URL, GITHUB_URL, uiDictMap, type SupportedLang } from "../../i18n/dict";
 import "./StickyHeader.css";
 
 interface StickyHeaderProps {
@@ -17,9 +12,7 @@ interface StickyHeaderProps {
 export function StickyHeader({ lang = "en" }: StickyHeaderProps) {
   const dict = uiDictMap[lang] || uiDictMap.en;
   const whySection = getSectionsContent(lang).find((s) => s.id === "why");
-  const whyTitle =
-    whySection?.title ??
-    (lang === "zh-Hans" ? "为什么选择 QLaunch" : "Why QLaunch");
+  const whyTitle = whySection?.title ?? (lang === "zh-Hans" ? "为什么选择 QLaunch" : "Why QLaunch");
 
   return (
     <header className="stickyHeader">
@@ -33,14 +26,7 @@ export function StickyHeader({ lang = "en" }: StickyHeaderProps) {
           <a className="stickyHeaderLink" href="#section-why">
             {whyTitle}
           </a>
-          <a
-            className="stickyHeaderLink stickyHeaderLink--action"
-            href={DOWNLOAD_URL}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {dict.download}
-          </a>
+
           <a
             className="stickyHeaderLink stickyHeaderLink--external"
             href={GITHUB_URL}
@@ -48,6 +34,15 @@ export function StickyHeader({ lang = "en" }: StickyHeaderProps) {
             rel="noreferrer"
           >
             {dict.viewOnGithub}
+          </a>
+
+          <a
+            className="stickyHeaderLink stickyHeaderLink--action"
+            href={DOWNLOAD_URL}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {dict.download}
           </a>
         </nav>
         <LanguageSwitcher currentLang={lang} />

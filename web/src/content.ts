@@ -1,5 +1,10 @@
 import type { SupportedLang } from "./i18n/dict";
 import ImageS1 from "./assets/s1.png";
+import ImageS2 from "./assets/s2.png";
+import ImageS3 from "./assets/s3.png";
+import ImageS4 from "./assets/s4.png";
+import ImageS5 from "./assets/s5.png";
+import ImageS6 from "./assets/s6.png";
 /**
  * 卡片布局：
  * - left   媒体偏左（默认）
@@ -45,21 +50,41 @@ export const sectionsContentMap: Record<SupportedLang, SectionConfig[]> = {
       id: "why",
       title: "Why QLaunch",
       description:
-        "macOS removed the classic Launchpad feel. QLaunch brings it back — native AppKit + Metal, 128pt icons, smooth paging, and a calm liquid-glass UI.",
-      cards: [],
+        "Smoother than the alternatives, with higher-quality rendering. 120Hz, Display P3, Liquid Glass, transition animations, and Pinyin search. A high-quality take on the simplest core job — done so well you forget it's there.",
+      cards: [{ style: "center", image: ImageS1 }],
+    },
+    {
+      id: "what",
+      title: "What is QLaunch",
+      description:
+        "QLaunch is a macOS app launcher — it shows the apps on your Mac and opens them. Starting with macOS 26, Apple retired Launchpad and tried to replace it with a tiny Spotlight search box. We still prefer a full-page grid of beautiful app icons.",
+      cards: [{ style: "center", image: ImageS2 }],
     },
     {
       id: "performance",
-      title: "Metal Performance",
+      title: "High-performance Metal GPU rendering",
       description:
-        "Icons and labels are drawn with Metal atlases and CADisplayLink up to 120fps. Spring paging, rubber-band edges, and open/close scale+fade stay buttery smooth.",
-      cards: [],
+        "QLaunch renders with Metal, talking to the GPU directly — up to 120 Hz, with image quality that outpaces other launchers.",
+      cards: [{ style: "center", image: ImageS3 }],
     },
     {
-      id: "glass",
-      title: "Wallpaper Blur & Liquid Glass",
+      id: "pingyin",
+      title: "Pinyin search",
       description:
-        "Reads your desktop wallpaper, applies true CIGaussianBlur with vignette. Search uses macOS liquid glass where available, with a careful material fallback on older systems.",
+        "Chinese users never need to switch input methods. Just type — whether you're in English or Pinyin, the app you want still shows up.",
+      cards: [{ style: "center", image: ImageS6 }],
+    },
+    {
+      id: "ai",
+      title: "Let AI organize your apps — open and free",
+      description:
+        "AI can tidy up your apps for you. Not a locked-in paid feature — an open API for the AI you already use.",
+      cards: [{ style: "center", image: ImageS5 }],
+    },
+    {
+      id: "open",
+      title: "Solid core features. The rest is yours to vibe-code.",
+      description: "Need more? The source is open — let your AI agent build it.",
       cards: [],
     },
   ],
@@ -69,7 +94,7 @@ export const sectionsContentMap: Record<SupportedLang, SectionConfig[]> = {
       id: "why",
       title: "为什么选择 QLaunch",
       description:
-        "相比同类工具操作更加流畅、更高画质显示图标。120Hz 响应、Display P3 高色域、Liquid Glass、过渡动画、拼音搜索。高质量的实现最简单的核心功能，让你感觉不到它的存在。",
+        "相比同类工具操作更加流畅、更高画质渲染。120Hz 帧率、Display-P3 高色域、Liquid Glass、过渡动画、拼音搜索。高质量的实现最简单的核心功能，让你感觉不到它的存在。",
       cards: [{ style: "center", image: ImageS1 }],
     },
 
@@ -78,34 +103,28 @@ export const sectionsContentMap: Record<SupportedLang, SectionConfig[]> = {
       title: "QLaunch 是什么",
       description:
         "QLaunch 是 macOS 应用启动台 —— 展示系统中的应用程序，并启动他们。 macOS 从 26 开始遗弃了 Launchpad，并试图用小小的 Spotlight 搜索框取代它，但我们喜欢整页精美的应用程序图标带来的赏心悦目的体验",
-      cards: [{ style: "center", image: ImageS1 }],
+      cards: [{ style: "center", image: ImageS2 }],
     },
     {
       id: "performance",
       title: "Metal 高性能 GPU 渲染",
       description:
-        "QLaunch 使用 Metal 直接调用 GPU 进行图像渲染，实现最高可达 120 Hz 的响应速度，和超越同类工具的图像质量。",
-      cards: [],
-    },
-    {
-      id: "glass",
-      title: "Liquid Glass",
-      description: "适配最新 macOS 的液态玻璃 UI 效果",
-      cards: [],
+        "QLaunch 使用 Metal 直接调用 GPU 进行图像渲染，实现最高可达 120 Hz 的响应速度，还有超越同类工具的图像质量。",
+      cards: [{ style: "center", image: ImageS3 }],
     },
 
     {
       id: "pingyin",
       title: "拼音搜索",
       description: "中文用户不用切换输入法了，无脑输入，无论当前输入法是英文还是拼音都能搜索到目标",
-      cards: [],
+          cards: [{ style: "center", image: ImageS6 }],
     },
 
     {
       id: "ai",
       title: "AI 帮你整理应用，开放且免费",
       description: "能让 AI 帮你整理应用程序，不是内置的付费功能，而是开放接口给你自己的 AI 调用",
-      cards: [],
+          cards: [{ style: "center", image: ImageS5 }],
     },
 
     {
