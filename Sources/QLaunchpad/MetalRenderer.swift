@@ -193,7 +193,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var didDrag = false
     private var isPanningPage = false
     private var pageIndicatorClick = false
-    private var panLastPoint: CGPoint = .zero
+    /// View-space origin of the current empty-area page pan (1:1 with the pointer).
+    private var panStartPoint: CGPoint = .zero
     private var contextMenuApp: AppInfo?
     private var contextMenuFolder: AppFolder?
 
@@ -595,6 +596,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let pageSettled = abs(store.targetPage - currentPageOffset) < 0.0008
         let dragInteractionActive = didDrag && draggedAppID != nil
         if pageSettled
+            && !isPanningPage
             && !animatingPresentation
             && contentTransitionPhase == .idle
             && !isReorderAnimationActive
@@ -612,7 +614,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     @objc private func displayLinkFired(_ link: CADisplayLink) {
-        if let point = syncDragPointToMouse() {
+        if isPanningPage {
+            // Sample the live pointer so coalesced mouse-drag events cannot
+            // leave the grid a frame behind the cursor.
+            syncPagePanToMouse()
+        } else if let point = syncDragPointToMouse() {
             if store.openedFolderID != nil {
                 updateFolderDrag(at: point)
             } else {
@@ -657,6 +663,31 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             startTime: CACurrentMediaTime()
         )
         startDisplayLink()
+    }
+
+    private func beginEmptyAreaPagePan(from point: CGPoint) {
+        isPanningPage = true
+        panStartPoint = point
+        store.beginPagePan()
+        startDisplayLink()
+        needsDisplay = true
+    }
+
+    /// AppKit can coalesce mouse-drag events. Read the current screen pointer
+    /// on every display-link tick so the page never waits for the next
+    /// delivered event before moving.
+    private func syncPagePanToMouse() {
+        guard isPanningPage, let window else { return }
+        let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        applyPagePan(at: convert(windowPoint, from: nil))
+    }
+
+    private func applyPagePan(at point: CGPoint) {
+        if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
+        let translationPages = Double(panStartPoint.x - point.x) / Double(max(bounds.width, 1))
+        store.updatePagePan(translationPages: translationPages)
+        startDisplayLink()
+        needsDisplay = true
     }
 
     /// AppKit can coalesce mouse-drag events. Read the current screen pointer
@@ -2553,7 +2584,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         dragDestination = nil
         isPanningPage = false
         pageIndicatorClick = false
-        panLastPoint = dragStart
+        panStartPoint = dragStart
 
         if LaunchpadFieldHitArea.rect(in: bounds).contains(dragStart) {
             return
@@ -2571,10 +2602,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         if contentTransitionPhase != .idle {
-            isPanningPage = true
-            store.beginPagePan()
-            startDisplayLink()
-            needsDisplay = true
+            beginEmptyAreaPagePan(from: dragStart)
             return
         }
 
@@ -2611,17 +2639,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if store.openedFolderID != nil {
             // A blank click exits the folder. A drag that starts in blank space
             // remains a normal page-pan gesture and can move between folder pages.
-            isPanningPage = true
-            store.beginPagePan()
-            startDisplayLink()
-            needsDisplay = true
+            beginEmptyAreaPagePan(from: dragStart)
             return
         }
 
-        isPanningPage = true
-        store.beginPagePan()
-        startDisplayLink()
-        needsDisplay = true
+        beginEmptyAreaPagePan(from: dragStart)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -2922,10 +2944,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
            didDrag {
             draggedAppID = nil
             dragSource = nil
-            isPanningPage = true
-            store.beginPagePan()
-            startDisplayLink()
-            needsDisplay = true
+            beginEmptyAreaPagePan(from: dragStart)
+            applyPagePan(at: point)
             return
         }
 
@@ -2947,11 +2967,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         updateEdgePageDirection(for: point)
 
         if isPanningPage {
-            let dx = point.x - panLastPoint.x
-            panLastPoint = point
-            store.updatePagePan(deltaPages: Double(-dx) / Double(max(bounds.width, 1)))
-            startDisplayLink()
-            needsDisplay = true
+            applyPagePan(at: point)
             return
         }
 

@@ -495,7 +495,11 @@ final class AppStore: ObservableObject {
     }
 
     /// Continuous page position (0 = first page). Driven by scroll + spring settle.
-    @Published var pageOffset: Double = 0
+    ///
+    /// Not `@Published`: Metal reads this every frame during a drag, and
+    /// publishing would rebuild the SwiftUI overlay on every pointer sample.
+    /// Integer page chrome observes `targetPage` / explicit `objectWillChange`.
+    var pageOffset: Double = 0
 
     /// Target page used for snapping after a gesture ends.
     @Published private(set) var targetPage: Double = 0
@@ -530,6 +534,8 @@ final class AppStore: ObservableObject {
     private var scrollAxisAccumY: Double = 0
     /// After finger-up settle, leftover trackpad momentum must not start a new flip.
     private var ignoreScrollMomentum = false
+    /// Un-rubber-banded page at mouse-down. Pointer X maps 1:1 onto this origin.
+    private var pagePanOrigin: Double = 0
     /// Root-grid page captured when a folder opens, restored when it closes.
     private var pageBeforeFolder: Double?
     /// Root-grid page captured when search starts, restored when search clears.
@@ -1274,37 +1280,40 @@ final class AppStore: ObservableObject {
         scrollAxis = .undecided
         scrollAxisAccumX = 0
         scrollAxisAccumY = 0
+        pagePanOrigin = pageOffset
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
-    /// Update pan by a fractional page delta (same rubber-band rules as scroll).
-    /// Positive delta → next page (content moves left).
-    func updatePagePan(deltaPages: Double) {
+    /// Map a 1:1 pointer translation onto the page (same rubber-band as scroll).
+    /// `translationPages` is `(startX - currentX) / width`; positive → next page.
+    func updatePagePan(translationPages: Double) {
         let now = CACurrentMediaTime()
-        let dt = max(1.0 / 240.0, min(now - lastScrollTime, 1.0 / 20.0))
-        lastScrollTime = now
-
+        let dt = now - lastScrollTime
+        let proposed = pagePanOrigin + translationPages
+        let previousPage = currentPage
+        let newOffset = clampedPageOffset(proposed)
+        let moved = newOffset - pageOffset
+        pageOffset = newOffset
         isPageGestureActive = true
-        let proposed = pageOffset + deltaPages
-        let minPage = 0.0
-        let maxPage = Double(max(pageCount - 1, 0))
-        if proposed < minPage {
-            pageOffset = minPage - rubberBand(minPage - proposed)
-        } else if proposed > maxPage {
-            pageOffset = maxPage + rubberBand(proposed - maxPage)
-        } else {
-            pageOffset = proposed
+        scrollAccumulated = translationPages
+
+        // Skip velocity on duplicate same-frame samples (mouse event + display link).
+        if dt >= 1.0 / 240.0 {
+            lastScrollTime = now
+            let clampedDt = min(dt, 1.0 / 20.0)
+            let instant = moved / clampedDt
+            pageVelocity = pageVelocity * 0.25 + instant * 0.75
         }
-        scrollAccumulated += deltaPages
-        pageVelocity = deltaPages / dt
-        targetPage = pageOffset
-        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+
+        if currentPage != previousPage {
+            objectWillChange.send()
+        }
     }
 
-    /// End pan and snap to a page (velocity-biased).
+    /// End pan and snap to a page (velocity-biased, mouse-drag thresholds).
     func endPagePan() {
         isPageGestureActive = false
-        settlePage(withVelocity: pageVelocity)
+        settleMousePagePan(withVelocity: pageVelocity)
     }
 
     /// Continuous trackpad / mouse-wheel paging with phase awareness.
@@ -1409,16 +1418,7 @@ final class AppStore: ObservableObject {
     }
 
     private func applyLivePageDelta(_ pageDelta: Double) {
-        let proposed = pageOffset + pageDelta
-        let minPage = 0.0
-        let maxPage = Double(max(pageCount - 1, 0))
-        if proposed < minPage {
-            pageOffset = minPage - rubberBand(minPage - proposed)
-        } else if proposed > maxPage {
-            pageOffset = maxPage + rubberBand(proposed - maxPage)
-        } else {
-            pageOffset = proposed
-        }
+        pageOffset = clampedPageOffset(pageOffset + pageDelta)
         scrollAccumulated += pageDelta
     }
 
@@ -1438,16 +1438,34 @@ final class AppStore: ObservableObject {
         var page = pageOffset
 
         // Flick threshold ≈ 0.85 pages/sec.
-        if velocity > 0.85 {
+        if velocity > LaunchpadPageSnap.trackpadFlickThreshold {
             page = floor(pageOffset + 0.08) + 1
-        } else if velocity < -0.85 {
+        } else if velocity < -LaunchpadPageSnap.trackpadFlickThreshold {
             page = ceil(pageOffset - 0.08) - 1
         } else {
             page = pageOffset.rounded()
         }
 
-        targetPage = min(max(page, minPage), maxPage)
-        pageOffset = targetPage
+        applySettledPage(min(max(page, minPage), maxPage))
+    }
+
+    /// Mouse empty-area pan: lower commit / flick thresholds than trackpad.
+    private func settleMousePagePan(withVelocity velocity: Double) {
+        applySettledPage(
+            LaunchpadPageSnap.settledPage(
+                offset: pageOffset,
+                origin: pagePanOrigin,
+                velocity: velocity,
+                pageCount: pageCount,
+                flickThreshold: LaunchpadPageSnap.mouseFlickThreshold,
+                commitThreshold: LaunchpadPageSnap.mouseCommitThreshold
+            )
+        )
+    }
+
+    private func applySettledPage(_ page: Double) {
+        targetPage = page
+        pageOffset = page
         pageVelocity = 0
         resetPageScrollGesture()
         ensureKeyboardFocus(onPage: Int(targetPage))
@@ -1471,6 +1489,18 @@ final class AppStore: ObservableObject {
         // Classic rubber-band: diminishing return past the edge.
         let c = 0.55
         return (1 - 1 / (overflow * c + 1)) * 0.35
+    }
+
+    private func clampedPageOffset(_ proposed: Double) -> Double {
+        let minPage = 0.0
+        let maxPage = Double(max(pageCount - 1, 0))
+        if proposed < minPage {
+            return minPage - rubberBand(minPage - proposed)
+        }
+        if proposed > maxPage {
+            return maxPage + rubberBand(proposed - maxPage)
+        }
+        return proposed
     }
 
     private func ensureKeyboardFocus(onPage page: Int) {

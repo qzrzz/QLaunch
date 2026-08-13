@@ -1,5 +1,5 @@
 import type { SupportedLang } from "./i18n/dict";
-
+import ImageS1 from "./assets/s1.png";
 /**
  * 卡片布局：
  * - left   媒体偏左（默认）
@@ -70,7 +70,7 @@ export const sectionsContentMap: Record<SupportedLang, SectionConfig[]> = {
       title: "为什么选择 QLaunch",
       description:
         "相比同类工具操作更加流畅、更高画质显示图标。120Hz 响应、Display P3 高色域、Liquid Glass、过渡动画、拼音搜索。高质量的实现最简单的核心功能，让你感觉不到它的存在。",
-      cards: [],
+      cards: [{ style: "center", image: ImageS1 }],
     },
 
     {
@@ -78,7 +78,7 @@ export const sectionsContentMap: Record<SupportedLang, SectionConfig[]> = {
       title: "QLaunch 是什么",
       description:
         "QLaunch 是 macOS 应用启动台 —— 展示系统中的应用程序，并启动他们。 macOS 从 26 开始遗弃了 Launchpad，并试图用小小的 Spotlight 搜索框取代它，但我们喜欢整页精美的应用程序图标带来的赏心悦目的体验",
-      cards: [],
+      cards: [{ style: "center", image: ImageS1 }],
     },
     {
       id: "performance",
