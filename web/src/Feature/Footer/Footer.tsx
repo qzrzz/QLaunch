@@ -1,6 +1,6 @@
 import qlaunchpadIcon from "../../assets/qlaunchpad-icon.png";
+import { DownloadAnchor } from "../../download";
 import {
-  DOWNLOAD_URL,
   GITHUB_URL,
   STUDIO_URL,
   uiDictMap,
@@ -28,9 +28,7 @@ export function Footer({ lang = "en" }: FooterProps) {
           <a href={GITHUB_URL} target="_blank" rel="noreferrer">
             {dict.viewOnGithub}
           </a>
-          <a href={DOWNLOAD_URL} target="_blank" rel="noreferrer">
-            {dict.download}
-          </a>
+          <DownloadAnchor>{dict.download}</DownloadAnchor>
         </div>
         <p className="siteFooterCopyright">
           <span>{dict.copyright}</span>{" "}

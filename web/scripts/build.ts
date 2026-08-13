@@ -112,6 +112,27 @@ export function minifyDistCss(distDir: string): void {
   }
 }
 
+const DOWNLOAD_JSON_NAME = "download.json";
+
+/** 官网构建会清空 docs，先读出已发布的 download.json，避免丢掉直链安装包信息。 */
+function readPreservedDownloadJson(docsDir: string): string | null {
+  const path = join(docsDir, DOWNLOAD_JSON_NAME);
+  if (!existsSync(path)) return null;
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/** 若 Vite public 未带上 download.json，把构建前的清单写回 docs。 */
+function restoreDownloadJson(docsDir: string, preserved: string | null): void {
+  const path = join(docsDir, DOWNLOAD_JSON_NAME);
+  if (existsSync(path) || !preserved) return;
+  writeFileSync(path, preserved, "utf-8");
+  console.log(chalk.green(`✔ 已保留官网下载清单: ${chalk.gray("docs/download.json")}`));
+}
+
 /**
  * 清空指定的目录内容。如果目录不存在则重新创建空目录。
  */
@@ -207,6 +228,7 @@ export async function buildAndPublishDocs(): Promise<void> {
   }
 
   console.log(chalk.blue("🧹 步骤 3/6: 正在清空 ../docs 目录..."));
+  const preservedDownloadJson = readPreservedDownloadJson(DOCS_DIR);
   cleanDirectory(DOCS_DIR);
   console.log(chalk.green(`✔ 已成功清空: ${chalk.gray(DOCS_DIR)}\n`));
 
@@ -242,6 +264,7 @@ export async function buildAndPublishDocs(): Promise<void> {
 
   console.log(chalk.blue("\n⚙️  步骤 6/6: 创建 GitHub Pages .nojekyll 文件..."));
   writeFileSync(resolve(DOCS_DIR, ".nojekyll"), "");
+  restoreDownloadJson(DOCS_DIR, preservedDownloadJson);
   console.log(chalk.green("✔ 已生成 .nojekyll 文件\n"));
 
   console.log(

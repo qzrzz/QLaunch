@@ -111,15 +111,14 @@
 
 @media (max-width: 760px) {
   .langDropdownTrigger {
-    height: 30px;
-    padding: 0 10px;
-    font-size: 12px;
+    width: 36px;
+    height: 36px;
+    padding: 0;
   }
 
-  .langDropdownTrigger span {
-    max-width: 5.5em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  /* 小屏只保留地球图标，避免「简体中文」把顶栏挤出视口 */
+  .langDropdownTrigger span,
+  .langDropdownTrigger .langChevron {
+    display: none;
   }
 }

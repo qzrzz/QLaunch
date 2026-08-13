@@ -1,6 +1,10 @@
 import qlaunchpadIcon from "../../assets/qlaunchpad-512.png";
 import {
-  DOWNLOAD_URL,
+  DownloadAnchor,
+  formatDownloadSize,
+  useDownloadLink,
+} from "../../download";
+import {
   GITHUB_URL,
   uiDictMap,
   type SupportedLang,
@@ -14,6 +18,15 @@ interface HeroProps {
 /** 首屏：品牌、标语与下载入口。 */
 export function Hero({ lang = "en" }: HeroProps) {
   const dict = uiDictMap[lang] || uiDictMap.en;
+  const download = useDownloadLink();
+  const downloadLabel = download.version
+    ? `${dict.download} ${download.version}`
+    : dict.download;
+  const downloadHint = download.isDirect
+    ? [download.size ? formatDownloadSize(download.size) : "", "macOS 14+"]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
 
   return (
     <section className="hero" aria-labelledby="hero-title">
@@ -31,14 +44,14 @@ export function Hero({ lang = "en" }: HeroProps) {
         </h1>
         <p className="heroTagline">{dict.tagline}</p>
         <div className="heroActions">
-          <a
-            className="heroPrimaryBtn"
-            href={DOWNLOAD_URL}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {dict.download}
-          </a>
+          <div className="heroDownload">
+            <DownloadAnchor className="heroPrimaryBtn">
+              {downloadLabel}
+            </DownloadAnchor>
+            {downloadHint ? (
+              <p className="heroDownloadHint">{downloadHint}</p>
+            ) : null}
+          </div>
           <a
             className="heroSecondaryBtn"
             href={GITHUB_URL}

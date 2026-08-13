@@ -87,11 +87,40 @@
 
 @media (max-width: 760px) {
   .stickyHeader {
-    padding: 12px 16px;
+    gap: 8px;
+    padding: 10px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left));
+    padding-top: max(10px, env(safe-area-inset-top));
   }
 
-  /* 小屏保留 Download / GitHub，隐藏 Why 文案链接 */
-  .stickyHeaderNav .stickyHeaderLink:not(.stickyHeaderLink--action):not(.stickyHeaderLink--external) {
+  .stickyHeaderBrand {
+    gap: 8px;
+    font-size: 16px;
+  }
+
+  .stickyHeaderActions {
+    gap: 4px;
+  }
+
+  .stickyHeaderNav {
+    flex-wrap: nowrap;
+    gap: 0 8px;
+  }
+
+  /* 小屏只留 Download，Why / GitHub 仍在首屏与页脚 */
+  .stickyHeaderNav .stickyHeaderLink:not(.stickyHeaderLink--action) {
+    display: none;
+  }
+
+  .stickyHeaderLink--action {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 12px;
+  }
+}
+
+@media (max-width: 360px) {
+  .stickyHeaderBrand span {
     display: none;
   }
 }

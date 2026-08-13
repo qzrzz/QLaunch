@@ -36,6 +36,7 @@ export interface DownloadLink {
   href: string;
   version?: string;
   filename?: string;
+  size?: number;
   isDirect: boolean;
 }
 
@@ -43,6 +44,18 @@ const FALLBACK_LINK: DownloadLink = {
   href: DOWNLOAD_URL,
   isDirect: false,
 };
+
+export function formatDownloadVersion(version: string): string {
+  return version.startsWith("v") ? version : "v" + version;
+}
+
+export function formatDownloadSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 10) return `${Math.round(mb)} MB`;
+  if (mb >= 0.1) return `${mb.toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
 
 const DownloadContext = createContext<DownloadLink>(FALLBACK_LINK);
 
@@ -102,8 +115,9 @@ export async function loadDownloadManifest(
 function manifestToLink(manifest: DownloadManifest): DownloadLink {
   return {
     href: manifest.dmg.url,
-    version: manifest.version,
+    version: formatDownloadVersion(manifest.version),
     filename: manifest.dmg.name,
+    size: manifest.dmg.size,
     isDirect: true,
   };
 }
@@ -147,7 +161,12 @@ export function DownloadAnchor({ className, children }: DownloadAnchorProps) {
   const { href, filename, isDirect } = useDownloadLink();
   if (isDirect) {
     return (
-      <a className={className} href={href} download={filename}>
+      <a
+        className={className}
+        href={href}
+        download={filename}
+        rel="noopener noreferrer"
+      >
         {children}
       </a>
     );

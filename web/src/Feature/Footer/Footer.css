@@ -68,3 +68,15 @@
 .siteFooterStudio:hover {
   color: rgba(255, 255, 255, 0.85);
 }
+
+@media (max-width: 760px) {
+  .siteFooter {
+    padding: 36px 20px max(40px, calc(20px + env(safe-area-inset-bottom)));
+  }
+
+  .siteFooterTagline {
+    padding: 0 8px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+}
