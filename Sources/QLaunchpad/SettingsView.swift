@@ -104,7 +104,7 @@ private struct GeneralSettingsView: View {
                         Text(
                             launchAtLoginNeedsApproval
                                 ? "已请求登录项，请在系统设置中允许"
-                                : "开机后在后台运行，不会打开主界面"
+                                : "开机后启动"
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -243,6 +243,7 @@ private struct GeneralSettingsView: View {
             try LaunchAtLogin.setEnabled(enabled)
             refreshLaunchAtLogin()
             if enabled, LaunchAtLogin.needsApproval {
+                NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
                 LaunchAtLogin.openSystemSettings()
             }
         } catch {
@@ -731,6 +732,7 @@ private struct ApplicationSettingsView: View {
             NSSound.beep()
             return
         }
+        NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
@@ -1108,6 +1110,7 @@ private struct AboutSettingsView: View {
 
     private func openURL(_ urlString: String) {
         guard let url = URL(string: urlString) else { return }
+        NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
         NSWorkspace.shared.open(url)
     }
 }

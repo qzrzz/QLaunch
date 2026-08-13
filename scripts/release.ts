@@ -18,6 +18,11 @@
  *   SPARKLE_ACCOUNT            Keychain 账户（默认 qjiao，与内置公钥一致）
  *   SPARKLE_PRIVATE_KEY_FILE   可选，私钥备份文件；默认读钥匙串
  *   SPARKLE_BIN / SPARKLE_BIN_DIR  可选，generate_appcast 所在 bin
+ *
+ * 用法:
+ *   bun scripts/release.ts [X.Y.Z]
+ *   bun scripts/release.ts [X.Y.Z] --no-publish
+ *   bun scripts/release.ts [X.Y.Z] --publish-only
  */
 
 import {
@@ -42,6 +47,8 @@ import {
 import { generateAppcast } from "./generate-appcast";
 import {
   isSemVer,
+  readBuildNumber,
+  readPackageVersion,
   syncVersionAndBumpBuildNumber,
 } from "./version";
 
@@ -578,6 +585,70 @@ async function generateSparkleUpdates(options: {
   return { zipPath, notesPath, appcastPath };
 }
 
+function isTransientNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /EOF|timeout|timed out|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|temporar|network|502|503|504|connection reset|TLS handshake|i\/o timeout/i
+    .test(message);
+}
+
+async function sleep(ms: number): Promise<void> {
+  await Bun.sleep(ms);
+}
+
+async function runGh(command: string[], attempts = 5): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await runCommand(command);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientNetworkError(error) || attempt === attempts) throw error;
+      const delay = 2000 * attempt;
+      console.warn(
+        "⚠️ GitHub 请求中断，" + delay / 1000 + "s 后重试 (" + attempt + "/" + attempts + "): " +
+          command.join(" "),
+      );
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
+async function githubReleaseExists(tag: string, repository: string): Promise<boolean> {
+  try {
+    await captureCommand(["gh", "release", "view", tag, "--repo", repository]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function collectReleaseAssets(version: string): {
+  dmgPath: string;
+  zipPath: string;
+  notesPath: string;
+  appcastPath: string;
+  assets: string[];
+} {
+  const dmgPath = join(ROOT_DIR, "build/QLaunch-" + version + ".dmg");
+  const zipPath = join(UPDATES_DIR, ARTIFACT_PREFIX + "-" + version + ".zip");
+  const notesPath = join(UPDATES_DIR, ARTIFACT_PREFIX + "-" + version + ".md");
+  const appcastPath = join(UPDATES_DIR, "appcast.xml");
+  const required = [dmgPath, zipPath, notesPath, appcastPath];
+  const missing = required.filter((path) => !existsSync(path) || Bun.file(path).size === 0);
+  if (missing.length > 0) {
+    throw new Error("找不到已构建的发布产物:\n  " + missing.join("\n  "));
+  }
+  return {
+    dmgPath,
+    zipPath,
+    notesPath,
+    appcastPath,
+    assets: [dmgPath, zipPath, notesPath, appcastPath, ...listGeneratedDeltaPaths()],
+  };
+}
+
 async function publishToGitHub(
   version: string,
   assets: string[],
@@ -589,42 +660,74 @@ async function publishToGitHub(
   }
   const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;
   const tag = "v" + version;
-  let exists = false;
-  try {
-    await captureCommand(["gh", "release", "view", tag, "--repo", repository]);
-    exists = true;
-  } catch {
-    // Release does not exist yet.
-  }
 
-  if (exists) {
-    await runCommand([
+  if (await githubReleaseExists(tag, repository)) {
+    console.log("▸ 更新已有 GitHub Release " + tag + "…");
+    await runGh([
       "gh", "release", "edit", tag, "--repo", repository,
       "--title", "QLaunch " + tag,
       "--notes-file", notesPath,
     ]);
   } else {
-    await runCommand([
-      "gh", "release", "create", tag, "--repo", repository,
-      "--title", "QLaunch " + tag,
-      "--notes-file", notesPath,
-    ]);
+    console.log("▸ 创建 GitHub Release " + tag + "…");
+    try {
+      await runGh([
+        "gh", "release", "create", tag, "--repo", repository,
+        "--title", "QLaunch " + tag,
+        "--notes-file", notesPath,
+      ]);
+    } catch (error) {
+      if (await githubReleaseExists(tag, repository)) {
+        console.warn("⚠️ 创建时网络中断，但 Release 已存在，继续上传产物");
+      } else {
+        throw error;
+      }
+    }
   }
 
   for (const asset of assets) {
     console.log("▸ 上传 " + basename(asset) + "…");
-    await runCommand(["gh", "release", "upload", tag, asset, "--repo", repository, "--clobber"]);
+    await runGh(["gh", "release", "upload", tag, asset, "--repo", repository, "--clobber"]);
   }
   console.log("✓ GitHub Release 已发布: " + tag);
   console.log("  Sparkle feed: " + SPARKLE_FEED_URL);
 }
 
+async function publishExistingBuild(
+  version: string,
+  buildNumber: string,
+  env: Record<string, string>,
+): Promise<void> {
+  const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;
+  const { dmgPath, zipPath, notesPath, appcastPath, assets } = collectReleaseAssets(version);
+  console.log("\n📦 QLaunch 补发 GitHub Release");
+  console.log("▸ 版本: " + version + " | Build: " + buildNumber);
+  console.log("▸ Sparkle feed: " + SPARKLE_FEED_URL);
+  console.log("  DMG: " + dmgPath);
+  console.log("  Sparkle ZIP: " + zipPath);
+  console.log("  appcast: " + appcastPath);
+
+  await publishToGitHub(version, assets, notesPath, env);
+  await persistReleaseCache(version, buildNumber, "v" + version, zipPath, appcastPath);
+  await writeDownloadManifest({
+    version,
+    build: buildNumber,
+    repository,
+    dmgPath,
+    zipPath,
+  });
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const noPublish = args.includes("--no-publish");
-  const versionArgs = args.filter((arg) => arg !== "--no-publish");
+  const publishOnly = args.includes("--publish-only");
+  if (noPublish && publishOnly) {
+    throw new Error("不能同时使用 --no-publish 与 --publish-only");
+  }
+  const versionArgs = args.filter((arg) => arg !== "--no-publish" && arg !== "--publish-only");
   if (versionArgs.length > 1 || versionArgs[0]?.startsWith("--")) {
-    throw new Error("用法: bun scripts/release.ts [X.Y.Z] [--no-publish]");
+    throw new Error("用法: bun scripts/release.ts [X.Y.Z] [--no-publish|--publish-only]");
   }
   const versionOverride = versionArgs[0];
   if (versionOverride && !isSemVer(versionOverride)) {
@@ -633,6 +736,14 @@ async function main(): Promise<void> {
 
   const env = loadEnv();
   requireSparklePublicKey();
+
+  if (publishOnly) {
+    const version = versionOverride ?? readPackageVersion();
+    const buildNumber = readBuildNumber();
+    await publishExistingBuild(version, buildNumber, env);
+    return;
+  }
+
   const { version, buildNumber } = syncVersionAndBumpBuildNumber(versionOverride);
   const publishing = !noPublish;
   const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;

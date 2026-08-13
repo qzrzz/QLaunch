@@ -1,21 +1,21 @@
 {
   "schemaVersion": 1,
   "name": "QLaunch",
-  "version": "1.0.1",
-  "build": "6",
-  "tag": "v1.0.1",
-  "publishedAt": "2026-08-13T14:57:52.253Z",
-  "htmlUrl": "https://github.com/qzrzz/QLaunch/releases/tag/v1.0.1",
+  "version": "1.0.2",
+  "build": "7",
+  "tag": "v1.0.2",
+  "publishedAt": "2026-08-13T15:44:08.160Z",
+  "htmlUrl": "https://github.com/qzrzz/QLaunch/releases/tag/v1.0.2",
   "dmg": {
-    "name": "QLaunch-1.0.1.dmg",
-    "url": "https://github.com/qzrzz/QLaunch/releases/download/v1.0.1/QLaunch-1.0.1.dmg",
-    "size": 4838538,
-    "sha256": "a4e66feb34c429d7030804799e0fa9bea940869e79fce825a5b29f4a7358f4d6"
+    "name": "QLaunch-1.0.2.dmg",
+    "url": "https://github.com/qzrzz/QLaunch/releases/download/v1.0.2/QLaunch-1.0.2.dmg",
+    "size": 4844958,
+    "sha256": "ebdf4290cebda922d83e2d5777153893cf039adf0bc9fbd73eaddac8844e67b4"
   },
   "zip": {
-    "name": "QLaunch-1.0.1.zip",
-    "url": "https://github.com/qzrzz/QLaunch/releases/download/v1.0.1/QLaunch-1.0.1.zip",
-    "size": 4985429,
-    "sha256": "e7ce696cf41cd29c2705962ad5d22f13831914475766e199025519ce9744e737"
+    "name": "QLaunch-1.0.2.zip",
+    "url": "https://github.com/qzrzz/QLaunch/releases/download/v1.0.2/QLaunch-1.0.2.zip",
+    "size": 4993138,
+    "sha256": "8cb2a2016a47bdb6dbb1bc2f22c84a9acead620686cb1117ebf2511ff065a538"
   }
 }
