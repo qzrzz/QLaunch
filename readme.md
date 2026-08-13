@@ -1,6 +1,27 @@
 # 🚀 QLaunch
 
-简单、高性能的 macOS Launchpad 替代方案。设计师级别图标高质量渲染、120Hz 高帧率、 液态玻璃、过渡动画。
+<div align="center">
+  <img src="web/src/assets/qlaunchpad-icon-full-512.png" width="128" alt="QLaunch">
+</div>
+
+<p align="center">
+  简单、高性能的 macOS Launchpad 替代方案。设计师级别图标高质量渲染、120Hz 高帧率、 液态玻璃、过渡动画。
+</p>
+
+- 主页：[https://qzrzz.github.io/QLaunch/](https://qzrzz.github.io/QLaunch/)
+- 下载：[https://github.com/qzrzz/QLaunch/releases](https://github.com/qzrzz/QLaunch/releases)
+
+<div align="center">
+  <video src="web/src/assets/v1.mp4" poster="web/src/assets/v1-p.png" autoplay loop muted playsinline width="100%"></video>
+  <br>
+</div>
+
+<table>
+  <tr>
+    <td><img src="web/src/assets/s1.png" alt="QLaunch" width="100%"></td>
+    <td><img src="web/src/assets/s2.png" alt="QLaunch" width="100%"></td>
+  </tr>
+</table>
 
 ## 作者的话
 
