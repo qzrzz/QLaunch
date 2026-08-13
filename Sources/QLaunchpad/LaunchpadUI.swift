@@ -17,19 +17,220 @@ extension Notification.Name {
 
 /// Overlay hosting view that only intercepts hits in the search / chrome regions.
 final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
-    /// Top strip reserved for the search field (points from top of view).
-    var interactiveTopHeight: CGFloat = 120
-    /// Bottom strip reserved for page indicator.
-    var interactiveBottomHeight: CGFloat = 80
+    var pageCount = 0
+    var currentPage = 0
+    var isSearching = false
+    var onSelectPageAt: ((NSPoint) -> Void)?
+    private var isScrubbingPages = false
+
+    private var pageIndicatorEnabled: Bool {
+        LaunchpadPageIndicatorHitArea.isEnabled(pageCount: pageCount, isSearching: isSearching)
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // AppKit: y=0 is bottom.
-        let fromTop = bounds.height - point.y
-        let fromBottom = point.y
-        if fromTop <= interactiveTopHeight || fromBottom <= interactiveBottomHeight {
-            return super.hitTest(point)
+        let local = convert(point, from: superview)
+        if searchPadRect.contains(local) {
+            return super.hitTest(point) ?? self
+        }
+        if pageIndicatorEnabled, pageIndicatorRect.contains(local) {
+            return self
         }
         return nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if searchPadRect.contains(point) {
+            isScrubbingPages = false
+            super.mouseDown(with: event)
+            return
+        }
+        if pageIndicatorEnabled, pageIndicatorRect.contains(point) {
+            isScrubbingPages = true
+            onSelectPageAt?(point)
+            return
+        }
+        isScrubbingPages = false
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isScrubbingPages else {
+            super.mouseDragged(with: event)
+            return
+        }
+        onSelectPageAt?(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isScrubbingPages else {
+            super.mouseUp(with: event)
+            return
+        }
+        onSelectPageAt?(convert(event.locationInWindow, from: nil))
+        isScrubbingPages = false
+    }
+
+    private var searchPadRect: NSRect {
+        LaunchpadFieldHitArea.rect(in: bounds, flipped: isFlipped)
+    }
+
+    private var pageIndicatorRect: NSRect {
+        LaunchpadPageIndicatorHitArea.rect(
+            in: bounds,
+            pageCount: pageCount,
+            currentPage: currentPage,
+            flipped: isFlipped
+        )
+    }
+}
+
+/// Hit pad around the 320×38 glass field. Clicks here must not dismiss.
+enum LaunchpadFieldHitArea {
+    static let fieldSize = NSSize(width: 320, height: 38)
+    static let topInset: CGFloat = 36
+    static let horizontalSlop: CGFloat = 48
+    static let verticalSlop: CGFloat = 32
+
+    static var padSize: NSSize {
+        NSSize(
+            width: fieldSize.width + horizontalSlop * 2,
+            height: fieldSize.height + verticalSlop * 2
+        )
+    }
+
+    static func rect(in bounds: NSRect, flipped: Bool = false) -> NSRect {
+        let pad = padSize
+        let fromTop = topInset + fieldSize.height / 2 - pad.height / 2
+        let y = flipped ? fromTop : bounds.height - fromTop - pad.height
+        return NSRect(
+            x: (bounds.width - pad.width) / 2,
+            y: y,
+            width: pad.width,
+            height: pad.height
+        )
+    }
+}
+
+/// Hit testing for the page capsule. Layout numbers match `PageIndicator`.
+enum LaunchpadPageIndicatorHitArea {
+    static let dotWidth: CGFloat = 5
+    static let activeDotWidth: CGFloat = 15
+    static let dotHeight: CGFloat = 5
+    static let spacing: CGFloat = 6
+    static let horizontalPadding: CGFloat = 11
+    static let verticalPadding: CGFloat = 7
+    static let bottomInset: CGFloat = 36
+    static let hitSlopX: CGFloat = 28
+    static let hitSlopY: CGFloat = 24
+
+    static func isEnabled(pageCount: Int, isSearching: Bool) -> Bool {
+        pageCount > 1 && !isSearching
+    }
+
+    static func visualSize(pageCount: Int, currentPage: Int) -> NSSize {
+        guard pageCount > 0 else { return .zero }
+        var content: CGFloat = 0
+        for index in 0..<pageCount {
+            content += index == currentPage ? activeDotWidth : dotWidth
+            if index + 1 < pageCount { content += spacing }
+        }
+        return NSSize(
+            width: content + horizontalPadding * 2,
+            height: dotHeight + verticalPadding * 2
+        )
+    }
+
+    static func visualRect(
+        in bounds: NSRect,
+        pageCount: Int,
+        currentPage: Int,
+        flipped: Bool = false
+    ) -> NSRect {
+        let size = visualSize(pageCount: pageCount, currentPage: currentPage)
+        let y = flipped
+            ? bounds.height - bottomInset - size.height
+            : bottomInset
+        return NSRect(
+            x: (bounds.width - size.width) / 2,
+            y: y,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    static func rect(
+        in bounds: NSRect,
+        pageCount: Int,
+        currentPage: Int,
+        flipped: Bool = false
+    ) -> NSRect {
+        visualRect(
+            in: bounds,
+            pageCount: pageCount,
+            currentPage: currentPage,
+            flipped: flipped
+        ).insetBy(dx: -hitSlopX, dy: -hitSlopY)
+    }
+
+    static func pageIndex(
+        at point: NSPoint,
+        in bounds: NSRect,
+        pageCount: Int,
+        currentPage: Int,
+        requireHitPad: Bool = true,
+        flipped: Bool = false
+    ) -> Int? {
+        guard pageCount > 1 else { return nil }
+        if requireHitPad {
+            let pad = rect(
+                in: bounds,
+                pageCount: pageCount,
+                currentPage: currentPage,
+                flipped: flipped
+            )
+            guard pad.contains(point) else { return nil }
+        }
+        let centers = dotCenters(
+            in: bounds,
+            pageCount: pageCount,
+            currentPage: currentPage,
+            flipped: flipped
+        )
+        guard !centers.isEmpty else { return nil }
+        var best = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, center) in centers.enumerated() {
+            let distance = abs(center - point.x)
+            if distance < bestDistance {
+                bestDistance = distance
+                best = index
+            }
+        }
+        return best
+    }
+
+    private static func dotCenters(
+        in bounds: NSRect,
+        pageCount: Int,
+        currentPage: Int,
+        flipped: Bool = false
+    ) -> [CGFloat] {
+        let visual = visualRect(
+            in: bounds,
+            pageCount: pageCount,
+            currentPage: currentPage,
+            flipped: flipped
+        )
+        var x = visual.minX + horizontalPadding
+        var centers: [CGFloat] = []
+        centers.reserveCapacity(pageCount)
+        for index in 0..<pageCount {
+            let width = index == currentPage ? activeDotWidth : dotWidth
+            centers.append(x + width / 2)
+            x += width + spacing
+        }
+        return centers
     }
 }
 
@@ -55,6 +256,16 @@ final class LaunchpadContainerView: NSView {
         addSubview(backgroundView)
         addSubview(metalView)
         addSubview(overlayView)
+        overlayView.onSelectPageAt = { [weak self] point in
+            guard let self else { return }
+            _ = self.store.selectPage(
+                at: point,
+                in: self.overlayView.bounds,
+                scrubbing: true,
+                flipped: self.overlayView.isFlipped
+            )
+        }
+        syncPageIndicatorHitState()
 
         // Overlay chrome fades with presentation progress.
         overlayView.alphaValue = 0
@@ -66,6 +277,22 @@ final class LaunchpadContainerView: NSView {
                 self.metalView.needsDisplay = true
                 NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: self)
                 self.syncOverlayAlpha()
+                self.syncPageIndicatorHitState()
+            }
+            .store(in: &cancellables)
+
+        // NSHostingView can keep a first-responder NSTextView on screen after
+        // SwiftUI removes SearchField. Resign, then remount the overlay tree.
+        store.$openedFolderID
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] folderID in
+                guard let self else { return }
+                if folderID != nil {
+                    self.window?.makeFirstResponder(self)
+                }
+                self.overlayView.rootView = LaunchpadOverlayView(store: self.store)
             }
             .store(in: &cancellables)
 
@@ -135,6 +362,12 @@ final class LaunchpadContainerView: NSView {
             overlayView.alphaValue = 1
             backgroundView.alphaValue = 1
         }
+    }
+
+    private func syncPageIndicatorHitState() {
+        overlayView.pageCount = store.pageCount
+        overlayView.currentPage = store.currentPage
+        overlayView.isSearching = store.isSearching
     }
 
     override func layout() {
@@ -214,16 +447,35 @@ struct LaunchpadOverlayView: View {
             ZStack {
                 VStack(spacing: 0) {
                     Group {
-                        if let folder = store.openedFolder {
+                        if let folderID = store.openedFolderID,
+                           let folder = store.folder(withID: folderID) {
                             FolderTitleField(store: store, folder: folder)
                         } else {
                             SearchField(store: store)
                         }
                     }
-                    .padding(.top, 36)
+                    .id(store.openedFolderID ?? "search")
+                    .animation(nil, value: store.openedFolderID)
+                    .background {
+                        Color.clear
+                            .frame(
+                                width: LaunchpadFieldHitArea.padSize.width,
+                                height: LaunchpadFieldHitArea.padSize.height
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                guard store.openedFolderID == nil else { return }
+                                NotificationCenter.default.post(
+                                    name: .qlaunchpadFocusSearch,
+                                    object: nil
+                                )
+                            }
+                            .accessibilityHidden(true)
+                    }
+                    .padding(.top, LaunchpadFieldHitArea.topInset)
                     Spacer(minLength: 0)
                     PageIndicator(store: store)
-                        .padding(.bottom, 36)
+                        .padding(.bottom, LaunchpadPageIndicatorHitArea.bottomInset)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -275,9 +527,6 @@ private struct FolderTitleField: View {
     @State private var draftName: String
     @FocusState private var isFocused: Bool
 
-    private let fieldWidth: CGFloat = 360
-    private let fieldHeight: CGFloat = 44
-
     init(store: AppStore, folder: AppFolder) {
         self.store = store
         self.folder = folder
@@ -289,17 +538,30 @@ private struct FolderTitleField: View {
             commitName()
         }
         .textFieldStyle(.plain)
-        .font(.system(size: 18, weight: .semibold))
+        .font(.system(size: 22, weight: .semibold, design: .rounded))
         .foregroundStyle(.white.opacity(0.94))
         .multilineTextAlignment(.center)
         .lineLimit(1)
         .truncationMode(.middle)
         .focused($isFocused)
-        .frame(width: fieldWidth, height: fieldHeight)
+        .padding(.horizontal, 16)
+        .frame(
+            width: LaunchpadFieldHitArea.fieldSize.width + 40,
+            height: LaunchpadFieldHitArea.fieldSize.height
+        )
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(isFocused ? 0.12 : 0))
+        }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Folder name")
+        .accessibilityLabel("文件夹名称")
         .onAppear {
             draftName = folder.name
+        }
+        .onChange(of: folder.name) { _, name in
+            if !isFocused {
+                draftName = name
+            }
         }
         .onChange(of: isFocused) { _, focused in
             if !focused {
@@ -322,10 +584,6 @@ private struct SearchField: View {
     /// Bumped to request first-responder; survives overlay reuse across presentations.
     @State private var focusRequestID = 0
 
-    private let fieldWidth: CGFloat = 360
-    private let fieldHeight: CGFloat = 44
-    private let cornerRadius: CGFloat = 22
-
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
@@ -342,7 +600,7 @@ private struct SearchField: View {
                 ),
                 isFocused: $isFocused,
                 focusRequestID: focusRequestID,
-                placeholder: "Search"
+                placeholder: "搜索"
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
@@ -364,9 +622,11 @@ private struct SearchField: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.45))
                     .symbolRenderingMode(.hierarchical)
+                    .frame(width: 18, height: 18)
             }
             .buttonStyle(.plain)
-            .frame(width: 16, height: 16)
+            .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
             .opacity(store.searchText.isEmpty ? 0 : 1)
             .allowsHitTesting(!store.searchText.isEmpty)
             .accessibilityHidden(store.searchText.isEmpty)
@@ -379,90 +639,100 @@ private struct SearchField: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
                     .symbolRenderingMode(.hierarchical)
+                    .frame(width: 18, height: 18)
             }
             .buttonStyle(.plain)
-            .frame(width: 18, height: 18)
+            .padding(14)
             .contentShape(Rectangle())
+            .padding(-14)
             .help("Open Settings")
             .accessibilityLabel("Open Settings")
         }
-        .padding(.horizontal, 16)
-        .frame(width: fieldWidth, height: fieldHeight)
-        .background { glassBackground }
-        .overlay { glassStroke }
-        // Soft, airy shadow — avoid heavy darkening under a clear glass field.
-        .shadow(color: .black.opacity(0.14), radius: 16, y: 6)
+        .launchpadGlassField(isEmphasized: !store.searchText.isEmpty)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Search apps")
+        .accessibilityLabel("搜索应用")
+    }
+}
+
+private extension View {
+    func launchpadGlassField(isEmphasized: Bool) -> some View {
+        modifier(LaunchpadGlassFieldChrome(isEmphasized: isEmphasized))
+    }
+}
+
+/// Clear liquid glass chip. Rim brightens when typing, not merely because
+/// the field holds first-responder (search is auto-focused on open).
+private struct LaunchpadGlassFieldChrome: ViewModifier {
+    var isEmphasized: Bool
+    private let width: CGFloat = 320
+    private let height: CGFloat = 38
+    private let cornerRadius: CGFloat = 19
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 16)
+            .frame(width: width, height: height)
+            .background { glassBackground }
+            .overlay { glassStroke }
+            .shadow(color: .black.opacity(isEmphasized ? 0.20 : 0.12), radius: isEmphasized ? 18 : 14, y: 6)
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .animation(.easeOut(duration: 0.16), value: isEmphasized)
     }
 
     @ViewBuilder
     private var glassBackground: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         if #available(macOS 26.0, *) {
-            // Clear liquid glass — more translucent than `.regular`.
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            shape
                 .fill(.clear)
-                .glassEffect(
-                    .clear,
-                    in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                )
+                .glassEffect(.clear.interactive(true), in: shape)
         } else if #available(macOS 15.0, *) {
-            // Thin, highly transparent glass approximation.
             ZStack {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.55)
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.14),
-                                Color.white.opacity(0.04),
-                                Color.white.opacity(0.02)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
+                shape.fill(.ultraThinMaterial).opacity(0.55)
+                shape.fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.14),
+                            Color.white.opacity(0.04),
+                            Color.white.opacity(0.02)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
-                // Specular rim (top) — light so it stays airy.
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.45),
-                                Color.white.opacity(0.06),
-                                Color.clear
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.8
-                    )
+                )
+                shape.stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.45),
+                            Color.white.opacity(0.06),
+                            Color.clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.8
+                )
             }
         } else {
             ZStack {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.5)
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(0.05))
+                shape.fill(.ultraThinMaterial).opacity(0.5)
+                shape.fill(Color.white.opacity(0.05))
             }
         }
     }
 
-    @ViewBuilder
     private var glassStroke: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .strokeBorder(
                 LinearGradient(
                     colors: [
-                        Color.white.opacity(isFocused ? 0.38 : 0.22),
+                        Color.white.opacity(isEmphasized ? 0.46 : 0.22),
                         Color.white.opacity(0.06)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 ),
-                lineWidth: 0.8
+                lineWidth: isEmphasized ? 1 : 0.8
             )
     }
 }
@@ -517,7 +787,7 @@ private struct AppKitSearchTextField: NSViewRepresentable {
         if focusRequestID != context.coordinator.lastFocusRequestID {
             context.coordinator.lastFocusRequestID = focusRequestID
             DispatchQueue.main.async {
-                guard let window = field.window else { return }
+                guard field.superview != nil, let window = field.window else { return }
                 if window.firstResponder !== field {
                     window.makeFirstResponder(field)
                 }
@@ -525,6 +795,13 @@ private struct AppKitSearchTextField: NSViewRepresentable {
                 context.coordinator.parent.isFocused = true
             }
         }
+    }
+
+    static func dismantleNSView(_ view: IMESearchTextView, coordinator: Coordinator) {
+        if view.window?.firstResponder === view {
+            view.window?.makeFirstResponder(nil)
+        }
+        view.removeFromSuperview()
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -625,7 +902,7 @@ private final class IMESearchTextView: NSTextView {
     override func layout() {
         super.layout()
         // NSTextView defaults to a top-aligned text container. Center the
-        // single-line editor in the 44pt glass search field so the glyphs and
+        // single-line editor in the glass search field so the glyphs and
         // insertion caret align with the surrounding toolbar buttons.
         let lineHeight = max(font?.boundingRectForFont.height ?? 19, 1)
         textContainerInset = NSSize(
@@ -688,32 +965,37 @@ private struct PageIndicator: View {
     var body: some View {
         // Hide when searching or single page.
         if store.pageCount > 1 && !store.isSearching {
-            HStack(spacing: 8) {
+            HStack(spacing: LaunchpadPageIndicatorHitArea.spacing) {
                 ForEach(0..<store.pageCount, id: \.self) { page in
                     Capsule(style: .continuous)
                         .fill(page == store.currentPage ? Color.white : Color.white.opacity(0.32))
                         .frame(
-                            width: page == store.currentPage ? 20 : 7,
-                            height: 7
+                            width: page == store.currentPage
+                                ? LaunchpadPageIndicatorHitArea.activeDotWidth
+                                : LaunchpadPageIndicatorHitArea.dotWidth,
+                            height: LaunchpadPageIndicatorHitArea.dotHeight
                         )
-                        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: store.currentPage)
-                        .onTapGesture {
+                        .accessibilityLabel("第 \(page + 1) 页")
+                        .accessibilityAddTraits(page == store.currentPage ? .isSelected : [])
+                        .accessibilityAction {
                             store.goToPage(page)
                         }
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .allowsHitTesting(false)
+            .padding(.horizontal, LaunchpadPageIndicatorHitArea.horizontalPadding)
+            .padding(.vertical, LaunchpadPageIndicatorHitArea.verticalPadding)
             .background {
                 if #available(macOS 26.0, *) {
                     Capsule(style: .continuous)
                         .fill(.clear)
                         .glassEffect(.clear, in: Capsule(style: .continuous))
+                        .opacity(0.58)
                 } else {
                     Capsule(style: .continuous)
                         .fill(.ultraThinMaterial)
-                        .opacity(0.55)
-                        .overlay(Capsule(style: .continuous).fill(Color.white.opacity(0.04)))
+                        .opacity(0.3)
+                        .overlay(Capsule(style: .continuous).fill(Color.white.opacity(0.02)))
                 }
             }
             .overlay(
@@ -721,6 +1003,8 @@ private struct PageIndicator: View {
                     .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
             )
             .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
+            .contentShape(Capsule(style: .continuous))
+            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: store.currentPage)
             .transition(.opacity.combined(with: .scale(scale: 0.92)))
         }
     }

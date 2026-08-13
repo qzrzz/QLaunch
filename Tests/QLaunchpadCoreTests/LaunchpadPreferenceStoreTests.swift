@@ -149,6 +149,10 @@ final class LaunchpadPreferenceStoreTests: XCTestCase {
         XCTAssertTrue(release.path.hasSuffix("Application Support/QLaunch/layout.backup.json"))
         XCTAssertTrue(development.path.hasSuffix("Application Support/QLaunch Dev/layout.backup.json"))
         XCTAssertNotEqual(release, development)
+        XCTAssertTrue(
+            LaunchpadPreferenceStore.layoutWorkingFileURL(domain: LaunchpadPreferenceStore.developmentDomain)
+                .path.hasSuffix("Application Support/QLaunch Dev/qlaunch-layout.json")
+        )
     }
 
     func testEncodeFoldersWrapperMatchesPersistenceEncoder() throws {

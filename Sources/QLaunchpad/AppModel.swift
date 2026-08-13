@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreServices
 import Foundation
 import os
 import QLaunchpadCore
@@ -97,6 +98,8 @@ struct AppInfo: Identifiable, Hashable {
     /// stored separately (e.g. `zg`) so both search styles remain fast.
     let pinyinFull: String
     let pinyinInitials: String
+    let installedAt: Date?
+    let lastUsedAt: Date?
 
     init(
         id: String,
@@ -104,7 +107,9 @@ struct AppInfo: Identifiable, Hashable {
         url: URL,
         bundleIdentifier: String,
         pinyinFull: String? = nil,
-        pinyinInitials: String? = nil
+        pinyinInitials: String? = nil,
+        installedAt: Date? = nil,
+        lastUsedAt: Date? = nil
     ) {
         self.id = id
         self.name = name
@@ -115,6 +120,8 @@ struct AppInfo: Identifiable, Hashable {
             : nil
         self.pinyinFull = pinyinFull ?? metadata?.full ?? ""
         self.pinyinInitials = pinyinInitials ?? metadata?.initials ?? ""
+        self.installedAt = installedAt
+        self.lastUsedAt = lastUsedAt
     }
 }
 
@@ -191,6 +198,16 @@ struct AppIconCache {
 }
 
 enum AppScanner {
+    static var defaultRoots: [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            URL(fileURLWithPath: "/Applications"),
+            URL(fileURLWithPath: "/System/Applications"),
+            URL(fileURLWithPath: "/System/Applications/Utilities"),
+            home.appendingPathComponent("Applications")
+        ]
+    }
+
     static func scan(additionalRoots: [URL] = []) -> [AppInfo] {
         struct Candidate {
             let url: URL
@@ -200,17 +217,17 @@ enum AppScanner {
         }
 
         let fileManager = FileManager.default
-        let home = fileManager.homeDirectoryForCurrentUser
-        let roots = [
-            URL(fileURLWithPath: "/Applications"),
-            URL(fileURLWithPath: "/System/Applications"),
-            URL(fileURLWithPath: "/System/Applications/Utilities"),
-            home.appendingPathComponent("Applications")
-        ] + additionalRoots
+        let roots = defaultRoots + additionalRoots
 
         var candidates: [Candidate] = []
         var seenPaths = Set<String>()
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .localizedNameKey]
+        let keys: [URLResourceKey] = [
+            .isDirectoryKey,
+            .isPackageKey,
+            .localizedNameKey,
+            .addedToDirectoryDateKey,
+            .creationDateKey
+        ]
 
         for root in roots where fileManager.fileExists(atPath: root.path) {
             guard let enumerator = fileManager.enumerator(
@@ -267,11 +284,14 @@ enum AppScanner {
                 id = "\(candidate.bundleIdentifier)#\(candidate.url.standardizedFileURL.path)"
             }
 
+            let dates = AppUsageMetadata.dates(for: candidate.url)
             return AppInfo(
                 id: id,
                 name: useFileName ? candidate.fileName : candidate.displayName,
                 url: candidate.url,
-                bundleIdentifier: candidate.bundleIdentifier
+                bundleIdentifier: candidate.bundleIdentifier,
+                installedAt: dates.installedAt,
+                lastUsedAt: dates.lastUsedAt
             )
         }
 
@@ -282,6 +302,19 @@ enum AppScanner {
             }
             return $0.url.path < $1.url.path
         }
+    }
+}
+
+enum AppUsageMetadata {
+    static func dates(for url: URL) -> (installedAt: Date?, lastUsedAt: Date?) {
+        let values = try? url.resourceValues(forKeys: [.addedToDirectoryDateKey, .creationDateKey])
+        let installedAt = values?.addedToDirectoryDate ?? values?.creationDate
+        return (installedAt, spotlightLastUsed(url: url))
+    }
+
+    private static func spotlightLastUsed(url: URL) -> Date? {
+        guard let item = MDItemCreateWithURL(nil, url as CFURL) else { return nil }
+        return MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
     }
 }
 
@@ -298,7 +331,7 @@ enum LaunchpadPresentation: Equatable {
 enum IconRenderQuality: String, CaseIterable, Identifiable {
     /// 4× float16 + binomial; full catalog resident for max smoothness.
     case quality
-    /// 2× 8-bit linear; full catalog resident for smooth paging.
+    /// 2× 8-bit sRGB; full catalog resident for smooth paging.
     case performance
     /// Same bake as performance, but page-window lazy load / prune for low RAM.
     case lowMemory
@@ -359,7 +392,7 @@ enum IconRenderQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Quality keeps a float16 drawable. Performance and low memory present 8-bit.
+    /// Quality keeps a float16 drawable. Performance and low memory present 8-bit Display P3.
     var usesUnorm8Drawable: Bool {
         switch self {
         case .quality: false
@@ -450,6 +483,9 @@ final class AppStore: ObservableObject {
     @Published private(set) var isKeyboardNavigationActive = false
     @Published private(set) var hiddenAppIDs: Set<String>
     @Published private(set) var customApplicationSourcePaths: [String]
+    @Published private(set) var layoutProfiles: [LaunchpadLayoutProfile]
+    @Published private(set) var activeLayoutProfileID: String
+    @Published private(set) var layoutMode: LaunchpadLayoutMode
     @Published var showHiddenAppsInSearch: Bool {
         didSet {
             UserDefaults.standard.set(showHiddenAppsInSearch, forKey: LaunchpadPersistence.showHiddenAppsKey)
@@ -484,15 +520,34 @@ final class AppStore: ObservableObject {
     }
     private var scrollAccumulated: Double = 0
     private var lastScrollTime: CFTimeInterval = 0
+    /// Locked for the whole trackpad gesture so noisy Y samples cannot reverse X.
+    private var scrollAxis: PageScrollAxis = .undecided
+    private var scrollAxisAccumX: Double = 0
+    private var scrollAxisAccumY: Double = 0
+    /// After finger-up settle, leftover trackpad momentum must not start a new flip.
+    private var ignoreScrollMomentum = false
+    /// Root-grid page captured when a folder opens, restored when it closes.
+    private var pageBeforeFolder: Double?
+    /// Root-grid page captured when search starts, restored when search clears.
+    private var pageBeforeSearch: Double?
     private var scanTask: Task<Void, Never>?
     private var layoutGeneration: UInt64 = 0
     /// Bumped by import / external reload so Metal can drop an in-flight drag.
     private(set) var dragGeneration: UInt64 = 0
 
+    private enum PageScrollAxis {
+        case undecided
+        case horizontal
+        case vertical
+    }
+
     /// Points of scroll delta that equal one full page turn.
     private let pageScrollUnit: Double = 320
+    private let scrollAxisLockPoints: Double = 8
 
     private var itemOrderIDs: [String]
+    private var recentLaunchDates: [String: Date]
+    private var iconColorByAppID: [String: LaunchpadIconColor] = [:]
 
     private static var preferenceDomain: String {
         Bundle.main.bundleIdentifier ?? (kCFPreferencesCurrentApplication as String)
@@ -504,10 +559,21 @@ final class AppStore: ObservableObject {
         hiddenAppIDs = Set(layout.hiddenIDs)
         itemOrderIDs = layout.itemOrder
         folders = (try? LaunchpadPreferenceStore.decodeFolders(layout.foldersData)) ?? []
+        let profileIndex = LaunchpadLayoutProfileStore.loadIndex(domain: Self.preferenceDomain)
+        layoutProfiles = profileIndex.profiles
+        activeLayoutProfileID = profileIndex.activeID
 
         let defaults = UserDefaults.standard
         customApplicationSourcePaths = defaults.stringArray(forKey: LaunchpadPersistence.customSourcesKey) ?? []
         showHiddenAppsInSearch = defaults.bool(forKey: LaunchpadPersistence.showHiddenAppsKey)
+        layoutMode = LaunchpadLayoutMode(
+            storageValue: defaults.string(forKey: LaunchpadPersistence.layoutModeKey)
+        )
+        if let rawDates = defaults.dictionary(forKey: LaunchpadPersistence.recentLaunchDatesKey) as? [String: Double] {
+            recentLaunchDates = rawDates.mapValues { Date(timeIntervalSince1970: $0) }
+        } else {
+            recentLaunchDates = [:]
+        }
         rebuildLaunchpadItems()
     }
 
@@ -545,13 +611,40 @@ final class AppStore: ObservableObject {
         apps.filter { hiddenAppIDs.contains($0.id) }
     }
 
+    var canDeleteActiveLayoutProfile: Bool {
+        layoutMode.isUser && LaunchpadLayoutProfileStore.canDelete(activeLayoutProfileID)
+    }
+
+    var activeLayoutProfileName: String {
+        layoutProfiles.first { $0.id == activeLayoutProfileID }?.name
+            ?? LaunchpadLayoutProfileStore.defaultProfileName
+    }
+
+    var allowsUserLayoutEditing: Bool {
+        layoutMode.isUser && !isSearching
+    }
+
+    var layoutSelectorID: String {
+        switch layoutMode {
+        case .user:
+            return LaunchpadLayoutSelectorID.user(activeLayoutProfileID)
+        case .auto(let kind):
+            return LaunchpadLayoutSelectorID.auto(kind)
+        }
+    }
+
     /// Top-level items shown by Launchpad. Search intentionally remains a flat
     /// app list so a result can always be launched without opening a folder.
     var displayItems: [LaunchpadItem] {
         if isSearching {
             return filteredApps.map(LaunchpadItem.app)
         }
-        return launchpadItems
+        switch layoutMode {
+        case .user:
+            return launchpadItems
+        case .auto(let kind):
+            return autoLayoutItems(kind)
+        }
     }
 
     /// Items shown by the current Launchpad view. A folder is a page whose
@@ -618,6 +711,9 @@ final class AppStore: ObservableObject {
                 layoutLogger.debug("layout.scan.generationAdvanced readLayout=true")
                 adoptPersistedLayout()
             }
+            if case .auto(.iconColor) = layoutMode {
+                ensureIconColors()
+            }
             reconcileLaunchpadItems()
             // A scan also runs when the Launchpad is shown again. Keep the
             // current page while refreshing the catalog; the non-reset path
@@ -672,7 +768,8 @@ final class AppStore: ObservableObject {
 
     func applyLayout(
         _ document: LaunchpadLayoutDocument,
-        mode: LaunchpadLayoutImportMode
+        mode: LaunchpadLayoutImportMode,
+        writeBackup: Bool = true
     ) throws -> LaunchpadLayoutReport {
         guard !isLoading, !apps.isEmpty else {
             throw LaunchpadLayoutError.malformed("application catalog is empty")
@@ -684,7 +781,9 @@ final class AppStore: ObservableObject {
             scanned: knownApps(),
             currentHidden: hiddenAppIDs
         )
-        writeLayoutBackupFailOpen()
+        if writeBackup {
+            writeLayoutBackupFailOpen()
+        }
         let foldersData = try LaunchpadPreferenceStore.encodeFolders(applied.folders)
         LaunchpadPreferenceStore.writeLayout(
             domain: Self.preferenceDomain,
@@ -697,6 +796,8 @@ final class AppStore: ObservableObject {
         folders = applied.folders
         itemOrderIDs = applied.order
         hiddenAppIDs = applied.hidden
+        layoutMode = .user
+        persistLayoutMode()
         rebuildLaunchpadItems()
         cancelActiveDrag()
         layoutGeneration += 1
@@ -709,6 +810,96 @@ final class AppStore: ObservableObject {
         )
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
         return report
+    }
+
+    func selectLayoutProfile(_ id: String) throws {
+        guard layoutProfiles.contains(where: { $0.id == id }) else {
+            throw LaunchpadLayoutProfileError.profileNotFound(id)
+        }
+        if id == activeLayoutProfileID {
+            if !layoutMode.isUser {
+                setLayoutMode(.user)
+            }
+            return
+        }
+        try snapshotActiveLayoutProfile()
+        let document = try LaunchpadLayoutProfileStore.readDocument(
+            in: layoutProfilesDirectory,
+            profileID: id
+        )
+        _ = try applyLayout(document, mode: .merge, writeBackup: false)
+        activeLayoutProfileID = id
+        try persistLayoutProfileIndex()
+    }
+
+    func selectLayoutSelector(_ id: String) throws {
+        let parsed = LaunchpadLayoutSelectorID.parse(id)
+        if let profileID = parsed.profileID {
+            try selectLayoutProfile(profileID)
+            return
+        }
+        if let kind = parsed.autoKind {
+            setLayoutMode(.auto(kind))
+            return
+        }
+        throw LaunchpadLayoutProfileError.invalidProfileID(id)
+    }
+
+    func setLayoutMode(_ mode: LaunchpadLayoutMode) {
+        guard mode != layoutMode else { return }
+        if !mode.isUser {
+            leaveOpenedFolder()
+        }
+        layoutMode = mode
+        persistLayoutMode()
+        if case .auto(.iconColor) = mode {
+            ensureIconColors()
+        }
+        cancelActiveDrag()
+        layoutGeneration += 1
+        refreshFilteredApps(resetPage: true)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func recordAppLaunch(_ app: AppInfo) {
+        recentLaunchDates[app.id] = Date()
+        persistRecentLaunches()
+    }
+
+    func createLayoutProfile(named name: String) throws {
+        guard let name = LaunchpadLayoutProfileStore.normalizedName(name) else {
+            throw LaunchpadLayoutProfileError.emptyName
+        }
+        try snapshotActiveLayoutProfile()
+        let profile = LaunchpadLayoutProfile(id: UUID().uuidString, name: name)
+        try LaunchpadLayoutProfileStore.writeDocument(
+            exportLayout(),
+            in: layoutProfilesDirectory,
+            profileID: profile.id
+        )
+        layoutProfiles.append(profile)
+        activeLayoutProfileID = profile.id
+        layoutMode = .user
+        persistLayoutMode()
+        try persistLayoutProfileIndex()
+    }
+
+    func deleteLayoutProfile(_ id: String) throws {
+        guard LaunchpadLayoutProfileStore.canDelete(id) else {
+            throw LaunchpadLayoutProfileError.defaultProfileProtected
+        }
+        guard layoutProfiles.contains(where: { $0.id == id }) else {
+            throw LaunchpadLayoutProfileError.profileNotFound(id)
+        }
+        if activeLayoutProfileID == id {
+            try selectLayoutProfile(LaunchpadLayoutProfileStore.defaultProfileID)
+        }
+        try LaunchpadLayoutProfileStore.removeDocument(
+            in: layoutProfilesDirectory,
+            profileID: id
+        )
+        layoutProfiles.removeAll { $0.id == id }
+        try persistLayoutProfileIndex()
     }
 
     func reloadPersistedLayout() {
@@ -729,21 +920,49 @@ final class AppStore: ObservableObject {
     }
 
     func updateSearch(_ text: String) {
+        let willSearch = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Capture before `searchText` changes — `currentPage` is then clamped
+        // to the result list, which starts at page 0.
+        if !isSearching && willSearch {
+            pageBeforeSearch = Double(currentPage)
+        }
         searchText = text
         isKeyboardNavigationActive = false
-        refreshFilteredApps(resetPage: true)
+        if !willSearch, pageBeforeSearch != nil {
+            refreshFilteredApps(resetPage: false)
+            restorePageAfterSearch()
+        } else {
+            refreshFilteredApps(resetPage: true)
+        }
+    }
+
+    private func restorePageAfterSearch() {
+        let saved = pageBeforeSearch
+        pageBeforeSearch = nil
+        pageVelocity = 0
+        resetPageScrollGesture()
+        let lastPage = Double(max(pageCount - 1, 0))
+        let page = min(max(saved ?? 0, 0), lastPage)
+        pageOffset = page
+        targetPage = page
+        ensureKeyboardFocus(onPage: currentPage)
     }
 
     func enterFolder(_ folderID: String) {
-        guard folder(withID: folderID) != nil else { return }
+        guard layoutMode.isUser, folder(withID: folderID) != nil else { return }
+        // Capture before `openedFolderID` changes — `currentPage` is clamped
+        // to the folder's page count once the folder is open.
+        if openedFolderID == nil {
+            pageBeforeFolder = Double(currentPage)
+        }
         openedFolderID = folderID
+        pageBeforeSearch = nil
         searchText = ""
         refreshFilteredApps(resetPage: true)
         pageOffset = 0
         targetPage = 0
         pageVelocity = 0
-        scrollAccumulated = 0
-        isPageGestureActive = false
+        resetPageScrollGesture()
         keyboardFocusID = activeDisplayItems.compactMap { item in
             if case .app(let app) = item { return app }
             return nil
@@ -765,29 +984,39 @@ final class AppStore: ObservableObject {
     }
 
     func exitFolder() {
-        guard openedFolderID != nil else { return }
+        guard leaveOpenedFolder() != nil else { return }
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// Close the open folder and put the root grid back on the page it left.
+    @discardableResult
+    private func leaveOpenedFolder() -> String? {
+        guard let folderID = openedFolderID else { return nil }
         openedFolderID = nil
         isDraggingFolderApp = false
         isFolderRemovalTargeted = false
-        pageOffset = 0
-        targetPage = 0
-        pageVelocity = 0
-        scrollAccumulated = 0
-        isPageGestureActive = false
-        keyboardFocusID = activeDisplayItems.compactMap { item in
-            if case .app(let app) = item { return app }
-            return nil
-        }.first?.id
+        restoreRootPageAfterFolder()
+        resetPageScrollGesture()
+        ensureKeyboardFocus(onPage: currentPage)
         isKeyboardNavigationActive = false
-        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return folderID
+    }
+
+    private func restoreRootPageAfterFolder() {
+        let saved = pageBeforeFolder
+        pageBeforeFolder = nil
+        pageVelocity = 0
+        let lastPage = Double(max(pageCount - 1, 0))
+        let page = min(max(saved ?? 0, 0), lastPage)
+        pageOffset = page
+        targetPage = page
     }
 
     func applyGridLayoutChange() {
         pageOffset = 0
         targetPage = 0
         pageVelocity = 0
-        scrollAccumulated = 0
-        isPageGestureActive = false
+        resetPageScrollGesture()
         keyboardFocusID = nil
         isKeyboardNavigationActive = false
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
@@ -811,6 +1040,8 @@ final class AppStore: ObservableObject {
 
     func addApplicationSource(_ url: URL) {
         let path = url.standardizedFileURL.path
+        let defaultPaths = Set(AppScanner.defaultRoots.map(\.standardizedFileURL.path))
+        guard !defaultPaths.contains(path) else { return }
         guard !customApplicationSourcePaths.contains(path) else { return }
         customApplicationSourcePaths.append(path)
         persistApplicationSources()
@@ -940,10 +1171,35 @@ final class AppStore: ObservableObject {
         let clamped = min(max(page, 0), pageCount - 1)
         targetPage = Double(clamped)
         pageVelocity = 0
-        isPageGestureActive = false
+        resetPageScrollGesture()
         pageOffset = targetPage
         ensureKeyboardFocus(onPage: clamped)
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// Pick a page from a click or scrub in view coordinates.
+    @discardableResult
+    func selectPage(
+        at point: NSPoint,
+        in bounds: NSRect,
+        scrubbing: Bool = false,
+        flipped: Bool = false
+    ) -> Bool {
+        guard LaunchpadPageIndicatorHitArea.isEnabled(
+            pageCount: pageCount,
+            isSearching: isSearching
+        ) else { return false }
+        guard let page = LaunchpadPageIndicatorHitArea.pageIndex(
+            at: point,
+            in: bounds,
+            pageCount: pageCount,
+            currentPage: currentPage,
+            requireHitPad: !scrubbing,
+            flipped: flipped
+        ) else { return false }
+        if page == currentPage { return true }
+        goToPage(page)
+        return true
     }
 
     func movePage(byPages delta: Int) {
@@ -955,10 +1211,14 @@ final class AppStore: ObservableObject {
     /// Begin a click-drag page pan on empty background.
     func beginPagePan() {
         isKeyboardNavigationActive = false
+        ignoreScrollMomentum = false
         isPageGestureActive = true
         pageVelocity = 0
         lastScrollTime = CACurrentMediaTime()
         scrollAccumulated = 0
+        scrollAxis = .undecided
+        scrollAxisAccumX = 0
+        scrollAxisAccumY = 0
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
@@ -1001,64 +1261,118 @@ final class AppStore: ObservableObject {
         isPrecise: Bool
     ) {
         isKeyboardNavigationActive = false
-        let primary = abs(deltaX) >= abs(deltaY) ? deltaX : deltaY
-        guard abs(primary) > 0.01 else { return }
-
-        let now = CACurrentMediaTime()
-        let dt = max(1.0 / 240.0, min(now - lastScrollTime, 1.0 / 20.0))
-        lastScrollTime = now
-
-        // Convert pixel/line delta into fractional pages. Negative scroll = next page (content moves left).
-        let unit = isPrecise ? pageScrollUnit : pageScrollUnit * 0.35
-        let pageDelta = Double(-primary) / unit
 
         let began = phase.contains(.began)
-            || (phase == [] && momentumPhase == [] && !isPageGestureActive && !isPrecise)
         let ended = phase.contains(.ended) || phase.contains(.cancelled)
-        let momentumEnded = momentumPhase.contains(.ended) || momentumPhase.contains(.cancelled)
         let inMomentum = momentumPhase.contains(.began) || momentumPhase.contains(.changed)
-        let inGesture = phase.contains(.changed) || began || inMomentum || isPageGestureActive
+        let momentumEnded = momentumPhase.contains(.ended) || momentumPhase.contains(.cancelled)
 
-        if began {
-            isPageGestureActive = true
-            scrollAccumulated = 0
-            pageVelocity = 0
-        }
-
-        if inGesture || inMomentum {
-            isPageGestureActive = true
-            // Rubber-band past ends while the gesture is live.
-            let proposed = pageOffset + pageDelta
-            let minPage = 0.0
-            let maxPage = Double(max(pageCount - 1, 0))
-            if proposed < minPage {
-                let overflow = minPage - proposed
-                pageOffset = minPage - rubberBand(overflow)
-            } else if proposed > maxPage {
-                let overflow = proposed - maxPage
-                pageOffset = maxPage + rubberBand(overflow)
-            } else {
-                pageOffset = proposed
-            }
-            scrollAccumulated += pageDelta
-            pageVelocity = pageDelta / dt
-            targetPage = pageOffset
-        }
-
-        // Mouse wheel (non-precise): snap after each notch.
-        if !isPrecise && phase == [] && momentumPhase == [] {
-            isPageGestureActive = false
+        // Mouse wheel: one notch → one page. Trackpad never takes this path.
+        if !isPrecise && phase.isEmpty && momentumPhase.isEmpty {
+            let primary = abs(deltaX) >= abs(deltaY) ? deltaX : deltaY
+            guard abs(primary) > 0.01 else { return }
+            let pageDelta = Double(-primary) / (pageScrollUnit * 0.35)
+            resetPageScrollGesture()
             settlePage(withVelocity: pageDelta > 0 ? 1.2 : -1.2)
-            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
             return
         }
 
-        if ended || momentumEnded {
-            isPageGestureActive = false
-            settlePage(withVelocity: pageVelocity)
+        if began {
+            ignoreScrollMomentum = false
+            isPageGestureActive = true
+            scrollAccumulated = 0
+            pageVelocity = 0
+            scrollAxis = .undecided
+            scrollAxisAccumX = 0
+            scrollAxisAccumY = 0
+            lastScrollTime = CACurrentMediaTime()
         }
 
-        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        // Finger-up already snapped. AppKit still sends a decaying momentum
+        // stream — applying it starts another flip from between two pages.
+        if ignoreScrollMomentum && !began {
+            return
+        }
+
+        // Lock axis once, then ignore the other axis for the rest of the gesture.
+        // Per-event "whichever is larger" lets vertical noise reverse paging.
+        let axisBefore = scrollAxis
+        scrollAxisAccumX += Double(deltaX)
+        scrollAxisAccumY += Double(deltaY)
+        if scrollAxis == .undecided {
+            let absX = abs(scrollAxisAccumX)
+            let absY = abs(scrollAxisAccumY)
+            if absX >= scrollAxisLockPoints || absY >= scrollAxisLockPoints {
+                if absX >= absY * 1.2 {
+                    scrollAxis = .horizontal
+                } else if absY >= absX * 1.2 {
+                    scrollAxis = .vertical
+                }
+            }
+        }
+
+        let justLocked = axisBefore == .undecided && scrollAxis != .undecided
+        let trackedDelta: Double
+        switch scrollAxis {
+        case .undecided:
+            trackedDelta = 0
+        case .horizontal:
+            trackedDelta = justLocked ? scrollAxisAccumX : Double(deltaX)
+        case .vertical:
+            trackedDelta = justLocked ? scrollAxisAccumY : Double(deltaY)
+        }
+
+        let now = CACurrentMediaTime()
+        let dt = max(1.0 / 240.0, min(now - lastScrollTime, 1.0 / 20.0))
+        if began && abs(trackedDelta) <= 0.01 {
+            lastScrollTime = now
+        }
+
+        if isPageGestureActive, abs(trackedDelta) > 0.01 {
+            lastScrollTime = now
+            let pageDelta = -trackedDelta / pageScrollUnit
+            applyLivePageDelta(pageDelta)
+            let instant = pageDelta / dt
+            pageVelocity = pageVelocity * 0.55 + instant * 0.45
+            if targetPage != pageOffset {
+                targetPage = pageOffset
+            }
+        }
+
+        // Snap as soon as the finger lifts. Waiting for momentum parks the
+        // grid between pages, then the inertia burst flips through them.
+        if ended && !inMomentum {
+            ignoreScrollMomentum = true
+            settlePage(withVelocity: pageVelocity)
+            return
+        }
+
+        if momentumEnded {
+            ignoreScrollMomentum = true
+            settlePage(withVelocity: pageVelocity)
+        }
+    }
+
+    private func applyLivePageDelta(_ pageDelta: Double) {
+        let proposed = pageOffset + pageDelta
+        let minPage = 0.0
+        let maxPage = Double(max(pageCount - 1, 0))
+        if proposed < minPage {
+            pageOffset = minPage - rubberBand(minPage - proposed)
+        } else if proposed > maxPage {
+            pageOffset = maxPage + rubberBand(proposed - maxPage)
+        } else {
+            pageOffset = proposed
+        }
+        scrollAccumulated += pageDelta
+    }
+
+    private func resetPageScrollGesture() {
+        isPageGestureActive = false
+        scrollAccumulated = 0
+        scrollAxis = .undecided
+        scrollAxisAccumX = 0
+        scrollAxisAccumY = 0
     }
 
     /// Snap to nearest page, biased by flick velocity (Launchpad-style).
@@ -1080,7 +1394,7 @@ final class AppStore: ObservableObject {
         targetPage = min(max(page, minPage), maxPage)
         pageOffset = targetPage
         pageVelocity = 0
-        isPageGestureActive = false
+        resetPageScrollGesture()
         ensureKeyboardFocus(onPage: Int(targetPage))
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
@@ -1122,7 +1436,7 @@ final class AppStore: ObservableObject {
     // MARK: Reorder
 
     func moveItem(from source: Int, to destination: Int) {
-        guard !isSearching,
+        guard allowsUserLayoutEditing,
               launchpadItems.indices.contains(source),
               launchpadItems.indices.contains(destination),
               source != destination else {
@@ -1139,7 +1453,8 @@ final class AppStore: ObservableObject {
     }
 
     func moveAppInsideFolder(folderID: String, from source: Int, to destination: Int) {
-        guard let folderIndex = folders.firstIndex(where: { $0.id == folderID }),
+        guard allowsUserLayoutEditing,
+              let folderIndex = folders.firstIndex(where: { $0.id == folderID }),
               folders[folderIndex].appIDs.indices.contains(source),
               folders[folderIndex].appIDs.indices.contains(destination),
               source != destination else { return }
@@ -1155,7 +1470,8 @@ final class AppStore: ObservableObject {
     /// folder and keeps its root-grid position and name.
     @discardableResult
     func mergeFolder(sourceID: String, into targetID: String) -> Bool {
-        guard sourceID != targetID,
+        guard allowsUserLayoutEditing,
+              sourceID != targetID,
               let source = folders.first(where: { $0.id == sourceID }),
               let targetIndex = folders.firstIndex(where: { $0.id == targetID }) else {
             return false
@@ -1165,7 +1481,7 @@ final class AppStore: ObservableObject {
         folders[targetIndex].appIDs.append(contentsOf: source.appIDs.filter { existing.insert($0).inserted })
         folders.removeAll { $0.id == sourceID }
         itemOrderIDs.removeAll { $0 == sourceID }
-        if openedFolderID == sourceID { openedFolderID = nil }
+        if openedFolderID == sourceID { leaveOpenedFolder() }
         persistFolders()
         persistItemOrder()
         reconcileLaunchpadItems()
@@ -1176,7 +1492,8 @@ final class AppStore: ObservableObject {
     /// Replace a folder at its current root position with its member apps.
     @discardableResult
     func dissolveFolder(_ folderID: String) -> [String]? {
-        guard let folderIndex = folders.firstIndex(where: { $0.id == folderID }) else { return nil }
+        guard allowsUserLayoutEditing,
+              let folderIndex = folders.firstIndex(where: { $0.id == folderID }) else { return nil }
         let members = folders[folderIndex].appIDs
         let rootIndex = itemOrderIDs.firstIndex(of: folderID)
             ?? launchpadItems.firstIndex(where: { $0.id == folderID })
@@ -1184,7 +1501,7 @@ final class AppStore: ObservableObject {
         folders.remove(at: folderIndex)
         itemOrderIDs.removeAll { $0 == folderID || members.contains($0) }
         itemOrderIDs.insert(contentsOf: members, at: min(rootIndex, itemOrderIDs.endIndex))
-        if openedFolderID == folderID { openedFolderID = nil }
+        if openedFolderID == folderID { leaveOpenedFolder() }
         persistFolders()
         persistItemOrder()
         reconcileLaunchpadItems()
@@ -1196,7 +1513,8 @@ final class AppStore: ObservableObject {
     /// root apps and apps currently residing in another folder.
     @discardableResult
     func moveAppToFolder(appID: String, folderID: String) -> Bool {
-        guard let targetIndex = folders.firstIndex(where: { $0.id == folderID }),
+        guard allowsUserLayoutEditing,
+              let targetIndex = folders.firstIndex(where: { $0.id == folderID }),
               !folders[targetIndex].appIDs.contains(appID),
               app(withID: appID) != nil else { return false }
 
@@ -1216,7 +1534,7 @@ final class AppStore: ObservableObject {
         }
         folders[refreshedTarget].appIDs.append(appID)
         if let openedFolderID, emptyFolderIDs.contains(openedFolderID) {
-            self.openedFolderID = nil
+            leaveOpenedFolder()
         }
         persistFolders()
         persistItemOrder()
@@ -1228,7 +1546,8 @@ final class AppStore: ObservableObject {
     /// Remove an app to the root, immediately after its former folder.
     @discardableResult
     func removeAppFromFolder(appID: String, folderID: String) -> Bool {
-        guard let folderIndex = folders.firstIndex(where: { $0.id == folderID }),
+        guard allowsUserLayoutEditing,
+              let folderIndex = folders.firstIndex(where: { $0.id == folderID }),
               folders[folderIndex].appIDs.contains(appID) else { return false }
 
         let rootFolderIndex = itemOrderIDs.firstIndex(of: folderID)
@@ -1241,7 +1560,7 @@ final class AppStore: ObservableObject {
             folders.remove(at: folderIndex)
             itemOrderIDs.removeAll { $0 == folderID }
             itemOrderIDs.insert(appID, at: min(rootFolderIndex, itemOrderIDs.endIndex))
-            if openedFolderID == folderID { openedFolderID = nil }
+            if openedFolderID == folderID { leaveOpenedFolder() }
         } else {
             let currentFolderOrder = itemOrderIDs.firstIndex(of: folderID)
                 ?? min(rootFolderIndex, itemOrderIDs.endIndex)
@@ -1259,7 +1578,7 @@ final class AppStore: ObservableObject {
     /// first, matching the usual Launchpad/iOS folder creation behavior.
     @discardableResult
     func createFolder(draggedAppID: String, targetAppID: String) -> AppFolder? {
-        guard !isSearching,
+        guard allowsUserLayoutEditing,
               draggedAppID != targetAppID,
               launchpadItems.contains(where: { $0.id == draggedAppID && isApp($0) }),
               launchpadItems.contains(where: { $0.id == targetAppID && isApp($0) }) else {
@@ -1326,7 +1645,7 @@ final class AppStore: ObservableObject {
         presentation = .hidden
         presentationProgress = 0
         isKeyboardNavigationActive = false
-        openedFolderID = nil
+        leaveOpenedFolder()
         isDraggingFolderApp = false
         isFolderRemovalTargeted = false
         // Clear search when closed so next open shows full grid.
@@ -1464,6 +1783,89 @@ final class AppStore: ObservableObject {
 
     private func persistItemOrder() {
         persistLayout()
+    }
+
+    private func autoLayoutItems(_ kind: LaunchpadAutoLayoutKind) -> [LaunchpadItem] {
+        let visible = apps.filter { !hiddenAppIDs.contains($0.id) }
+        let sortable = visible.map { app in
+            LaunchpadAutoLayoutApp(
+                id: app.id,
+                name: app.name,
+                path: app.url.path,
+                lastUsedAt: lastUsedDate(for: app),
+                installedAt: app.installedAt,
+                color: iconColorByAppID[app.id]
+            )
+        }
+        let ids = LaunchpadAutoLayoutSorter.sortedIDs(sortable, kind: kind)
+        let byID = Dictionary(uniqueKeysWithValues: visible.map { ($0.id, $0) })
+        return ids.compactMap { id in
+            byID[id].map(LaunchpadItem.app)
+        }
+    }
+
+    private func lastUsedDate(for app: AppInfo) -> Date? {
+        switch (recentLaunchDates[app.id], app.lastUsedAt) {
+        case let (recorded?, spotlight?):
+            return max(recorded, spotlight)
+        case let (recorded?, nil):
+            return recorded
+        case let (nil, spotlight?):
+            return spotlight
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private func persistLayoutMode() {
+        UserDefaults.standard.set(layoutMode.storageValue, forKey: LaunchpadPersistence.layoutModeKey)
+    }
+
+    private func persistRecentLaunches() {
+        let payload = recentLaunchDates.mapValues(\.timeIntervalSince1970)
+        UserDefaults.standard.set(payload, forKey: LaunchpadPersistence.recentLaunchDatesKey)
+    }
+
+    private func ensureIconColors() {
+        let missing = apps.filter { !hiddenAppIDs.contains($0.id) && iconColorByAppID[$0.id] == nil }
+        guard !missing.isEmpty else { return }
+        let snapshot = missing.map { (id: $0.id, url: $0.url) }
+        Task { [weak self] in
+            let samples = await Task.detached(priority: .userInitiated) {
+                snapshot.map { item in
+                    (item.id, IconColorAnalyzer.sample(url: item.url))
+                }
+            }.value
+            guard let self else { return }
+            for (id, color) in samples {
+                self.iconColorByAppID[id] = color
+            }
+            if case .auto(.iconColor) = self.layoutMode {
+                NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+            }
+        }
+    }
+
+    private var layoutProfilesDirectory: URL {
+        LaunchpadLayoutProfileStore.layoutsDirectory(domain: Self.preferenceDomain)
+    }
+
+    private func snapshotActiveLayoutProfile() throws {
+        try LaunchpadLayoutProfileStore.writeDocument(
+            exportLayout(),
+            in: layoutProfilesDirectory,
+            profileID: activeLayoutProfileID
+        )
+    }
+
+    private func persistLayoutProfileIndex() throws {
+        try LaunchpadLayoutProfileStore.saveIndex(
+            LaunchpadLayoutProfileIndex(
+                activeID: activeLayoutProfileID,
+                profiles: layoutProfiles
+            ),
+            in: layoutProfilesDirectory
+        )
     }
 
 }

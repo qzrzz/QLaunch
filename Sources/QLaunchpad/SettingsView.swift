@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "通用"
     case applications = "应用程序"
+    case ai = "AI 接口"
     case about = "关于"
 
     var id: Self { self }
@@ -14,6 +15,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: "gearshape"
         case .applications: "square.grid.2x2"
+        case .ai: "sparkles"
         case .about: "info.circle"
         }
     }
@@ -60,6 +62,8 @@ struct SettingsView: View {
                         GeneralSettingsView(store: store)
                     case .applications:
                         ApplicationSettingsView(store: store)
+                    case .ai:
+                        AISettingsView()
                     case .about:
                         AboutSettingsView()
                     }
@@ -165,7 +169,7 @@ private struct GeneralSettingsView: View {
                         Text(style.title).tag(style.rawValue)
                     }
                 }
-                Text("隐藏窗口时会自动播放所选进入动画的反向效果。")
+                Text("页面显示/隐藏时图标的出入场动画。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -336,50 +340,22 @@ private struct ApplicationSettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                LabeledContent("应用程序数量", value: "\(store.apps.count)")
+            }
+
             Section("应用来源") {
-                sourceRow(
-                    title: "应用程序",
-                    subtitle: "默认路径",
-                    path: nil,
-                    selected: selectedSource == nil
+                ApplicationSourceList(
+                    items: sourceItems,
+                    selection: $selectedSource,
+                    isLoading: store.isLoading,
+                    onAdd: addSource,
+                    onRemove: removeSelectedSource,
+                    onRescan: { store.load() },
+                    onReveal: revealSource
                 )
-
-                ForEach(store.customApplicationSourcePaths, id: \.self) { path in
-                    sourceRow(
-                        title: URL(fileURLWithPath: path).lastPathComponent,
-                        subtitle: path,
-                        path: path,
-                        selected: selectedSource == path
-                    )
-                }
-
-                HStack(spacing: 0) {
-                    Button(action: addSource) {
-                        Image(systemName: "plus")
-                            .frame(width: 28, height: 22)
-                    }
-                    .buttonStyle(.plain)
-                    .help("添加应用文件夹")
-
-                    Divider().frame(height: 18)
-
-                    Button(action: removeSelectedSource) {
-                        Image(systemName: "minus")
-                            .frame(width: 28, height: 22)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(selectedSource == nil)
-                    .help("移除所选文件夹")
-
-                    Spacer()
-
-                    if store.isLoading {
-                        ProgressView().controlSize(.small)
-                    }
-                    Button("重新扫描") { store.load() }
-                        .buttonStyle(.borderless)
-                }
-                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("隐藏的应用") {
@@ -403,10 +379,10 @@ private struct ApplicationSettingsView: View {
                 }
             }
 
-            Section("导入与导出") {
+            Section("用户数据") {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("布局文件")
+                        Text("当前布局文件")
                         Text("导出或导入当前排序和分组")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -419,6 +395,28 @@ private struct ApplicationSettingsView: View {
                         .buttonStyle(.bordered)
                         .disabled(store.isLoading || store.apps.isEmpty)
                 }
+
+                HStack(spacing: 8) {
+                    LayoutProfilePopUp(
+                        profiles: store.layoutProfiles,
+                        selection: layoutSelectorSelection
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 22)
+                    .disabled(store.isLoading || store.apps.isEmpty)
+
+                    Button("新建") { promptCreateLayoutProfile() }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isLoading)
+
+                    Button("删除") { promptDeleteLayoutProfile() }
+                        .buttonStyle(.bordered)
+                        .disabled(
+                            store.isLoading
+                                || store.apps.isEmpty
+                                || !store.canDeleteActiveLayoutProfile
+                        )
+                }
+
                 if let importStatusMessage {
                     Text(importStatusMessage)
                         .font(.caption)
@@ -429,37 +427,10 @@ private struct ApplicationSettingsView: View {
         .formStyle(.grouped)
     }
 
-    private func sourceRow(
-        title: String,
-        subtitle: String,
-        path: String?,
-        selected: Bool
-    ) -> some View {
-        Button {
-            selectedSource = path
-        } label: {
-            HStack(spacing: 14) {
-                Image(systemName: "folder.fill")
-                    .font(.system(size: 24))
-                    .foregroundStyle(.cyan.gradient)
-                    .frame(width: 32)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.body.weight(.medium))
-                        .foregroundStyle(.primary)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer()
-            }
-            .frame(minHeight: 46)
-            .background(selected && path != nil ? Color.accentColor.opacity(0.12) : Color.clear)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+    private var sourceItems: [ApplicationSourceItem] {
+        ApplicationSourceItem.systemDefaults() + ApplicationSourceItem.custom(
+            paths: store.customApplicationSourcePaths
+        )
     }
 
     private func hiddenAppRow(_ app: AppInfo) -> some View {
@@ -496,12 +467,77 @@ private struct ApplicationSettingsView: View {
         }
     }
 
+    private var layoutSelectorSelection: Binding<String> {
+        Binding(
+            get: { store.layoutSelectorID },
+            set: { newID in
+                do {
+                    try store.selectLayoutSelector(newID)
+                } catch {
+                    presentAlert(title: "无法切换布局", message: profileErrorMessage(error))
+                }
+            }
+        )
+    }
+
     private var layoutBackupDirectoryLabel: String {
         let domain = Bundle.main.bundleIdentifier ?? (kCFPreferencesCurrentApplication as String)
         let folderName = LaunchpadPreferenceStore.layoutBackupFileURL(domain: domain)
             .deletingLastPathComponent()
             .lastPathComponent
         return "应用程序支持/\(folderName)"
+    }
+
+    private func promptCreateLayoutProfile() {
+        let alert = NSAlert()
+        alert.messageText = "新建布局"
+        alert.informativeText = "新布局会复制当前排序和分组。"
+        alert.addButton(withTitle: "创建")
+        alert.addButton(withTitle: "取消")
+
+        let field = NSTextField(string: LaunchpadLayoutProfileStore.suggestedNewName(existing: store.layoutProfiles))
+        field.placeholderString = "布局名称"
+        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
+        field.isEditable = true
+        field.bezelStyle = .roundedBezel
+        alert.accessoryView = field
+
+        let complete: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .alertFirstButtonReturn else { return }
+            do {
+                try self.store.createLayoutProfile(named: field.stringValue)
+            } catch {
+                self.presentAlert(title: "无法创建布局", message: self.profileErrorMessage(error))
+            }
+        }
+        presentAlert(alert, completion: complete)
+        DispatchQueue.main.async {
+            field.currentEditor()?.selectAll(nil)
+        }
+    }
+
+    private func promptDeleteLayoutProfile() {
+        guard store.canDeleteActiveLayoutProfile else { return }
+        let alert = NSAlert()
+        alert.messageText = "删除布局「\(store.activeLayoutProfileName)」？"
+        alert.informativeText = "此操作无法撤销。"
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        presentAlert(alert) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            do {
+                try self.store.deleteLayoutProfile(self.store.activeLayoutProfileID)
+            } catch {
+                self.presentAlert(title: "无法删除布局", message: self.profileErrorMessage(error))
+            }
+        }
+    }
+
+    private func profileErrorMessage(_ error: Error) -> String {
+        if let error = error as? LaunchpadLayoutProfileError {
+            return error.errorDescription ?? error.localizedDescription
+        }
+        return layoutErrorMessage(error)
     }
 
     private func exportLayoutFile() {
@@ -607,8 +643,17 @@ private struct ApplicationSettingsView: View {
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: "好")
+        presentAlert(alert)
+    }
+
+    private func presentAlert(
+        _ alert: NSAlert,
+        completion: ((NSApplication.ModalResponse) -> Void)? = nil
+    ) {
         if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            alert.beginSheetModal(for: window)
+            alert.beginSheetModal(for: window, completionHandler: completion)
+        } else if let completion {
+            completion(alert.runModal())
         } else {
             alert.runModal()
         }
@@ -616,9 +661,143 @@ private struct ApplicationSettingsView: View {
 
     private func removeSelectedSource() {
         guard let selectedSource,
+              sourceItems.first(where: { $0.id == selectedSource })?.isRemovable == true,
               let index = store.customApplicationSourcePaths.firstIndex(of: selectedSource) else { return }
         store.removeApplicationSource(at: IndexSet(integer: index))
         self.selectedSource = nil
+    }
+
+    private func revealSource(_ item: ApplicationSourceItem) {
+        let url = URL(fileURLWithPath: item.iconPath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            NSSound.beep()
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+}
+
+private struct LayoutProfilePopUp: NSViewRepresentable {
+    var profiles: [LaunchpadLayoutProfile]
+    @Binding var selection: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection)
+    }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.autoenablesItems = false
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.changed(_:))
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return button
+    }
+
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        context.coordinator.selection = $selection
+        button.removeAllItems()
+        if button.menu == nil {
+            button.menu = NSMenu()
+        }
+        guard let menu = button.menu else { return }
+
+        let userHeader = NSMenuItem(title: "用户布局", action: nil, keyEquivalent: "")
+        userHeader.isEnabled = false
+        menu.addItem(userHeader)
+        for profile in profiles {
+            let item = NSMenuItem(title: profile.name, action: nil, keyEquivalent: "")
+            item.representedObject = LaunchpadLayoutSelectorID.user(profile.id)
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        let autoHeader = NSMenuItem(title: "自动布局", action: nil, keyEquivalent: "")
+        autoHeader.isEnabled = false
+        menu.addItem(autoHeader)
+        for kind in LaunchpadAutoLayoutKind.allCases {
+            let item = NSMenuItem(title: kind.title, action: nil, keyEquivalent: "")
+            item.representedObject = LaunchpadLayoutSelectorID.auto(kind)
+            menu.addItem(item)
+        }
+
+        if let index = menu.items.firstIndex(where: { ($0.representedObject as? String) == selection }) {
+            button.selectItem(at: index)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var selection: Binding<String>
+
+        init(selection: Binding<String>) {
+            self.selection = selection
+        }
+
+        @objc func changed(_ sender: NSPopUpButton) {
+            guard let id = sender.selectedItem?.representedObject as? String else { return }
+            selection.wrappedValue = id
+            if selection.wrappedValue != id,
+               let index = sender.itemArray.firstIndex(where: {
+                   ($0.representedObject as? String) == selection.wrappedValue
+               }) {
+                sender.selectItem(at: index)
+            }
+        }
+    }
+}
+
+private struct AISettingsView: View {
+    @State private var promptText = LayoutOrganizePrompt.make()
+    @State private var didCopy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("把下面的提示词复制给本地的 AI Agent，比如 Codex、Grok Build、Claude Code、Antigravity、Kimi Work 等")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 12)
+                Button(didCopy ? "已复制" : "复制提示词") {
+                    copyPrompt()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            TextEditor(text: $promptText)
+                .font(.system(size: 12, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear {
+            promptText = LayoutOrganizePrompt.make()
+            didCopy = false
+        }
+        .onChange(of: promptText) { _, _ in
+            didCopy = false
+        }
+    }
+
+    private func copyPrompt() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(promptText, forType: .string)
+        didCopy = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            didCopy = false
+        }
     }
 }
 

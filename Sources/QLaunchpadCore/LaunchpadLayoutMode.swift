@@ -1,0 +1,208 @@
+import Foundation
+
+public enum LaunchpadAutoLayoutKind: String, CaseIterable, Sendable, Codable, Identifiable {
+    case recentlyUsed
+    case nameAscending
+    case nameDescending
+    case installDateAscending
+    case installDateDescending
+    case iconColor
+
+    public var id: Self { self }
+
+    public var title: String {
+        switch self {
+        case .recentlyUsed: "最近使用"
+        case .nameAscending: "名称正序"
+        case .nameDescending: "名称倒序"
+        case .installDateAscending: "安装时间正序"
+        case .installDateDescending: "安装时间倒序"
+        case .iconColor: "按图标颜色排序"
+        }
+    }
+}
+
+public enum LaunchpadLayoutMode: Equatable, Sendable {
+    case user
+    case auto(LaunchpadAutoLayoutKind)
+
+    public var isUser: Bool {
+        if case .user = self { return true }
+        return false
+    }
+
+    public var storageValue: String {
+        switch self {
+        case .user:
+            return "user"
+        case .auto(let kind):
+            return "auto.\(kind.rawValue)"
+        }
+    }
+
+    public init(storageValue: String?) {
+        guard let storageValue, storageValue.hasPrefix("auto.") else {
+            self = .user
+            return
+        }
+        let raw = String(storageValue.dropFirst("auto.".count))
+        if let kind = LaunchpadAutoLayoutKind(rawValue: raw) {
+            self = .auto(kind)
+        } else {
+            self = .user
+        }
+    }
+}
+
+public enum LaunchpadLayoutSelectorID {
+    public static func user(_ profileID: String) -> String {
+        "user:\(profileID)"
+    }
+
+    public static func auto(_ kind: LaunchpadAutoLayoutKind) -> String {
+        "auto:\(kind.rawValue)"
+    }
+
+    public static func parse(_ raw: String) -> (profileID: String?, autoKind: LaunchpadAutoLayoutKind?) {
+        if raw.hasPrefix("user:") {
+            return (String(raw.dropFirst("user:".count)), nil)
+        }
+        if raw.hasPrefix("auto:") {
+            let kind = LaunchpadAutoLayoutKind(rawValue: String(raw.dropFirst("auto:".count)))
+            return (nil, kind)
+        }
+        return (nil, nil)
+    }
+}
+
+public struct LaunchpadIconColor: Equatable, Sendable {
+    public var hue: Double
+    public var saturation: Double
+    public var brightness: Double
+    public var isChromatic: Bool
+
+    public init(hue: Double, saturation: Double, brightness: Double, isChromatic: Bool) {
+        self.hue = hue
+        self.saturation = saturation
+        self.brightness = brightness
+        self.isChromatic = isChromatic
+    }
+}
+
+public struct LaunchpadAutoLayoutApp: Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var path: String
+    public var lastUsedAt: Date?
+    public var installedAt: Date?
+    public var color: LaunchpadIconColor?
+
+    public init(
+        id: String,
+        name: String,
+        path: String,
+        lastUsedAt: Date? = nil,
+        installedAt: Date? = nil,
+        color: LaunchpadIconColor? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.lastUsedAt = lastUsedAt
+        self.installedAt = installedAt
+        self.color = color
+    }
+}
+
+public enum LaunchpadAutoLayoutSorter {
+    public static func sortedIDs(
+        _ apps: [LaunchpadAutoLayoutApp],
+        kind: LaunchpadAutoLayoutKind
+    ) -> [String] {
+        apps.sorted { lhs, rhs in
+            compare(lhs, rhs, kind: kind)
+        }.map(\.id)
+    }
+
+    public static func compare(
+        _ lhs: LaunchpadAutoLayoutApp,
+        _ rhs: LaunchpadAutoLayoutApp,
+        kind: LaunchpadAutoLayoutKind
+    ) -> Bool {
+        switch kind {
+        case .recentlyUsed:
+            return compareDates(lhs.lastUsedAt, rhs.lastUsedAt, ascending: false, lhs: lhs, rhs: rhs)
+        case .nameAscending:
+            return compareName(lhs, rhs, ascending: true)
+        case .nameDescending:
+            return compareName(lhs, rhs, ascending: false)
+        case .installDateAscending:
+            return compareDates(lhs.installedAt, rhs.installedAt, ascending: true, lhs: lhs, rhs: rhs)
+        case .installDateDescending:
+            return compareDates(lhs.installedAt, rhs.installedAt, ascending: false, lhs: lhs, rhs: rhs)
+        case .iconColor:
+            return compareColor(lhs, rhs)
+        }
+    }
+
+    private static func compareName(
+        _ lhs: LaunchpadAutoLayoutApp,
+        _ rhs: LaunchpadAutoLayoutApp,
+        ascending: Bool
+    ) -> Bool {
+        let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+        if nameOrder != .orderedSame {
+            return ascending ? nameOrder == .orderedAscending : nameOrder == .orderedDescending
+        }
+        return lhs.path < rhs.path
+    }
+
+    private static func compareDates(
+        _ lhsDate: Date?,
+        _ rhsDate: Date?,
+        ascending: Bool,
+        lhs: LaunchpadAutoLayoutApp,
+        rhs: LaunchpadAutoLayoutApp
+    ) -> Bool {
+        switch (lhsDate, rhsDate) {
+        case let (left?, right?):
+            if left != right {
+                return ascending ? left < right : left > right
+            }
+            return compareName(lhs, rhs, ascending: true)
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        case (.none, .none):
+            return compareName(lhs, rhs, ascending: true)
+        }
+    }
+
+    private static func compareColor(
+        _ lhs: LaunchpadAutoLayoutApp,
+        _ rhs: LaunchpadAutoLayoutApp
+    ) -> Bool {
+        let leftChromatic = lhs.color?.isChromatic == true
+        let rightChromatic = rhs.color?.isChromatic == true
+        if leftChromatic != rightChromatic {
+            return leftChromatic && !rightChromatic
+        }
+        if leftChromatic, let left = lhs.color, let right = rhs.color {
+            if abs(left.hue - right.hue) > 0.0001 {
+                return left.hue < right.hue
+            }
+            if abs(left.saturation - right.saturation) > 0.0001 {
+                return left.saturation > right.saturation
+            }
+        } else if let left = lhs.color, let right = rhs.color {
+            if abs(left.brightness - right.brightness) > 0.0001 {
+                return left.brightness < right.brightness
+            }
+        } else if lhs.color == nil || rhs.color == nil {
+            if lhs.color != nil { return true }
+            if rhs.color != nil { return false }
+        }
+        return compareName(lhs, rhs, ascending: true)
+    }
+}

@@ -32,8 +32,7 @@ export const uiDictMap: Record<SupportedLang, UiDict> = {
     metaDesc:
       "The smoothest Launchpad for macOS — high-performance, native, free, open source, and powered by Metal.",
     brand: "QLaunch",
-    tagline:
-      "The smoothest Launchpad for macOS — high-performance, native, free, open source",
+    tagline: "The smoothest Launchpad for macOS — high-performance, native, free, open source",
     download: "Download",
     viewOnGithub: "GitHub",
     footerTagline: "The smoothest Launchpad for macOS.",
@@ -44,11 +43,9 @@ export const uiDictMap: Record<SupportedLang, UiDict> = {
   },
   "zh-Hans": {
     siteTitle: "QLaunch — 流畅的启动台 - macOS Launchpad 替代品",
-    metaDesc:
-      "最流畅的启动台，macOS Launchpad， 高性能、原生、免费、开源，Metal 渲染。",
+    metaDesc: "最流畅的 macOS 应用启动台，简单、无感、赏心悦目、开源免费，Metal 渲染",
     brand: "QLaunch",
-    tagline:
-      "最流畅的启动台，macOS Launchpad， 高性能、原生、免费、开源",
+    tagline: "最流畅的 macOS 应用启动台，简单、无感、赏心悦目、开源免费",
     download: "下载",
     viewOnGithub: "GitHub",
     footerTagline: "最流畅的启动台 macOS Launchpad",
@@ -155,10 +152,7 @@ export function autoRedirectDefaultLanguage(): boolean {
 /**
  * 计算语言切换目标相对 URL，避免子目录下路径叠加 404。
  */
-export function getLangUrl(
-  targetLang: SupportedLang,
-  currentLang?: SupportedLang,
-): string {
+export function getLangUrl(targetLang: SupportedLang, currentLang?: SupportedLang): string {
   const cur = currentLang || getCurrentLang();
 
   if (cur === "en") {
@@ -176,16 +170,8 @@ export function getLangUrl(
  * 相对站点根的静态资源路径（子目录下加 `../`）。
  * 只取文件名，避免生产 WebP 插件把 JS 字符串改写成 `../xxx.webp` 后再二次拼路径。
  */
-export function getRootRelativePath(
-  filename: string,
-  currentLang?: SupportedLang,
-): string {
+export function getRootRelativePath(filename: string, currentLang?: SupportedLang): string {
   const cur = currentLang || getCurrentLang();
-  const clean =
-    filename
-      .replaceAll("\\", "/")
-      .split("/")
-      .filter(Boolean)
-      .pop() || filename;
+  const clean = filename.replaceAll("\\", "/").split("/").filter(Boolean).pop() || filename;
   return cur === "en" ? `./${clean}` : `../${clean}`;
 }
