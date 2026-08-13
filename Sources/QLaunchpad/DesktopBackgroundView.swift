@@ -159,6 +159,38 @@ private actor PrivateWallpaperRenderer {
         )
         return context.createCGImage(output, from: outputRect)
     }
+
+    /// Failed CGS captures are typically uniform black. Keep a previous good frame.
+    func isFailedBlackFrame(_ image: CGImage) -> Bool {
+        let width = 16
+        let height = 16
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return false
+        }
+        context.interpolationQuality = .none
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        var sum = 0
+        var maxChannel = 0
+        for index in 0..<(width * height) {
+            let offset = index * 4
+            let red = Int(pixels[offset])
+            let green = Int(pixels[offset + 1])
+            let blue = Int(pixels[offset + 2])
+            sum += red + green + blue
+            maxChannel = max(maxChannel, red, green, blue)
+        }
+        let average = Double(sum) / Double(width * height * 3)
+        return average < 3 && maxChannel < 8
+    }
 }
 
 @MainActor
@@ -228,23 +260,52 @@ final class DesktopBackgroundView: NSView {
     }
 
     func prepare(for screen: NSScreen) {
+        startCapture(on: screen, replaceExisting: false)
+    }
+
+    /// Recapture after the panel is gone so the next open is fresh, not black.
+    func refreshAfterHide() {
+        guard let screen = window?.screen ?? NSScreen.main else { return }
+        startCapture(on: screen, replaceExisting: true)
+    }
+
+    func clearCacheAndReload() {
+        captureGeneration += 1
+        captureTask?.cancel()
+        wallpaperImageView.image = nil
+        wallpaperImageView.isHidden = true
+        visualEffectView.isHidden = false
+        preparedScreenIdentifier = nil
+
+        if let screen = window?.screen ?? NSScreen.main {
+            startCapture(on: screen, replaceExisting: true)
+        }
+    }
+
+    /// - Parameter replaceExisting: `false` reuses a good cache (opening). `true`
+    ///   recaptures in the background and only swaps if the new frame is valid.
+    private func startCapture(on screen: NSScreen, replaceExisting: Bool) {
         let screenIdentifier = screen.deviceDescription[
             NSDeviceDescriptionKey("NSScreenNumber")
         ] as? CGDirectDisplayID
+        let displayID = screenIdentifier ?? CGMainDisplayID()
+        let screenChanged = preparedScreenIdentifier != screenIdentifier
 
-        if preparedScreenIdentifier != screenIdentifier {
+        if screenChanged {
             preparedScreenIdentifier = screenIdentifier
             wallpaperImageView.image = nil
             wallpaperImageView.isHidden = true
             visualEffectView.isHidden = false
+        } else if !replaceExisting, wallpaperImageView.image != nil {
+            return
         }
 
         captureGeneration += 1
         let generation = captureGeneration
         captureTask?.cancel()
 
-        let displayID = screenIdentifier ?? CGMainDisplayID()
         let backingScale = screen.backingScaleFactor
+        let keepPrevious = wallpaperImageView.image != nil
         captureTask = Task { [weak self] in
             let image = await self?.renderer.render(
                 displayID: displayID,
@@ -255,31 +316,25 @@ final class DesktopBackgroundView: NSView {
 
             guard !Task.isCancelled, let self else { return }
             guard generation == self.captureGeneration else { return }
-            guard let image else {
-                self.wallpaperImageView.image = nil
-                self.wallpaperImageView.isHidden = true
-                self.visualEffectView.isHidden = false
+
+            var accepted: CGImage?
+            if let image, !(await self.renderer.isFailedBlackFrame(image)) {
+                accepted = image
+            }
+            if let accepted {
+                self.wallpaperImageView.image = NSImage(
+                    cgImage: accepted,
+                    size: NSSize(width: accepted.width, height: accepted.height)
+                )
+                self.wallpaperImageView.isHidden = false
+                self.visualEffectView.isHidden = true
                 return
             }
 
-            self.wallpaperImageView.image = NSImage(
-                cgImage: image,
-                size: NSSize(width: image.width, height: image.height)
-            )
-            self.wallpaperImageView.isHidden = false
-            self.visualEffectView.isHidden = true
-        }
-    }
-
-    func clearCacheAndReload() {
-        captureGeneration += 1
-        captureTask?.cancel()
-        wallpaperImageView.image = nil
-        wallpaperImageView.isHidden = true
-        visualEffectView.isHidden = false
-
-        if let screen = window?.screen ?? NSScreen.main {
-            prepare(for: screen)
+            guard !keepPrevious else { return }
+            self.wallpaperImageView.image = nil
+            self.wallpaperImageView.isHidden = true
+            self.visualEffectView.isHidden = false
         }
     }
 
