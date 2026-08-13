@@ -36,6 +36,14 @@ public enum LaunchpadLayoutImporter {
             }
         }
 
+        var seenResolvedIDs = Set<String>()
+        for rawID in referencedIDs(in: document, includeHidden: false) {
+            guard let resolved = resolvedByRawID[rawID] else { continue }
+            if !seenResolvedIDs.insert(resolved.id).inserted {
+                throw LaunchpadLayoutError.duplicateID(resolved.id)
+            }
+        }
+
         if strict {
             if !skippedUnknown.isEmpty {
                 throw LaunchpadLayoutError.strictUnresolved(skippedUnknown)
@@ -65,8 +73,8 @@ public enum LaunchpadLayoutImporter {
             }
         }
 
-        let resolvedAppIDs = Set(resolvedByRawID.values.map(\.id))
-        for folder in proposedFolders where resolvedAppIDs.contains(folder.id) {
+        let scannedIDs = Set(scanned.map(\.id))
+        for folder in proposedFolders where scannedIDs.contains(folder.id) {
             throw LaunchpadLayoutError.duplicateID(folder.id)
         }
 
@@ -157,7 +165,10 @@ public enum LaunchpadLayoutImporter {
         for item in document.items {
             if case .folder(let id, _, _) = item, let id {
                 try rejectInvalidString(id)
-                folderIDs.insert(id)
+                let identity = folderIdentity(id)
+                if !folderIDs.insert(identity).inserted {
+                    throw LaunchpadLayoutError.duplicateID(identity)
+                }
             }
         }
 
@@ -177,8 +188,9 @@ public enum LaunchpadLayoutImporter {
                     throw LaunchpadLayoutError.limitExceeded("name")
                 }
                 if let id {
-                    if !seenIDs.insert(id).inserted {
-                        throw LaunchpadLayoutError.duplicateID(id)
+                    let identity = folderIdentity(id)
+                    if !seenIDs.insert(identity).inserted {
+                        throw LaunchpadLayoutError.duplicateID(identity)
                     }
                 }
                 if apps.count > maxFolderMembers {
@@ -186,7 +198,7 @@ public enum LaunchpadLayoutImporter {
                 }
                 for appID in apps {
                     try rejectInvalidString(appID)
-                    if folderIDs.contains(appID) {
+                    if folderIDs.contains(folderIdentity(appID)) {
                         throw LaunchpadLayoutError.nestedFolder(appID)
                     }
                     if !seenIDs.insert(appID).inserted {
@@ -227,7 +239,10 @@ public enum LaunchpadLayoutImporter {
         }
     }
 
-    private static func referencedIDs(in document: LaunchpadLayoutDocument) -> [String] {
+    private static func referencedIDs(
+        in document: LaunchpadLayoutDocument,
+        includeHidden: Bool = true
+    ) -> [String] {
         var ids: [String] = []
         for item in document.items {
             switch item {
@@ -237,17 +252,21 @@ public enum LaunchpadLayoutImporter {
                 ids.append(contentsOf: apps)
             }
         }
-        if let hidden = document.hidden {
+        if includeHidden, let hidden = document.hidden {
             ids.append(contentsOf: hidden)
         }
         return ids
+    }
+
+    private static func folderIdentity(_ rawID: String) -> String {
+        rawID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func normalizedFolderID(_ rawID: String?) -> String {
         guard let rawID else {
             return "folder-\(UUID().uuidString)"
         }
-        let trimmed = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = folderIdentity(rawID)
         return trimmed.isEmpty ? "folder-\(UUID().uuidString)" : trimmed
     }
 
