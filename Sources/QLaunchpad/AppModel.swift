@@ -1,7 +1,10 @@
 import AppKit
 import Combine
 import Foundation
+import os
 import QLaunchpadCore
+
+private let layoutLogger = Logger(subsystem: "com.qzrzz.qlaunchpad", category: "layout")
 
 enum QLaunchpadPreferences {
     static let showMenuBarIconKey = "showMenuBarIcon"
@@ -482,22 +485,30 @@ final class AppStore: ObservableObject {
     private var scrollAccumulated: Double = 0
     private var lastScrollTime: CFTimeInterval = 0
     private var scanTask: Task<Void, Never>?
+    private var layoutGeneration: UInt64 = 0
+    /// Bumped by import / external reload so Metal can drop an in-flight drag.
+    private(set) var dragGeneration: UInt64 = 0
 
     /// Points of scroll delta that equal one full page turn.
     private let pageScrollUnit: Double = 320
 
     private var itemOrderIDs: [String]
 
+    private static var preferenceDomain: String {
+        Bundle.main.bundleIdentifier ?? (kCFPreferencesCurrentApplication as String)
+    }
+
     init() {
+        let layout = LaunchpadPreferenceStore.readLayout(domain: Self.preferenceDomain)
+        LaunchpadPreferenceStore.writeThroughToStandardDefaults(layout)
+        hiddenAppIDs = Set(layout.hiddenIDs)
+        itemOrderIDs = layout.itemOrder
+        folders = (try? LaunchpadPreferenceStore.decodeFolders(layout.foldersData)) ?? []
+
         let defaults = UserDefaults.standard
-        hiddenAppIDs = Set(defaults.stringArray(forKey: LaunchpadPersistence.hiddenAppsKey) ?? [])
         customApplicationSourcePaths = defaults.stringArray(forKey: LaunchpadPersistence.customSourcesKey) ?? []
         showHiddenAppsInSearch = defaults.bool(forKey: LaunchpadPersistence.showHiddenAppsKey)
-        itemOrderIDs = defaults.stringArray(forKey: LaunchpadPersistence.itemOrderKey) ?? []
-        if let data = defaults.data(forKey: LaunchpadPersistence.foldersKey),
-           let savedFolders = try? LaunchpadPersistence.decodeFolders(data) {
-            folders = savedFolders
-        }
+        rebuildLaunchpadItems()
     }
 
     deinit {
@@ -590,10 +601,12 @@ final class AppStore: ObservableObject {
     func load() {
         // A detached scan cannot be stopped reliably once it has started.
         // Ignore duplicate requests instead of allowing two filesystem scans
-        // to run at the same time.
+        // to run at the same time. Import / external reload must not cancel
+        // or nil this task — they only bump `layoutGeneration`.
         guard scanTask == nil else { return }
 
         isLoading = true
+        let generationAtStart = layoutGeneration
         let additionalRoots = customApplicationSourcePaths.map { URL(fileURLWithPath: $0) }
         scanTask = Task { @MainActor [weak self] in
             let result = await Task.detached(priority: .userInitiated) {
@@ -601,6 +614,10 @@ final class AppStore: ObservableObject {
             }.value
             guard let self else { return }
             apps = result
+            if layoutGeneration != generationAtStart {
+                layoutLogger.debug("layout.scan.generationAdvanced readLayout=true")
+                adoptPersistedLayout()
+            }
             reconcileLaunchpadItems()
             // A scan also runs when the Launchpad is shown again. Keep the
             // current page while refreshing the catalog; the non-reset path
@@ -610,6 +627,105 @@ final class AppStore: ObservableObject {
             scanTask = nil
             NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
         }
+    }
+
+    func exportLayout(includeCatalog: Bool = true, includePaths: Bool = true) -> LaunchpadLayoutDocument {
+        let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        var seen = Set<String>()
+        var items: [LaunchpadLayoutItem] = []
+        for id in itemOrderIDs {
+            guard seen.insert(id).inserted else { continue }
+            if let folder = folderByID[id] {
+                items.append(.folder(id: folder.id, name: folder.name, apps: folder.appIDs))
+            } else {
+                items.append(.app(id: id))
+            }
+        }
+        for folder in folders where seen.insert(folder.id).inserted {
+            items.append(.folder(id: folder.id, name: folder.name, apps: folder.appIDs))
+        }
+        let catalog: [LaunchpadLayoutCatalogEntry]? = includeCatalog
+            ? apps.map { app in
+                LaunchpadLayoutCatalogEntry(
+                    id: app.id,
+                    bundleIdentifier: app.bundleIdentifier,
+                    name: app.name,
+                    path: includePaths ? app.url.standardizedFileURL.path : nil
+                )
+            }
+            : nil
+        let preset = GridLayoutPreset.current
+        return LaunchpadLayoutDocument(
+            exportedAt: Date(),
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            grid: LaunchpadLayoutGrid(
+                preset: preset.rawValue,
+                columns: preset.columns,
+                rows: preset.rows,
+                pageCapacity: preset.columns * preset.rows
+            ),
+            items: items,
+            hidden: hiddenAppIDs.sorted(),
+            catalog: catalog
+        )
+    }
+
+    func applyLayout(
+        _ document: LaunchpadLayoutDocument,
+        mode: LaunchpadLayoutImportMode
+    ) throws -> LaunchpadLayoutReport {
+        guard !isLoading, !apps.isEmpty else {
+            throw LaunchpadLayoutError.malformed("application catalog is empty")
+        }
+        let (applied, report) = try LaunchpadLayoutImporter.apply(
+            document: document,
+            mode: mode,
+            strict: false,
+            scanned: knownApps(),
+            currentHidden: hiddenAppIDs
+        )
+        writeLayoutBackupFailOpen()
+        let foldersData = try LaunchpadPreferenceStore.encodeFolders(applied.folders)
+        LaunchpadPreferenceStore.writeLayout(
+            domain: Self.preferenceDomain,
+            LaunchpadPersistedLayout(
+                itemOrder: applied.order,
+                foldersData: foldersData,
+                hiddenIDs: Array(applied.hidden)
+            )
+        )
+        folders = applied.folders
+        itemOrderIDs = applied.order
+        hiddenAppIDs = applied.hidden
+        rebuildLaunchpadItems()
+        cancelActiveDrag()
+        layoutGeneration += 1
+        if let openedFolderID, folder(withID: openedFolderID) == nil {
+            exitFolder()
+        }
+        refreshFilteredApps(resetPage: false)
+        layoutLogger.info(
+            "layout.import imported=\(report.importedRootItems) folders=\(report.importedFolders) skipped=\(report.skippedUnknown.count)"
+        )
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return report
+    }
+
+    func reloadPersistedLayout() {
+        layoutGeneration += 1
+        adoptPersistedLayout()
+        if apps.isEmpty {
+            rebuildLaunchpadItems()
+        } else {
+            reconcileLaunchpadItems(persist: false)
+        }
+        cancelActiveDrag()
+        if let openedFolderID, folder(withID: openedFolderID) == nil {
+            exitFolder()
+        }
+        refreshFilteredApps(resetPage: false)
+        layoutLogger.info("layout.reload from distributed notification")
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
 
     func updateSearch(_ text: String) {
@@ -1255,10 +1371,7 @@ final class AppStore: ObservableObject {
     }
 
     private func persistHiddenApps() {
-        let next = hiddenAppIDs.sorted()
-        let current = UserDefaults.standard.stringArray(forKey: LaunchpadPersistence.hiddenAppsKey) ?? []
-        guard next != current else { return }
-        UserDefaults.standard.set(next, forKey: LaunchpadPersistence.hiddenAppsKey)
+        persistLayout()
     }
 
     private func persistApplicationSources() {
@@ -1270,8 +1383,8 @@ final class AppStore: ObservableObject {
         return false
     }
 
-    private func reconcileLaunchpadItems() {
-        let known = apps.map {
+    private func knownApps() -> [LaunchpadKnownApp] {
+        apps.map {
             LaunchpadKnownApp(
                 id: $0.id,
                 bundleIdentifier: $0.bundleIdentifier,
@@ -1279,16 +1392,49 @@ final class AppStore: ObservableObject {
                 path: $0.url.standardizedFileURL.path
             )
         }
+    }
+
+    private func adoptPersistedLayout() {
+        let layout = LaunchpadPreferenceStore.readLayout(domain: Self.preferenceDomain)
+        LaunchpadPreferenceStore.writeThroughToStandardDefaults(layout)
+        itemOrderIDs = layout.itemOrder
+        hiddenAppIDs = Set(layout.hiddenIDs)
+        folders = (try? LaunchpadPreferenceStore.decodeFolders(layout.foldersData)) ?? []
+    }
+
+    private func writeLayoutBackupFailOpen() {
+        do {
+            try LaunchpadPreferenceStore.writeLayoutBackup(
+                domain: Self.preferenceDomain,
+                document: exportLayout(includeCatalog: true, includePaths: true)
+            )
+        } catch {
+            layoutLogger.warning("layout.backup.failed \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func cancelActiveDrag() {
+        isDraggingFolderApp = false
+        isFolderRemovalTargeted = false
+        dragGeneration += 1
+    }
+
+    private func reconcileLaunchpadItems(persist: Bool = true) {
         let result = LaunchpadLayoutReconciler.reconcile(
-            apps: known,
+            apps: knownApps(),
             folders: folders,
             order: itemOrderIDs,
             hidden: hiddenAppIDs
         )
         folders = result.folders
         itemOrderIDs = result.order
-        persistFolders()
-        persistItemOrder()
+        if persist {
+            persistLayout()
+        }
+        rebuildLaunchpadItems()
+    }
+
+    private func rebuildLaunchpadItems() {
         let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
         launchpadItems = itemOrderIDs.compactMap { id in
             if let folder = folderByID[id] { return .folder(folder) }
@@ -1297,17 +1443,27 @@ final class AppStore: ObservableObject {
         }
     }
 
+    private func persistLayout() {
+        // An empty catalog is the first-scan window, not a real layout. Persisting
+        // a reconcile of `apps = []` would write an empty grid over a live import.
+        guard !apps.isEmpty else { return }
+        guard let foldersData = try? LaunchpadPreferenceStore.encodeFolders(folders) else { return }
+        LaunchpadPreferenceStore.writeLayout(
+            domain: Self.preferenceDomain,
+            LaunchpadPersistedLayout(
+                itemOrder: itemOrderIDs,
+                foldersData: foldersData,
+                hiddenIDs: hiddenAppIDs.sorted()
+            )
+        )
+    }
+
     private func persistFolders() {
-        guard let data = try? LaunchpadPersistence.encodeFolders(folders) else { return }
-        let current = UserDefaults.standard.data(forKey: LaunchpadPersistence.foldersKey)
-        guard data != current else { return }
-        UserDefaults.standard.set(data, forKey: LaunchpadPersistence.foldersKey)
+        persistLayout()
     }
 
     private func persistItemOrder() {
-        let current = UserDefaults.standard.stringArray(forKey: LaunchpadPersistence.itemOrderKey) ?? []
-        guard itemOrderIDs != current else { return }
-        UserDefaults.standard.set(itemOrderIDs, forKey: LaunchpadPersistence.itemOrderKey)
+        persistLayout()
     }
 
 }
