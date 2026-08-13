@@ -1,6 +1,6 @@
 import Foundation
 
-public enum LaunchpadAutoLayoutKind: String, CaseIterable, Sendable, Codable, Identifiable {
+public enum LaunchpadAutoLayoutKind: String, CaseIterable, Sendable, Codable, Hashable, Identifiable {
     case recentlyUsed
     case nameAscending
     case nameDescending

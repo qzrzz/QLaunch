@@ -3,7 +3,7 @@ import CoreText
 import Metal
 
 /// One rasterized app name: tight UV + on-screen size in **points**.
-struct LabelLayout {
+struct LabelLayout: Sendable {
     var sheet: Int
     /// Metal top-left normalized UV (x, y, w, h).
     var uv: SIMD4<Float>
@@ -21,8 +21,7 @@ struct LabelLayout {
 /// 8-bit modes stay in Display P3. Quality rasterizes the same way, then
 /// composites a separate shadow layer into linear float16 so the blur ramp
 /// is not crushed by a linear working space.
-@MainActor
-final class TextAtlas {
+final class TextAtlas: @unchecked Sendable {
     struct Options: Equatable, Sendable {
         var useUnorm8: Bool
         var maxWidth: Int
@@ -47,6 +46,9 @@ final class TextAtlas {
     private(set) var layouts: [String: LabelLayout] = [:]
 
     private let device: MTLDevice
+    /// Resolve AppKit's dynamic system-font name once on the main thread. Atlas
+    /// replacements can then use CoreText exclusively while building off-main.
+    private let fontName: String
 
     static let pointSize: CGFloat = 14
     static let maxWidthPoints: CGFloat = 152
@@ -59,6 +61,27 @@ final class TextAtlas {
 
     init(device: MTLDevice) {
         self.device = device
+        fontName = NSFont.systemFont(ofSize: Self.pointSize, weight: .medium).fontName
+    }
+
+    private init(device: MTLDevice, fontName: String) {
+        self.device = device
+        self.fontName = fontName
+    }
+
+    /// Build into an isolated replacement so the renderer can keep reading the
+    /// current atlas while CoreText, CoreGraphics, and texture uploads run on a
+    /// utility executor.
+    func rebuilt(with apps: [AppInfo], scale: CGFloat, options: Options) -> TextAtlas {
+        let replacement = TextAtlas(device: device, fontName: fontName)
+        replacement.rebuild(with: apps, scale: scale, options: options)
+        return replacement
+    }
+
+    /// Constant-time main-thread adoption of a completed background build.
+    func replaceContents(with replacement: TextAtlas) {
+        sheets = replacement.sheets
+        layouts = replacement.layouts
     }
 
     func clear() {
@@ -81,11 +104,7 @@ final class TextAtlas {
         let padX = Int(ceil(2 + abs(shadowOffsetPx.width) + shadowBlurPx))
         let padY = Int(ceil(2 + abs(shadowOffsetPx.height) + shadowBlurPx))
 
-        let uiFont = CTFontCreateWithName(
-            NSFont.systemFont(ofSize: pixelFontSize, weight: .medium).fontName as CFString,
-            pixelFontSize,
-            nil
-        )
+        let uiFont = CTFontCreateWithName(fontName as CFString, pixelFontSize, nil)
 
         let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)!
         let textColor = CGColor(colorSpace: colorSpace, components: [1, 1, 1, 1])!
@@ -111,6 +130,7 @@ final class TextAtlas {
         prepared.reserveCapacity(apps.count)
 
         for app in apps {
+            guard !Task.isCancelled else { return }
             let name = app.name.isEmpty ? app.bundleIdentifier : app.name
             let attributes: [NSAttributedString.Key: Any] = [
                 NSAttributedString.Key(kCTFontAttributeName as String): uiFont,
@@ -242,6 +262,7 @@ final class TextAtlas {
         if !beginSheet() { return }
 
         for item in prepared {
+            guard !Task.isCancelled else { return }
             let pw = min(item.pixelWidth, atlasWidth)
             let ph = min(item.pixelHeight, atlasHeight)
 

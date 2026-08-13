@@ -138,6 +138,26 @@ final class IconTextureStore: @unchecked Sendable {
         return cache.count
     }
 
+    /// Cache-only lookup for the Metal draw loop. Resource prewarming owns all
+    /// production so rendering never starts a second CoreGraphics worker.
+    func cachedTexture(for app: AppInfo) -> MTLTexture? {
+        let quality = IconRenderQuality.current
+        let requestedPixelSize = Int(
+            GridLayoutPreset.current.iconPointSize * quality.rasterScale
+        )
+        let key = CacheKey(
+            appID: app.id,
+            pixelSize: requestedPixelSize,
+            quality: quality.rawValue
+        )
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard pixelSize == requestedPixelSize, cachedQualityRaw == quality.rawValue else {
+            return nil
+        }
+        return cache[key]
+    }
+
     /// - Parameter allowCreate: When `false`, never rasterize on the caller
     ///   thread (used by the Metal draw loop). A background bake is enqueued
     ///   instead so scrolling stays smooth.
@@ -169,14 +189,38 @@ final class IconTextureStore: @unchecked Sendable {
             return nil
         }
 
+        let flight = bakeKey(
+            appID: app.id,
+            pixelSize: requestedPixelSize,
+            quality: quality.rawValue
+        )
         cacheLock.lock()
         if let allowed = allowedAppIDs, !allowed.contains(app.id) {
             cacheLock.unlock()
             return nil
         }
+        if let existing = cache[key] {
+            cacheLock.unlock()
+            return existing
+        }
+        // The draw path may have enqueued the same miss immediately before a
+        // resident prewarm task reaches it. Let the first producer own the bake
+        // so opening a window never doubles the expensive icon raster work.
+        if inflightBakes.contains(flight) {
+            cacheLock.unlock()
+            return nil
+        }
+        inflightBakes.insert(flight)
         cacheLock.unlock()
 
-        return bakeAndStore(app: app, pixelSize: requestedPixelSize, quality: quality)
+        let texture = bakeAndStore(app: app, pixelSize: requestedPixelSize, quality: quality)
+        cacheLock.lock()
+        inflightBakes.remove(flight)
+        cacheLock.unlock()
+        if texture != nil {
+            scheduleBakeNotification()
+        }
+        return texture
     }
 
     private func bakeKey(appID: String, pixelSize: Int, quality: String) -> String {

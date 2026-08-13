@@ -963,20 +963,22 @@ private struct PageIndicator: View {
     @ObservedObject var store: AppStore
 
     var body: some View {
+        let pageCount = store.pageCount
+        let currentPage = store.currentPage
         // Hide when searching or single page.
-        if store.pageCount > 1 && !store.isSearching {
+        if pageCount > 1 && !store.isSearching {
             HStack(spacing: LaunchpadPageIndicatorHitArea.spacing) {
-                ForEach(0..<store.pageCount, id: \.self) { page in
+                ForEach(0..<pageCount, id: \.self) { page in
                     Capsule(style: .continuous)
-                        .fill(page == store.currentPage ? Color.white : Color.white.opacity(0.32))
+                        .fill(page == currentPage ? Color.white : Color.white.opacity(0.32))
                         .frame(
-                            width: page == store.currentPage
+                            width: page == currentPage
                                 ? LaunchpadPageIndicatorHitArea.activeDotWidth
                                 : LaunchpadPageIndicatorHitArea.dotWidth,
                             height: LaunchpadPageIndicatorHitArea.dotHeight
                         )
                         .accessibilityLabel("第 \(page + 1) 页")
-                        .accessibilityAddTraits(page == store.currentPage ? .isSelected : [])
+                        .accessibilityAddTraits(page == currentPage ? .isSelected : [])
                         .accessibilityAction {
                             store.goToPage(page)
                         }
@@ -1004,7 +1006,7 @@ private struct PageIndicator: View {
             )
             .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
             .contentShape(Capsule(style: .continuous))
-            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: store.currentPage)
+            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: currentPage)
             .transition(.opacity.combined(with: .scale(scale: 0.92)))
         }
     }

@@ -399,10 +399,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let animationStyle = LaunchpadAnimationStyle.current
         activeAnimationStyle = animationStyle
 
-        // Refresh the application catalog in the background every time the
-        // Launchpad is shown. The current catalog remains visible while the
-        // scan runs, and AppStore applies the result when it completes.
-        store.load()
         store.beginPresenting()
 
         launchpadPanel.setFrame(screen.frame, display: false)
@@ -459,6 +455,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "animationStyle": animationStyle.rawValue
             ]
         )
+        // The launch scan is CPU-heavy even though it is detached. Keep it out
+        // of the presentation interval so icon/text prewarming and animation do
+        // not compete with filesystem and Spotlight metadata work.
+        DispatchQueue.main.asyncAfter(deadline: .now() + animationStyle.duration) { [weak self] in
+            guard let self,
+                  generation == self.presentationGeneration,
+                  self.store.isPresented,
+                  self.launchpadPanel.isVisible else { return }
+            self.store.load()
+        }
         isAnimating = false
         updateStatusMenu()
     }
