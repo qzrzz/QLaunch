@@ -12,6 +12,7 @@
 | **滚动翻页**     | 精确触控板相位 / 惯性、边缘橡胶回弹、松手按速度吸附整页         |
 | **液态玻璃搜索** | macOS 26+ `glassEffect`；旧系统分层 material + 高光描边近似     |
 | **窗口渐入渐出** | 面板 alpha 与内容 scale（0.88→1）同步的 open / close 动画       |
+| **布局 JSON**    | `bun run layout:export` / `bun run layout:import` / `bun run layout:validate`；见 [engineering/layout-agent.md](engineering/layout-agent.md) |
 
 其它能力：
 
@@ -77,7 +78,12 @@ bun run build             # 构建 Release .app、DMG、ZIP（不发布）
 bun run release           # 签名、公证并发布 GitHub Release
 bun run clean             # 清理构建产物
 bun run check             # 检查 Swift Package 结构
+bun run layout:export     # 导出当前网格顺序 / 文件夹 / 隐藏列表为 JSON
+bun run layout:import     # 导入布局 JSON（默认 merge；先 --dry-run --strict）
+bun run layout:validate   # 校验布局 JSON（不扫描磁盘）
 ```
+
+布局 CLI 只 spawn 打包后的 `QLaunch Dev.app` / `QLaunch.app` 内 `Contents/MacOS/QLaunchpad`。Agent 整理流程、字段表与提示词见 [engineering/layout-agent.md](engineering/layout-agent.md)。
 
 `bun run dev` 会先编译并打包 `QLaunch Dev.app`，然后以前台方式启动它，因此终端仍会显示 AppKit / Metal 日志。Debug App 位于：
 
