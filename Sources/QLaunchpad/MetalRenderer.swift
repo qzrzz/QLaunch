@@ -149,6 +149,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var lastRenderQuality = IconRenderQuality.current
     private var lastCatalogSignature: AppListSignature?
     private var lastTextSignature: TextAtlasSignature?
+    private var pendingTextSignature: TextAtlasSignature?
+    private var textAtlasBuildTask: Task<Void, Never>?
     private var lastFrameTime = CACurrentMediaTime()
     /// Prewarm only a sliding page window — full-catalog upload was hundreds of MB.
     private var resourcePrewarmSignature: IconPrewarmSignature?
@@ -347,6 +349,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     deinit {
         resourcePrewarmTask?.cancel()
+        textAtlasBuildTask?.cancel()
         displayLink?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }
@@ -891,6 +894,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         pauseResourcePrewarming()
         iconTextures.resetForRenderQualityChange()
         folderIconTextures.clear()
+        cancelTextAtlasBuild()
         textAtlas.clear()
         lastTextSignature = nil
         iconsMissingTexture.removeAll(keepingCapacity: true)
@@ -912,6 +916,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         pauseResourcePrewarming()
         iconTextures.clear()
         folderIconTextures.clear()
+        cancelTextAtlasBuild()
         textAtlas.clear()
         lastCatalogSignature = nil
         lastTextSignature = nil
@@ -994,7 +999,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         pruneIconTextureCaches(appIDs: window.appIDs, folderIDs: window.folderIDs)
         lastTextureWindowPage = page
 
-        // Labels are cheap to rebuild on the next open; drop the sheet now.
+        // Low-memory mode drops labels while hidden; rebuild them off-main on
+        // the next presentation.
+        cancelTextAtlasBuild()
         textAtlas.clear()
         lastTextSignature = nil
         iconsMissingTexture.removeAll(keepingCapacity: true)
@@ -1133,13 +1140,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let textureStore = iconTextures
         let folderStore = folderIconTextures
         let preset = GridLayoutPreset.current
-        let scale = windowScale
-        let labelApps = textAtlasApps(for: residentTextAtlasItems())
-        let textSignature = TextAtlasSignature(
-            apps: labelApps,
-            scale: scale,
-            options: textAtlasOptions
-        )
 
         resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
             for app in firstPageApps {
@@ -1157,14 +1157,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     )
                 }
             }
-
-            guard !Task.isCancelled else { return }
-            await installPrewarmedTextAtlas(
-                apps: labelApps,
-                expectedSignature: signature,
-                textSignature: textSignature,
-                scale: scale
-            )
 
             for app in remainingApps {
                 guard !Task.isCancelled else { return }
@@ -1255,16 +1247,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let textureStore = iconTextures
         let folderStore = folderIconTextures
         let preset = GridLayoutPreset.current
-        let scale = windowScale
-        let labelSource = store.isSearching
-            ? Array(items.prefix(searchCap))
-            : itemsForPages(around: targetPage, radius: 1, in: items)
-        let labelApps = textAtlasApps(for: labelSource)
-        let textSignature = TextAtlasSignature(
-            apps: labelApps,
-            scale: scale,
-            options: textAtlasOptions
-        )
 
         resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
             for app in priorityApps {
@@ -1282,14 +1264,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     )
                 }
             }
-
-            guard !Task.isCancelled else { return }
-            await installPrewarmedTextAtlas(
-                apps: labelApps,
-                expectedSignature: signature,
-                textSignature: textSignature,
-                scale: scale
-            )
 
             guard !Task.isCancelled else { return }
             await finishResourcePrewarming(expectedSignature: signature)
@@ -1377,20 +1351,41 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         folderIconTextures.retainOnly(folderIDs: folderIDs)
     }
 
-    private func installPrewarmedTextAtlas(
+    private func scheduleTextAtlasRebuildIfNeeded(
         apps: [AppInfo],
-        expectedSignature: IconPrewarmSignature,
-        textSignature: TextAtlasSignature,
-        scale: CGFloat
+        scale: CGFloat,
+        options: TextAtlas.Options
     ) {
-        guard !isResourcePrewarmingPaused,
-              resourcePrewarmSignature == expectedSignature else { return }
-        if lastTextSignature != textSignature {
-            textAtlas.rebuild(with: apps, scale: scale, options: textAtlasOptions)
-            lastTextSignature = textSignature
+        guard !apps.isEmpty else { return }
+        let signature = TextAtlasSignature(apps: apps, scale: scale, options: options)
+        guard lastTextSignature != signature, pendingTextSignature != signature else { return }
+
+        textAtlasBuildTask?.cancel()
+        pendingTextSignature = signature
+        let source = textAtlas
+        textAtlasBuildTask = Task.detached(priority: .utility) { [weak self] in
+            let replacement = source.rebuilt(with: apps, scale: scale, options: options)
+            guard !Task.isCancelled else { return }
+            await self?.installTextAtlas(replacement, signature: signature)
         }
+    }
+
+    private func installTextAtlas(_ replacement: TextAtlas, signature: TextAtlasSignature) {
+        guard pendingTextSignature == signature else { return }
+        textAtlas.replaceContents(with: replacement)
+        lastTextSignature = signature
+        pendingTextSignature = nil
+        textAtlasBuildTask = nil
         store.setApplyingRenderQuality(false)
+        suppressLazyIconReveal = false
+        startDisplayLink()
         needsDisplay = true
+    }
+
+    private func cancelTextAtlasBuild() {
+        textAtlasBuildTask?.cancel()
+        textAtlasBuildTask = nil
+        pendingTextSignature = nil
     }
 
     private func finishResourcePrewarming(expectedSignature: IconPrewarmSignature) {
@@ -1739,22 +1734,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             labelItems = residentTextAtlasItems()
         }
         let labelApps = textAtlasApps(for: labelItems)
-        if lastTextSignature?.matches(labelApps, scale: scale, options: textAtlasOptions) != true,
-           !labelApps.isEmpty {
-            let textSignature = TextAtlasSignature(
+        if lastTextSignature?.matches(labelApps, scale: scale, options: textAtlasOptions) != true {
+            scheduleTextAtlasRebuildIfNeeded(
                 apps: labelApps,
                 scale: scale,
                 options: textAtlasOptions
             )
-            // Full-catalog icon bakes stay on the prewarm queue. Text is cheap
-            // enough to rebuild immediately so quality-mode labels do not sit
-            // on the previous 1:1 atlas until icons finish.
-            if textAtlasOptions.fitToContent
-                || !store.isApplyingRenderQuality
-                || textAtlas.sheets.isEmpty {
-                textAtlas.rebuild(with: labelApps, scale: scale, options: textAtlasOptions)
-                lastTextSignature = textSignature
-            }
         }
 
         let now = CACurrentMediaTime()
@@ -2207,7 +2192,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private func iconTexture(for item: LaunchpadItem, allowCreate: Bool = false) -> MTLTexture? {
         switch item {
         case .app(let app):
-            return iconTextures.texture(for: app, allowCreate: allowCreate)
+            return allowCreate
+                ? iconTextures.texture(for: app, allowCreate: true)
+                : iconTextures.cachedTexture(for: app)
         case .folder(let folder):
             // `displayedItems` can intentionally stay frozen during a content
             // transition. Always resolve the latest folder value so a membership
@@ -2368,21 +2355,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 ))
                 let alpha = pageFade * alphaScale * entrance.opacity * zoom.opacity
 
-                // Resolve the transparent presentation frame too, preserving
-                // the existing GPU-completion gate for both apps and folders.
-                // Low-memory: never sync-bake on the draw path (async only).
-                // Quality / performance: allow create so a rare cache miss cannot
-                // leave a blank icon during a full-resident session.
-                let allowCreate = isPrimingPresentationFrame
-                    || !IconRenderQuality.current.usesLazyTextureLoading
-                let primedTexture = isPrimingPresentationFrame
-                    ? iconTexture(for: item, allowCreate: true)
-                    : nil
+                // Resolve the transparent presentation frame too, but never
+                // rasterize or upload a cache miss from the draw path. The
+                // resident/page-window prewarmer fills the same cache off-main.
+                let texture = iconTexture(for: item, allowCreate: false)
                 guard alpha > 0.002 else { continue }
                 // Folder previews are already flattened into a single texture,
                 // so every item below follows the exact same sprite path.
-                let texture = primedTexture
-                    ?? iconTexture(for: item, allowCreate: allowCreate)
                 let reveal = lazyIconRevealAlpha(
                     id: itemID,
                     hasTexture: texture != nil,

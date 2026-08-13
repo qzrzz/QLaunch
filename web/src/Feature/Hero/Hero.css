@@ -19,6 +19,23 @@
   height: 256px;
   margin-bottom: 28px;
   border-radius: 22px;
+  animation: heroLogoEnter 1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes heroLogoEnter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .heroIcon {
+    animation: none;
+  }
 }
 
 .heroTitle {

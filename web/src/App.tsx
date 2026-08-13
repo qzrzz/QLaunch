@@ -4,6 +4,7 @@ import { getSectionsContent } from "./content";
 import { Footer } from "./Feature/Footer";
 import { StickyHeader } from "./Feature/Header";
 import { Hero } from "./Feature/Hero";
+import heroVideoAv1 from "./assets/v1-av1.mp4";
 import heroVideo from "./assets/v1.mp4";
 import heroVideoPoster from "./assets/v1-p.png";
 import {
@@ -44,7 +45,6 @@ export function App({ lang }: AppProps) {
       <div className="heroVideo">
         <video
           className="heroVideo__media"
-          src={heroVideo}
           poster={heroVideoPoster}
           autoPlay
           loop
@@ -52,7 +52,10 @@ export function App({ lang }: AppProps) {
           playsInline
           preload="metadata"
           aria-label="QLaunch product preview"
-        />
+        >
+          <source src={heroVideoAv1} type='video/mp4; codecs="av01"' />
+          <source src={heroVideo} type="video/mp4" />
+        </video>
       </div>
 
       {sections.map((section) => (

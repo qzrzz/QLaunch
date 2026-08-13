@@ -88,7 +88,7 @@ enum LaunchpadHotKeyPreferences {
     }
 }
 
-struct AppInfo: Identifiable, Hashable {
+struct AppInfo: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
     let url: URL
@@ -501,7 +501,11 @@ final class AppStore: ObservableObject {
     @Published private(set) var targetPage: Double = 0
 
     /// 0…1 presentation progress for window fade / content scale-in.
-    @Published var presentationProgress: CGFloat = 0
+    ///
+    /// Metal updates this once per display-link tick. SwiftUI does not render
+    /// from it, so publishing every change only invalidates all AppStore views
+    /// (and used to make PageIndicator rebuild the automatic layout each frame).
+    var presentationProgress: CGFloat = 0
 
     @Published private(set) var presentation: LaunchpadPresentation = .hidden
 
@@ -548,6 +552,13 @@ final class AppStore: ObservableObject {
     private var itemOrderIDs: [String]
     private var recentLaunchDates: [String: Date]
     private var iconColorByAppID: [String: LaunchpadIconColor] = [:]
+    private var iconColorTask: Task<Void, Never>?
+    /// Fully materialized automatic layouts. Getters and render paths only read
+    /// this dictionary; filtering and sorting are performed by detached tasks.
+    private var autoLayoutItemsByKind: [LaunchpadAutoLayoutKind: [LaunchpadItem]] = [:]
+    private var autoLayoutFallbackItems: [LaunchpadItem] = []
+    private var autoLayoutGeneration: [LaunchpadAutoLayoutKind: UInt64] = [:]
+    private var autoLayoutTasks: [LaunchpadAutoLayoutKind: Task<Void, Never>] = [:]
 
     private static var preferenceDomain: String {
         Bundle.main.bundleIdentifier ?? (kCFPreferencesCurrentApplication as String)
@@ -579,6 +590,8 @@ final class AppStore: ObservableObject {
 
     deinit {
         scanTask?.cancel()
+        iconColorTask?.cancel()
+        autoLayoutTasks.values.forEach { $0.cancel() }
     }
 
     var pageCount: Int {
@@ -643,7 +656,9 @@ final class AppStore: ObservableObject {
         case .user:
             return launchpadItems
         case .auto(let kind):
-            return autoLayoutItems(kind)
+            // Never sort from a getter. While a new materialization is pending,
+            // preserve a complete deterministic list using scanner order.
+            return autoLayoutItemsByKind[kind] ?? autoLayoutFallbackItems
         }
     }
 
@@ -706,19 +721,36 @@ final class AppStore: ObservableObject {
                 AppScanner.scan(additionalRoots: additionalRoots)
             }.value
             guard let self else { return }
-            apps = result
-            if layoutGeneration != generationAtStart {
+            let catalogChanged = apps != result
+            let affectedAutoLayouts: Set<LaunchpadAutoLayoutKind> = catalogChanged
+                ? autoLayoutsAffectedByCatalogChange(from: apps, to: result)
+                : []
+            let persistedLayoutChanged = layoutGeneration != generationAtStart
+            let hiddenBeforeReload = hiddenAppIDs
+            if catalogChanged {
+                apps = result
+                rebindAutoLayoutItemsToCurrentCatalog()
+                rebuildAutoLayoutFallbackItems()
+            }
+            if persistedLayoutChanged {
                 layoutLogger.debug("layout.scan.generationAdvanced readLayout=true")
                 adoptPersistedLayout()
             }
             if case .auto(.iconColor) = layoutMode {
                 ensureIconColors()
             }
-            reconcileLaunchpadItems()
-            // A scan also runs when the Launchpad is shown again. Keep the
-            // current page while refreshing the catalog; the non-reset path
-            // still clamps it if the refreshed catalog has fewer pages.
-            refreshFilteredApps(resetPage: false)
+            if catalogChanged || persistedLayoutChanged {
+                reconcileLaunchpadItems()
+                if hiddenAppIDs != hiddenBeforeReload {
+                    invalidateAllAutoLayouts()
+                } else if !affectedAutoLayouts.isEmpty {
+                    invalidateAutoLayouts(affectedAutoLayouts)
+                }
+                // A scan also runs when the Launchpad is shown again. Keep the
+                // current page while refreshing the catalog; the non-reset path
+                // still clamps it if the refreshed catalog has fewer pages.
+                refreshFilteredApps(resetPage: false)
+            }
             isLoading = false
             scanTask = nil
             NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
@@ -784,6 +816,7 @@ final class AppStore: ObservableObject {
         if writeBackup {
             writeLayoutBackupFailOpen()
         }
+        let hiddenBeforeImport = hiddenAppIDs
         let foldersData = try LaunchpadPreferenceStore.encodeFolders(applied.folders)
         LaunchpadPreferenceStore.writeLayout(
             domain: Self.preferenceDomain,
@@ -797,6 +830,9 @@ final class AppStore: ObservableObject {
         itemOrderIDs = applied.order
         hiddenAppIDs = applied.hidden
         layoutMode = .user
+        if hiddenAppIDs != hiddenBeforeImport {
+            invalidateAllAutoLayouts()
+        }
         persistLayoutMode()
         rebuildLaunchpadItems()
         cancelActiveDrag()
@@ -855,6 +891,9 @@ final class AppStore: ObservableObject {
         if case .auto(.iconColor) = mode {
             ensureIconColors()
         }
+        if case .auto(let kind) = mode {
+            scheduleAutoLayoutIfNeeded(kind)
+        }
         cancelActiveDrag()
         layoutGeneration += 1
         refreshFilteredApps(resetPage: true)
@@ -863,6 +902,7 @@ final class AppStore: ObservableObject {
 
     func recordAppLaunch(_ app: AppInfo) {
         recentLaunchDates[app.id] = Date()
+        invalidateAutoLayouts([.recentlyUsed])
         persistRecentLaunches()
     }
 
@@ -904,6 +944,7 @@ final class AppStore: ObservableObject {
 
     func reloadPersistedLayout() {
         layoutGeneration += 1
+        let hiddenBeforeReload = hiddenAppIDs
         adoptPersistedLayout()
         if apps.isEmpty {
             rebuildLaunchpadItems()
@@ -913,6 +954,9 @@ final class AppStore: ObservableObject {
         cancelActiveDrag()
         if let openedFolderID, folder(withID: openedFolderID) == nil {
             exitFolder()
+        }
+        if hiddenAppIDs != hiddenBeforeReload {
+            invalidateAllAutoLayouts()
         }
         refreshFilteredApps(resetPage: false)
         layoutLogger.info("layout.reload from distributed notification")
@@ -1023,7 +1067,8 @@ final class AppStore: ObservableObject {
     }
 
     func hide(_ app: AppInfo) {
-        hiddenAppIDs.insert(app.id)
+        guard hiddenAppIDs.insert(app.id).inserted else { return }
+        invalidateAllAutoLayouts()
         persistHiddenApps()
         reconcileLaunchpadItems()
         refreshFilteredApps(resetPage: false)
@@ -1031,7 +1076,8 @@ final class AppStore: ObservableObject {
     }
 
     func unhide(_ app: AppInfo) {
-        hiddenAppIDs.remove(app.id)
+        guard hiddenAppIDs.remove(app.id) != nil else { return }
+        invalidateAllAutoLayouts()
         persistHiddenApps()
         reconcileLaunchpadItems()
         refreshFilteredApps(resetPage: false)
@@ -1785,36 +1831,131 @@ final class AppStore: ObservableObject {
         persistLayout()
     }
 
-    private func autoLayoutItems(_ kind: LaunchpadAutoLayoutKind) -> [LaunchpadItem] {
-        let visible = apps.filter { !hiddenAppIDs.contains($0.id) }
-        let sortable = visible.map { app in
-            LaunchpadAutoLayoutApp(
-                id: app.id,
-                name: app.name,
-                path: app.url.path,
-                lastUsedAt: lastUsedDate(for: app),
-                installedAt: app.installedAt,
-                color: iconColorByAppID[app.id]
-            )
+    /// Materialize one automatic layout away from the main actor. The generation
+    /// check makes cancellation race-safe when catalog metadata changes while a
+    /// localized comparison sort is still running.
+    private func scheduleAutoLayoutIfNeeded(_ kind: LaunchpadAutoLayoutKind) {
+        guard autoLayoutItemsByKind[kind] == nil,
+              autoLayoutTasks[kind] == nil,
+              !apps.isEmpty else { return }
+        if kind == .iconColor,
+           apps.contains(where: { !hiddenAppIDs.contains($0.id) && iconColorByAppID[$0.id] == nil }) {
+            ensureIconColors()
+            return
         }
-        let ids = LaunchpadAutoLayoutSorter.sortedIDs(sortable, kind: kind)
-        let byID = Dictionary(uniqueKeysWithValues: visible.map { ($0.id, $0) })
-        return ids.compactMap { id in
-            byID[id].map(LaunchpadItem.app)
+
+        let generation = autoLayoutGeneration[kind, default: 0]
+        let catalog = apps
+        let hidden = hiddenAppIDs
+        let launchDates = recentLaunchDates
+        let colors = iconColorByAppID
+        autoLayoutTasks[kind] = Task { @MainActor [weak self] in
+            let sortedIDs = await Task.detached(priority: .userInitiated) {
+                let visible = catalog.filter { !hidden.contains($0.id) }
+                let sortable = visible.map { app in
+                    let lastUsedAt: Date?
+                    switch (launchDates[app.id], app.lastUsedAt) {
+                    case let (recorded?, spotlight?): lastUsedAt = max(recorded, spotlight)
+                    case let (recorded?, nil): lastUsedAt = recorded
+                    case let (nil, spotlight?): lastUsedAt = spotlight
+                    case (nil, nil): lastUsedAt = nil
+                    }
+                    return LaunchpadAutoLayoutApp(
+                        id: app.id,
+                        name: app.name,
+                        path: app.url.path,
+                        lastUsedAt: lastUsedAt,
+                        installedAt: app.installedAt,
+                        color: colors[app.id]
+                    )
+                }
+                return LaunchpadAutoLayoutSorter.sortedIDs(sortable, kind: kind)
+            }.value
+
+            guard let self else { return }
+            guard self.autoLayoutGeneration[kind, default: 0] == generation else { return }
+            self.autoLayoutTasks[kind] = nil
+            let currentByID = Dictionary(uniqueKeysWithValues: self.apps.map { ($0.id, $0) })
+            self.autoLayoutItemsByKind[kind] = sortedIDs.compactMap { id in
+                currentByID[id].map(LaunchpadItem.app)
+            }
+            if self.layoutMode == .auto(kind) {
+                // The cache itself is intentionally not @Published: send one
+                // invalidation only when the complete replacement is ready.
+                self.objectWillChange.send()
+            }
         }
     }
 
-    private func lastUsedDate(for app: AppInfo) -> Date? {
-        switch (recentLaunchDates[app.id], app.lastUsedAt) {
-        case let (recorded?, spotlight?):
-            return max(recorded, spotlight)
-        case let (recorded?, nil):
-            return recorded
-        case let (nil, spotlight?):
-            return spotlight
-        case (nil, nil):
-            return nil
+    private func invalidateAutoLayouts(_ kinds: Set<LaunchpadAutoLayoutKind>) {
+        for kind in kinds {
+            autoLayoutGeneration[kind, default: 0] &+= 1
+            autoLayoutItemsByKind.removeValue(forKey: kind)
+            autoLayoutTasks.removeValue(forKey: kind)?.cancel()
         }
+        if case .auto(let currentKind) = layoutMode, kinds.contains(currentKind) {
+            scheduleAutoLayoutIfNeeded(currentKind)
+        }
+    }
+
+    /// Determine which ordering keys changed. Metadata that only affects search
+    /// still refreshes cached AppInfo payloads but performs no automatic sort.
+    private func autoLayoutsAffectedByCatalogChange(
+        from previous: [AppInfo],
+        to current: [AppInfo]
+    ) -> Set<LaunchpadAutoLayoutKind> {
+        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+        let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        guard Set(previousByID.keys) == Set(currentByID.keys) else {
+            return Set(LaunchpadAutoLayoutKind.allCases)
+        }
+
+        var affected: Set<LaunchpadAutoLayoutKind> = []
+        for (id, app) in currentByID {
+            guard let old = previousByID[id] else {
+                return Set(LaunchpadAutoLayoutKind.allCases)
+            }
+            // Every mode falls back to name/path for deterministic ties.
+            if old.name != app.name || old.url.path != app.url.path {
+                return Set(LaunchpadAutoLayoutKind.allCases)
+            }
+            if old.lastUsedAt != app.lastUsedAt {
+                affected.insert(.recentlyUsed)
+            }
+            if old.installedAt != app.installedAt {
+                affected.formUnion([.installDateAscending, .installDateDescending])
+            }
+        }
+        return affected
+    }
+
+    /// Preserve every cached order while replacing its AppInfo payload with the
+    /// newest scan result. This is O(n) and performs no comparisons or sorting.
+    private func rebindAutoLayoutItemsToCurrentCatalog() {
+        let byID = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0) })
+        var reboundByKind: [LaunchpadAutoLayoutKind: [LaunchpadItem]] = [:]
+        reboundByKind.reserveCapacity(autoLayoutItemsByKind.count)
+        for (kind, items) in autoLayoutItemsByKind {
+            let rebound = items.compactMap { item -> LaunchpadItem? in
+                guard let app = byID[item.id] else { return nil }
+                return .app(app)
+            }
+            reboundByKind[kind] = rebound
+        }
+        autoLayoutItemsByKind = reboundByKind
+    }
+
+    private func rebuildAutoLayoutFallbackItems() {
+        autoLayoutFallbackItems = apps
+            .filter { !hiddenAppIDs.contains($0.id) }
+            .map(LaunchpadItem.app)
+    }
+
+    private func invalidateAllAutoLayouts() {
+        // Materialize the unsorted placeholder once as part of the mutation;
+        // getters remain allocation-free while the detached sort is pending.
+        rebuildAutoLayoutFallbackItems()
+        invalidateAutoLayouts(Set(LaunchpadAutoLayoutKind.allCases))
     }
 
     private func persistLayoutMode() {
@@ -1827,22 +1968,22 @@ final class AppStore: ObservableObject {
     }
 
     private func ensureIconColors() {
+        guard iconColorTask == nil else { return }
         let missing = apps.filter { !hiddenAppIDs.contains($0.id) && iconColorByAppID[$0.id] == nil }
         guard !missing.isEmpty else { return }
         let snapshot = missing.map { (id: $0.id, url: $0.url) }
-        Task { [weak self] in
+        iconColorTask = Task { [weak self] in
             let samples = await Task.detached(priority: .userInitiated) {
                 snapshot.map { item in
                     (item.id, IconColorAnalyzer.sample(url: item.url))
                 }
             }.value
             guard let self else { return }
+            self.iconColorTask = nil
             for (id, color) in samples {
                 self.iconColorByAppID[id] = color
             }
-            if case .auto(.iconColor) = self.layoutMode {
-                NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
-            }
+            self.invalidateAutoLayouts([.iconColor])
         }
     }
 
