@@ -79,7 +79,7 @@ bun run release           # 签名、公证并发布 GitHub Release
 bun run clean             # 清理构建产物
 bun run check             # 检查 Swift Package 结构
 bun run layout:export     # 导出当前网格顺序 / 文件夹 / 隐藏列表为 JSON
-bun run layout:import     # 导入布局 JSON（默认 merge；先 --dry-run --strict）
+bun run layout:import     # 导入布局 JSON（默认 merge；请先手动加 --dry-run --strict）
 bun run layout:validate   # 校验布局 JSON（不扫描磁盘）
 ```
 
