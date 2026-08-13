@@ -4,6 +4,7 @@ import SwiftUI
 
 extension Notification.Name {
     static let qlaunchpadStoreChanged = Notification.Name("QLaunchpadStoreChanged")
+    static let qlaunchpadLayoutDidChange = Notification.Name("com.qzrzz.qlaunchpad.layoutDidChange")
     static let qlaunchpadDismiss = Notification.Name("QLaunchpadDismiss")
     static let qlaunchpadPresentationChanged = Notification.Name("QLaunchpadPresentationChanged")
     static let qlaunchpadFocusSearch = Notification.Name("QLaunchpadFocusSearch")
