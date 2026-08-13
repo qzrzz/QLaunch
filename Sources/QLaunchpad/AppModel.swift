@@ -94,10 +94,9 @@ struct AppInfo: Identifiable, Hashable, Sendable {
     let url: URL
     let bundleIdentifier: String
     /// Search metadata generated once while the application catalog is built.
-    /// `pinyinFull` is compact full pinyin (e.g. `zhongguo`); initials are
-    /// stored separately (e.g. `zg`) so both search styles remain fast.
-    let pinyinFull: String
-    let pinyinInitials: String
+    /// Full pinyin and initials include polyphone variants so 音乐 matches
+    /// both `yy` / `yinyue` and the Unihan default `yl` / `yinle`.
+    let pinyin: PinyinSearchMetadata
     let installedAt: Date?
     let lastUsedAt: Date?
 
@@ -106,8 +105,6 @@ struct AppInfo: Identifiable, Hashable, Sendable {
         name: String,
         url: URL,
         bundleIdentifier: String,
-        pinyinFull: String? = nil,
-        pinyinInitials: String? = nil,
         installedAt: Date? = nil,
         lastUsedAt: Date? = nil
     ) {
@@ -115,11 +112,7 @@ struct AppInfo: Identifiable, Hashable, Sendable {
         self.name = name
         self.url = url
         self.bundleIdentifier = bundleIdentifier
-        let metadata = pinyinFull == nil || pinyinInitials == nil
-            ? PinyinSearchMetadata.make(for: name)
-            : nil
-        self.pinyinFull = pinyinFull ?? metadata?.full ?? ""
-        self.pinyinInitials = pinyinInitials ?? metadata?.initials ?? ""
+        self.pinyin = PinyinSearchMetadata.make(for: name)
         self.installedAt = installedAt
         self.lastUsedAt = lastUsedAt
     }
@@ -151,39 +144,6 @@ enum LaunchpadItem: Identifiable, Hashable {
         case .app(let app): app.id
         case .folder(let folder): folder.id
         }
-    }
-}
-
-enum PinyinSearchMetadata {
-    struct Result {
-        let full: String
-        let initials: String
-    }
-
-    static func make(for value: String) -> Result {
-        let hasCJK = value.unicodeScalars.contains { scalar in
-            switch scalar.value {
-            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
-                true
-            default:
-                false
-            }
-        }
-        guard hasCJK else { return Result(full: "", initials: "") }
-
-        let latin = NSMutableString(string: value)
-        CFStringTransform(latin, nil, kCFStringTransformToLatin, false)
-        CFStringTransform(latin, nil, kCFStringTransformStripCombiningMarks, false)
-
-        let syllables = latin
-            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
-            .map { $0.lowercased().filter { $0.isLetter || $0.isNumber } }
-            .filter { !$0.isEmpty }
-
-        return Result(
-            full: syllables.joined(),
-            initials: syllables.compactMap(\.first).map(String.init).joined()
-        )
     }
 }
 
@@ -1763,8 +1723,7 @@ final class AppStore: ObservableObject {
             return query.isEmpty
                 || normalized(app.name).contains(query)
                 || normalized(app.bundleIdentifier).contains(query)
-                || (!compactQuery.isEmpty && app.pinyinFull.contains(compactQuery))
-                || (!compactQuery.isEmpty && app.pinyinInitials.contains(compactQuery))
+                || app.pinyin.matches(compactQuery)
         }
 
         if resetPage {

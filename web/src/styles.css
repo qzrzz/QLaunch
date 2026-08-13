@@ -22,7 +22,7 @@
   --accent-soft: rgba(142, 197, 255, 0.14);
   --surface: rgba(255, 255, 255, 0.04);
   --surface-border: rgba(255, 255, 255, 0.08);
-  --text-muted: rgba(255, 255, 255, 0.62);
+  --text-muted: rgba(255, 255, 255, 0.72);
   --font-sans:
     "GeneralSans-Variable", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -101,7 +101,7 @@ img {
 
 .featureCollection {
   position: relative;
-  padding: 24px 0 32px;
+  padding: 24px 0 64px;
   /* 锚点跳转时避开吸顶导航 */
   scroll-margin-top: 72px;
 }
@@ -129,8 +129,8 @@ img {
   max-width: 640px;
   margin: 14px 0 0;
   color: var(--text-muted);
-  font-size: clamp(16px, 2vw, 18px);
-  line-height: 1.5;
+  font-size: clamp(18px, 2vw, 20px);
+  line-height: 1.8;
 }
 
 .featureCollection__cards {
@@ -147,7 +147,7 @@ img {
   min-height: 280px;
   margin: 0 auto;
   overflow: hidden;
-  border-radius: var(--card-radius);
+ 
 }
 
 .featureCard__media {
