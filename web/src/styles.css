@@ -144,13 +144,10 @@ img {
    ========================================================================== */
 
 .featureCard {
-  width: min(100% - (var(--page-gutter) * 2), 1100px);
   min-height: 280px;
   margin: 0 auto;
   overflow: hidden;
-  border: 1px solid var(--surface-border);
   border-radius: var(--card-radius);
-  background: var(--surface);
 }
 
 .featureCard__media {
