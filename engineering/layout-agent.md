@@ -23,7 +23,7 @@ bun run layout:import -- --in /tmp/qlaunch-layout.json --merge --strict
 bun run layout:validate -- --in /tmp/qlaunch-layout.json
 ```
 
-`scripts/layout.ts` 查找顺序（先到先用）：正在运行的 Dev 包 → 正在运行的 Release 包 → `build/DerivedData/Build/Products/Debug/QLaunch Dev.app` → `build/DerivedData/Build/Products/Release/QLaunch.app` → `/Applications/QLaunch.app`。找不到时先 `bun run dev`。
+`scripts/layout.ts` 查找顺序（先到先用）：正在运行的 Dev 包 → 正在运行的 Release 包 → `build/DerivedData/Build/Products/Debug/QLaunch Dev.app` → `build/DerivedData/Build/Products/Release/QLaunch.app` → `/Applications/QLaunch.app`。**正在运行的二进制只有路径落在仓库根下才采用**（`isUnderRoot`）；`/Applications/QLaunch.app` 在跑也会被跳过，然后落到 DerivedData / `/Applications` 的存在性检查。找不到时先 `bun run dev`。
 
 直接调用打包二进制（路径按本机产物替换）：
 
@@ -39,7 +39,7 @@ bun run layout:validate -- --in /tmp/qlaunch-layout.json
 
 ## Schema 字段
 
-机器校验以 [layout.schema.json](layout.schema.json) 为准。Swift 类型是 `LaunchpadLayoutDocument`（`Sources/QLaunchpadCore/LaunchpadLayout.swift`）。规范 JSON 由 `JSONEncoder` `[.sortedKeys, .prettyPrinted]` + ISO-8601 产出。
+[layout.schema.json](layout.schema.json) 是编辑器 / Agent 的契约（含 `additionalProperties: false`）。`bun run layout:validate` 与 `import` 走的是 Swift：`LaunchpadLayoutDocument` Codable + `LaunchpadLayoutImporter.validate`（`kind` / 版本 / 上限 / 文档内 ID 不变量，**不**扫描磁盘）。未知键（包括误加的 `customApplicationSourcePaths`）会被 Codable 忽略，不会被 CLI 拒绝；schema 比 CLI 更严。Swift 类型见 `Sources/QLaunchpadCore/LaunchpadLayout.swift`。规范 JSON 由 `JSONEncoder` `[.sortedKeys, .prettyPrinted]` + ISO-8601 产出；编码器锁定的完整文档是 [Tests/QLaunchpadCoreTests/Fixtures/canonical-layout.json](../Tests/QLaunchpadCoreTests/Fixtures/canonical-layout.json)。
 
 | 字段 | 必需 | 说明 |
 | --- | --- | --- |
@@ -50,10 +50,10 @@ bun run layout:validate -- --in /tmp/qlaunch-layout.json
 | `grid` | 否 | **只读快照**。含 `preset` / `columns` / `rows` / `pageCapacity`。Agent 按 `pageCapacity` 把根顺序切成页。导入 **不** 修改 `gridLayoutPreset` |
 | `items` | 是 | 根网格从左到右、从上到下、跨页连续。与 `launchpadItemOrder` 同构 |
 | `items[].type` | 是 | `"app"` 或 `"folder"` |
-| `items[].id` | app 必需；folder 可选 | app = `AppInfo.id`；folder 缺省则导入时生成 `folder-<UUID>` |
-| `items[].name` | folder 必需 | 非 strict：trim 后空则 `"文件夹"`。`--strict`：trim 后空则失败 |
+| `items[].id` | app 必需；folder 可选 | app = `AppInfo.id`；folder **省略** `id` 键则导入时生成 `folder-<UUID>`。出现但为空 / 空白的 id 会被 validate 拒绝 |
+| `items[].name` | folder 必需 | **键必须存在**，缺键是 decode 错误（任意模式 exit 2）。键在但 trim 后为空：非 strict → `"文件夹"`；`--strict` → 失败 |
 | `items[].apps` | folder 必需 | 文件夹内顺序，元素为 `AppInfo.id`。空数组的文件夹在 reconcile 时丢弃 |
-| `hidden` | 否 | **出现则整表替换** `hiddenAppIdentifiers`；省略则保留现网隐藏集，但 `items` / folder `apps` **认领的 id 会从 hidden 移除**（隐式取消隐藏） |
+| `hidden` | 否 | 三态：省略键 → 现网 hidden 减去认领的 id（隐式取消隐藏）；`[]` → 整表清空；非空数组 → 替换为解析成功的 id。**导出总是写出该键**（包括 `[]`） |
 | `catalog` | 否 | 导出时写入当前扫描结果（含隐藏应用）。导入时 **不作为布局**，只参与解析步骤 3 |
 
 **不要**在文档里写 `customApplicationSourcePaths`。没有这个字段；扫描额外根只从目标域偏好读取。
@@ -69,38 +69,23 @@ bun run layout:validate -- --in /tmp/qlaunch-layout.json
 
 ### 示例
 
+下面只说明字段形状。字节稳定、含 Preview 根项与 Foo 副本 catalog 的编码器锁定文档见 [canonical-layout.json](../Tests/QLaunchpadCoreTests/Fixtures/canonical-layout.json)（pretty + sortedKeys；路径写成 `\/`）。
+
 ```json
 {
-  "appVersion" : "1.0.0",
-  "catalog" : [
+  "kind": "qlaunchpad.layout",
+  "schemaVersion": 1,
+  "items": [
+    { "type": "app", "id": "com.apple.Safari" },
     {
-      "bundleIdentifier" : "com.apple.Safari",
-      "id" : "com.apple.Safari",
-      "name" : "Safari",
-      "path" : "/System/Cryptexes/App/System/Applications/Safari.app"
+      "type": "folder",
+      "id": "folder-550e8400-e29b-41d4-a716-446655440000",
+      "name": "开发",
+      "apps": ["com.apple.dt.Xcode", "com.microsoft.VSCode"]
     }
   ],
-  "exportedAt" : "2026-08-13T04:12:00Z",
-  "grid" : {
-    "columns" : 6,
-    "pageCapacity" : 24,
-    "preset" : "6x4-128",
-    "rows" : 4
-  },
-  "hidden" : [
-    "com.apple.Chess"
-  ],
-  "items" : [
-    { "id" : "com.apple.Safari", "type" : "app" },
-    {
-      "apps" : ["com.apple.dt.Xcode", "com.microsoft.VSCode"],
-      "id" : "folder-550e8400-e29b-41d4-a716-446655440000",
-      "name" : "开发",
-      "type" : "folder"
-    }
-  ],
-  "kind" : "qlaunchpad.layout",
-  "schemaVersion" : 1
+  "hidden": ["com.apple.Chess"],
+  "grid": { "preset": "6x4-128", "columns": 6, "rows": 4, "pageCapacity": 24 }
 }
 ```
 
@@ -114,7 +99,7 @@ bun run layout:validate -- --in /tmp/qlaunch-layout.json
 | --- | --- |
 | `catalog` | 本次扫描的全部 `AppInfo`（含 hidden） |
 | `items` | 根网格：app → `{ type, id }`；folder → `{ type, id, name, apps }` |
-| `hidden` | 现网 hidden 排序后的数组 |
+| `hidden` | 现网 hidden 排序后的数组；**总是写出该键**（空集也是 `[]`，不会省略） |
 | `grid` | **目标偏好域**的 `gridLayoutPreset`；缺省 / 无法识别 → `6x4-128` |
 
 CLI 标志：
@@ -140,17 +125,18 @@ CLI 标志：
 
 1. `validate(document)`：`kind` / `schemaVersion` / 体积与数量上限 / 重复 id / 嵌套 folder / `items ∩ hidden`。失败 → CLI exit 2。
 2. 按上面 1→4 解析每一个引用 id。
-3. `--strict`：`skippedUnknown` 非空或任一 folder name trim 后为空 → 失败。非 strict：跳过未知 id；空 name → `"文件夹"`。
-4. 用已解析 id 组装 `proposedFolders` / `proposedOrder`。未给 folder id → `folder-<UUID>`。
+3. `--strict`：`skippedUnknown` 非空或任一 **已解码** folder name trim 后为空 → 失败。非 strict：跳过未知 id；键在但空 name → `"文件夹"`。缺 `name` 键在解码阶段已失败，到不了这一步。
+4. 用已解析 id 组装 `proposedFolders` / `proposedOrder`。省略 folder `id` 键 → `folder-<UUID>`。出现但为空 / 空白的 id 已在步骤 1 拒绝。若 folder id 与某个 **已扫描** app id 碰撞 → `duplicateID`（这步才对照磁盘，`validate` 看不到）。
 5. `claimedIDs` = 根顺序与文件夹里的应用 id。
-6. **hidden 三态**（认领优先于「省略则保留」）：
-   - `hidden` 省略 → `hiddenBaseline = currentHidden − claimedIDs`，`unhiddenByClaim = currentHidden ∩ claimedIDs`（**隐式取消隐藏**）。
-   - `hidden` 出现 → `hiddenBaseline` = 解析成功的 hidden 整表替换；`items ∩ hidden` 已在步骤 1 拒绝。
+6. **hidden 三态**（认领优先于「省略则保留」）。导出总是写出 `hidden`，所以「省略键」只在 Agent **删掉该键** 时发生：
+   - 省略 `hidden` 键 → `hiddenBaseline = currentHidden − claimedIDs`，`unhiddenByClaim = currentHidden ∩ claimedIDs`（**隐式取消隐藏**）。
+   - `hidden: []`（键在、数组空）→ 整表替换为空，现网 hidden 全部取消（`--replace` 仍会把 leftover 藏起来）。
+   - `hidden` 为非空数组 → `hiddenBaseline` = 解析成功的 id 整表替换；`items ∩ hidden` 已在步骤 1 拒绝。
 7. `leftoverIDs` = 扫描结果中既不在 `claimedIDs`、也不在 `hiddenBaseline` 的 id（排序：`name` `localizedCaseInsensitiveCompare`，再 `path`）。
    - `--merge`（默认）：`finalHidden = hiddenBaseline`；leftover 在 reconcile 时追加到根末尾。
    - `--replace`：先 `finalHidden = hiddenBaseline ∪ leftoverIDs`，再 **一次** reconcile，leftover 不可见。
 8. 一次 `LaunchpadLayoutReconciler.reconcile`。空文件夹丢弃；未出现在顺序里的 folder 插在 leftover apps **之前**。
-9. 非 `--dry-run`：与磁盘不同才写三键；导入前把当前布局写成单槽备份（fail-open）。写成功后发 payload-free 的 `DistributedNotificationCenter` 通知，已运行 GUI 热更新。
+9. 非 `--dry-run`：与磁盘不同才写三键；导入前把当前布局写成单槽备份（fail-open）。写成功后发 `DistributedNotificationCenter` 通知（`object` = 域；`userInfo` 仅诊断：`source` / `schemaVersion`）。**通知里没有布局文档**；已运行 GUI 用 CFPreferences 重读本域后热更新。
 
 | 情况 | `--merge`（默认） | `--replace` | `--strict`（可与二者之一组合） |
 | --- | --- | --- | --- |
@@ -158,10 +144,13 @@ CLI 标志：
 | 本机有、JSON 未提到的可见 app | **追加到根末尾** | **先并入 hidden**，reconcile 后不可见 | 不改变 leftover 策略 |
 | JSON 未出现的旧 folder | 删除；未被认领的成员走 leftover | 同左 | 同左 |
 | `hidden` 省略 | 现网 hidden **减去** 认领的 id；其余保留 | 同上，再 ∪ leftover | 不因隐式取消隐藏失败 |
-| `hidden` 出现 | 整表替换为解析成功的 id | 该表 ∪ leftover | JSON hidden 里有未知 id → 失败 |
+| `hidden: []` | 整表清空 | 清空后再 ∪ leftover | 同左 |
+| `hidden` 非空 | 整表替换为解析成功的 id | 该表 ∪ leftover | JSON hidden 里有未知 id → 失败 |
 | `items` ∩ `hidden` | **拒绝** | **拒绝** | **拒绝** |
-| 缺 / 空 folder `name` | `"文件夹"` | 同左 | **失败** |
-| 缺 folder `id` | 生成 `folder-<UUID>` | 同左 | 允许 |
+| 缺 folder `name` 键 | decode 失败（exit 2） | 同左 | 同左 |
+| folder `name` 键在但 trim 后为空 | `"文件夹"` | 同左 | **失败** |
+| 省略 folder `id` 键 | 生成 `folder-<UUID>` | 同左 | 允许 |
+| folder `id` 出现但为空 / 空白 | validate 拒绝（exit 2） | 同左 | 同左 |
 
 `--dry-run`：跑完校验与合并，打印报告，**不写**偏好、不备份、不发通知。
 
@@ -189,9 +178,9 @@ wouldWriteDomain: com.qzrzz.qlaunchpad.dev
 - 任一应用 id 不能属于两个 folder。
 - 任一应用 id 不能同时出现在 `items`（含 folder `apps`）与 `hidden`。
 - Folder 的 `apps` 不得引用另一个 folder id（禁止嵌套）。
-- Folder `id` 若存在，不得与某个已解析 app id 碰撞。
+- 文档内部 ID 唯一：folder `id` 若存在，不得与同文件里的 app id / 其它 folder id / `apps` 成员碰撞。与**磁盘扫描结果**里某个 leftover app id 碰撞由 `import` 的 `apply` 在 resolve 之后拒绝，`validate` 看不到。
 - 上限：JSON ≤ 5 MiB、`items` ≤ 10_000、folder 数 ≤ 2_000、单 folder 成员 ≤ 500、`name` ≤ 200 标量、catalog ≤ 10_000。
-- 字符串必须非空（trim 后）；禁止 NUL。
+- `id` / folder `apps` / `hidden` / catalog 字符串必须非空（trim 后）且禁止 NUL。folder `name` 允许空白；空白名只在 `import --strict` 失败。
 
 ## CLI 形状
 
@@ -272,7 +261,7 @@ bun run layout:import -- --in /tmp/qlaunch-layout.json --merge --strict
 输入：一份 `kind = qlaunchpad.layout`、`schemaVersion = 1` 的文件。
 - `catalog`：本机应用。用 `id` 引用，不要用 `name` 当主键。
 - `items`：根网格从左到右、从上到下。页大小见 `grid.pageCapacity`（不要假设 24）。
-- `hidden`：若你要改隐藏集，必须输出完整数组；省略则保留用户现有隐藏，**但写进 `items` / 某个 folder `apps` 的 id 会自动取消隐藏**。不要把仍想隐藏的应用放进 `items`。
+- `hidden`：导出**总是写出该键**（包括 `[]`）。若你要改隐藏集，必须输出完整数组；`[]` 会清空现网 hidden。想走「省略则保留 + 认领即取消隐藏」必须**删掉该键**，不是留着导出来的数组。不要把仍想隐藏的应用放进 `items`。
 - 文件夹只有一层。`type: "folder"` 的 `apps` 只能是 catalog 里的应用 id。
 - 每个应用 id 在整个文件里只能出现一次（根、某个文件夹、或 hidden，三者互斥）。把已隐藏应用挪到网格：从 `hidden` 数组删掉它并写入 `items`，或省略 `hidden` 并把它写进 `items`（隐式取消隐藏）。
 - 保留用户没提到的应用：留在原处，或追加到末尾。不要只为了「干净」塞进 hidden。

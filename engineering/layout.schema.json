@@ -39,7 +39,7 @@
     "hidden": {
       "type": "array",
       "uniqueItems": true,
-      "description": "If present, replaces hiddenAppIdentifiers with the resolved ids. If omitted, keep the live hidden set minus ids claimed by items / folder apps (implicit unhide). Must not overlap items or folder apps.",
+      "description": "Three cases: omit the key to keep the live hidden set minus ids claimed by items / folder apps (implicit unhide); [] replaces the live set with empty; a non-empty array replaces it with the resolved ids. Export always emits this key (including []). Must not overlap items or folder apps.",
       "items": {
         "$ref": "#/$defs/nonEmptyString"
       }
@@ -109,12 +109,12 @@
         "type": { "const": "folder" },
         "id": {
           "$ref": "#/$defs/nonEmptyString",
-          "description": "Optional. Missing or blank becomes folder-<UUID> on import. Prefer keeping an existing folder id."
+          "description": "Optional. Omit to allocate folder-<UUID> on import. A present empty or whitespace id is rejected by validate. Prefer keeping an existing folder id."
         },
         "name": {
           "type": "string",
           "maxLength": 200,
-          "description": "Required. Non-strict import maps a blank trimmed name to 文件夹. --strict fails on a blank name."
+          "description": "Required key. Omitting it is a decode error. Non-strict import maps a present but blank trimmed name to 文件夹. --strict fails on a blank name."
         },
         "apps": {
           "type": "array",
