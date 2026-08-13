@@ -10,9 +10,17 @@ struct LabelLayout {
     /// Exact display size in points (sprite must use this — never stretch).
     var widthPoints: CGFloat
     var heightPoints: CGFloat
+    /// Atlas texel count. Sprite framebuffer size must match these exactly.
+    var widthPixels: Int
+    var heightPixels: Int
 }
 
-/// Linear Display P3 system-font atlas with grayscale antialiasing and drop shadow.
+/// System-font atlas with grayscale antialiasing and drop shadow.
+///
+/// CoreText coverage and CG shadows are authored for a gamma destination.
+/// 8-bit modes stay in Display P3. Quality rasterizes the same way, then
+/// composites a separate shadow layer into linear float16 so the blur ramp
+/// is not crushed by a linear working space.
 @MainActor
 final class TextAtlas {
     struct Options: Equatable, Sendable {
@@ -45,6 +53,9 @@ final class TextAtlas {
     static let shadowOffsetPoints = CGSize(width: 0, height: 1)
     static let shadowBlurPoints: CGFloat = 2
     static let shadowOpacity: CGFloat = 0.55
+    /// Linear dest makes the same black alpha look weaker than gamma.
+    /// Scale the whole ramp; do not reshape it.
+    static let qualityShadowAlphaGain: Float = 1.01
 
     init(device: MTLDevice) {
         self.device = device
@@ -76,15 +87,11 @@ final class TextAtlas {
             nil
         )
 
-        // 8-bit bitmaps cannot use extendedLinearDisplayP3 (CGContext is nil).
-        let colorSpace = CGColorSpace(
-            name: options.useUnorm8
-                ? CGColorSpace.linearDisplayP3
-                : CGColorSpace.extendedLinearDisplayP3
-        )!
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)!
         let textColor = CGColor(colorSpace: colorSpace, components: [1, 1, 1, 1])!
         let shadowColor = CGColor(colorSpace: colorSpace, components: [0, 0, 0, Self.shadowOpacity])!
-        let bytesPerPixel = options.useUnorm8 ? 4 : 4 * MemoryLayout<Float16>.size
+        let rasterBytesPerPixel = 4
+        let textureBytesPerPixel = options.useUnorm8 ? 4 : 4 * MemoryLayout<Float16>.size
 
         struct Prepared {
             let id: String
@@ -169,13 +176,8 @@ final class TextAtlas {
             atlasWidth = options.maxWidth
             atlasHeight = options.maxHeight
         }
-        let bytesPerRow = atlasWidth * bytesPerPixel
-        let bitsPerComponent = options.useUnorm8 ? 8 : 16
-        let bitmapInfo = options.useUnorm8
-            ? CGImageAlphaInfo.premultipliedLast.rawValue
-            : CGImageAlphaInfo.premultipliedLast.rawValue
-                | CGBitmapInfo.byteOrder16Little.rawValue
-                | CGBitmapInfo.floatComponents.rawValue
+        let rasterBytesPerRow = atlasWidth * rasterBytesPerPixel
+        let textureBytesPerRow = atlasWidth * textureBytesPerPixel
         let pixelFormat: MTLPixelFormat = options.useUnorm8 ? .rgba8Unorm : .rgba16Float
 
         var sheetIndex = 0
@@ -183,28 +185,18 @@ final class TextAtlas {
         var cursorY = 0
         var rowHeight = 0
         var currentContext: CGContext?
+        var linearSheet: [Float16] = []
 
         func beginSheet() -> Bool {
-            guard let context = CGContext(
-                data: nil,
+            guard let context = Self.makeGammaContext(
                 width: atlasWidth,
                 height: atlasHeight,
-                bitsPerComponent: bitsPerComponent,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace,
-                bitmapInfo: bitmapInfo
+                colorSpace: colorSpace
             ) else { return false }
-            context.clear(CGRect(x: 0, y: 0, width: atlasWidth, height: atlasHeight))
-            // Transparent compositing needs grayscale coverage, not legacy LCD
-            // subpixel colors. Geometric antialiasing remains enabled below.
-            context.setShouldSmoothFonts(false)
-            context.setAllowsFontSmoothing(false)
-            context.setShouldAntialias(true)
-            context.setAllowsAntialiasing(true)
-            context.setAllowsFontSubpixelPositioning(true)
-            context.setAllowsFontSubpixelQuantization(true)
-            context.textMatrix = .identity
             currentContext = context
+            linearSheet = options.useUnorm8
+                ? []
+                : [Float16](repeating: 0, count: atlasWidth * atlasHeight * 4)
             cursorX = 0
             cursorY = 0
             rowHeight = 0
@@ -212,12 +204,6 @@ final class TextAtlas {
         }
 
         func finishSheet() {
-            guard let context = currentContext,
-                  let data = context.data else {
-                currentContext = nil
-                return
-            }
-
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: pixelFormat,
                 width: atlasWidth,
@@ -226,15 +212,29 @@ final class TextAtlas {
             )
             descriptor.usage = [.shaderRead]
             descriptor.storageMode = .shared
-            if let texture = device.makeTexture(descriptor: descriptor) {
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                currentContext = nil
+                return
+            }
+            if options.useUnorm8, let data = currentContext?.data {
                 texture.replace(
                     region: MTLRegionMake2D(0, 0, atlasWidth, atlasHeight),
                     mipmapLevel: 0,
                     withBytes: data,
-                    bytesPerRow: bytesPerRow
+                    bytesPerRow: rasterBytesPerRow
                 )
-                sheets.append(texture)
+            } else {
+                linearSheet.withUnsafeBytes { bytes in
+                    guard let base = bytes.baseAddress else { return }
+                    texture.replace(
+                        region: MTLRegionMake2D(0, 0, atlasWidth, atlasHeight),
+                        mipmapLevel: 0,
+                        withBytes: base,
+                        bytesPerRow: textureBytesPerRow
+                    )
+                }
             }
+            sheets.append(texture)
             currentContext = nil
             sheetIndex += 1
         }
@@ -257,32 +257,44 @@ final class TextAtlas {
 
             let packX = cursorX
             let packY = cursorY
-            // CG bottom-left y for top-left pack.
             let cgY = atlasHeight - packY - ph
             let cgRect = CGRect(x: packX, y: cgY, width: pw, height: ph)
-
-            guard let context = currentContext else { return }
-            context.saveGState()
-            context.clip(to: cgRect.insetBy(dx: -1, dy: -1))
 
             let contentW = CGFloat(pw - item.padX * 2)
             let offsetX = CGFloat(item.padX) + max(0, (contentW - item.textWidthPx) * 0.5)
             let baselineY = CGFloat(item.padY) + item.descentPx
-            let baseX = cgRect.minX + offsetX
-            let baseY = cgRect.minY + baselineY
 
-            context.setShadow(
-                offset: CGSize(width: shadowOffsetPx.width, height: -shadowOffsetPx.height),
-                blur: shadowBlurPx,
-                color: shadowColor
-            )
-            context.setFillColor(textColor)
-            context.textPosition = CGPoint(x: baseX, y: baseY)
-            CTLineDraw(item.line, context)
-            context.restoreGState()
+            if options.useUnorm8, let context = currentContext {
+                Self.drawLine(
+                    item.line,
+                    in: context,
+                    dest: cgRect,
+                    offsetX: offsetX,
+                    baselineY: baselineY,
+                    textColor: textColor,
+                    shadowOffset: shadowOffsetPx,
+                    shadowBlur: shadowBlurPx,
+                    shadowColor: shadowColor
+                )
+            } else {
+                Self.rasterQualityLabel(
+                    line: item.line,
+                    destX: packX,
+                    destY: packY,
+                    width: pw,
+                    height: ph,
+                    offsetX: offsetX,
+                    baselineY: baselineY,
+                    textColor: textColor,
+                    shadowOffset: shadowOffsetPx,
+                    shadowBlur: shadowBlurPx,
+                    shadowColor: shadowColor,
+                    colorSpace: colorSpace,
+                    linearSheet: &linearSheet,
+                    atlasWidth: atlasWidth
+                )
+            }
 
-            // CGBitmapContext stores its first memory row at the visual top for
-            // this format, matching Metal's v=0 row and the top-left pack coords.
             let uv = SIMD4(
                 Float(packX) / Float(atlasWidth),
                 Float(packY) / Float(atlasHeight),
@@ -293,7 +305,9 @@ final class TextAtlas {
                 sheet: sheetIndex,
                 uv: uv,
                 widthPoints: item.widthPoints,
-                heightPoints: item.heightPoints
+                heightPoints: item.heightPoints,
+                widthPixels: pw,
+                heightPixels: ph
             )
 
             cursorX += pw
@@ -301,6 +315,143 @@ final class TextAtlas {
         }
 
         finishSheet()
+    }
+
+    private static func configureTextRaster(_ context: CGContext) {
+        context.setShouldSmoothFonts(false)
+        context.setAllowsFontSmoothing(false)
+        context.setShouldAntialias(true)
+        context.setAllowsAntialiasing(true)
+        context.setAllowsFontSubpixelPositioning(true)
+        context.setAllowsFontSubpixelQuantization(true)
+        context.textMatrix = .identity
+    }
+
+    private static func makeGammaContext(
+        width: Int,
+        height: Int,
+        colorSpace: CGColorSpace
+    ) -> CGContext? {
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        configureTextRaster(context)
+        return context
+    }
+
+    private static func drawLine(
+        _ line: CTLine,
+        in context: CGContext,
+        dest: CGRect,
+        offsetX: CGFloat,
+        baselineY: CGFloat,
+        textColor: CGColor,
+        shadowOffset: CGSize?,
+        shadowBlur: CGFloat,
+        shadowColor: CGColor?
+    ) {
+        context.saveGState()
+        context.clip(to: dest.insetBy(dx: -1, dy: -1))
+        if let shadowOffset, let shadowColor {
+            context.setShadow(
+                offset: CGSize(width: shadowOffset.width, height: -shadowOffset.height),
+                blur: shadowBlur,
+                color: shadowColor
+            )
+        } else {
+            context.setShadow(offset: .zero, blur: 0)
+        }
+        context.setFillColor(textColor)
+        context.textPosition = CGPoint(x: dest.minX + offsetX, y: dest.minY + baselineY)
+        CTLineDraw(line, context)
+        context.restoreGState()
+    }
+
+    /// Shadow and glyph are separate layers so the blur ramp is not remapped
+    /// by a luma-dependent alpha curve. Text coverage still decodes through
+    /// sRGB; shadow alpha is only scaled.
+    private static func rasterQualityLabel(
+        line: CTLine,
+        destX: Int,
+        destY: Int,
+        width: Int,
+        height: Int,
+        offsetX: CGFloat,
+        baselineY: CGFloat,
+        textColor: CGColor,
+        shadowOffset: CGSize,
+        shadowBlur: CGFloat,
+        shadowColor: CGColor,
+        colorSpace: CGColorSpace,
+        linearSheet: inout [Float16],
+        atlasWidth: Int
+    ) {
+        guard
+            let shadowCtx = makeGammaContext(width: width, height: height, colorSpace: colorSpace),
+            let textCtx = makeGammaContext(width: width, height: height, colorSpace: colorSpace)
+        else { return }
+
+        let dest = CGRect(x: 0, y: 0, width: width, height: height)
+        drawLine(
+            line,
+            in: shadowCtx,
+            dest: dest,
+            offsetX: offsetX,
+            baselineY: baselineY,
+            textColor: textColor,
+            shadowOffset: shadowOffset,
+            shadowBlur: shadowBlur,
+            shadowColor: shadowColor
+        )
+        shadowCtx.saveGState()
+        shadowCtx.setShadow(offset: .zero, blur: 0)
+        shadowCtx.setBlendMode(.destinationOut)
+        shadowCtx.setFillColor(textColor)
+        shadowCtx.textPosition = CGPoint(x: dest.minX + offsetX, y: dest.minY + baselineY)
+        CTLineDraw(line, shadowCtx)
+        shadowCtx.restoreGState()
+
+        drawLine(
+            line,
+            in: textCtx,
+            dest: dest,
+            offsetX: offsetX,
+            baselineY: baselineY,
+            textColor: textColor,
+            shadowOffset: nil,
+            shadowBlur: 0,
+            shadowColor: nil
+        )
+
+        guard let shadowData = shadowCtx.data, let textData = textCtx.data else { return }
+        let shadow = shadowData.assumingMemoryBound(to: UInt8.self)
+        let text = textData.assumingMemoryBound(to: UInt8.self)
+        let gain = qualityShadowAlphaGain
+        for y in 0..<height {
+            for x in 0..<width {
+                let src = (y * width + x) * 4
+                let sA = min(1, Float(shadow[src + 3]) * (1.0 / 255.0) * gain)
+                let tA = srgbToLinear(Float(text[src + 3]) * (1.0 / 255.0))
+                let outA = tA + sA * (1 - tA)
+                let destIndex = ((destY + y) * atlasWidth + (destX + x)) * 4
+                linearSheet[destIndex] = Float16(tA)
+                linearSheet[destIndex + 1] = Float16(tA)
+                linearSheet[destIndex + 2] = Float16(tA)
+                linearSheet[destIndex + 3] = Float16(outA)
+            }
+        }
+    }
+
+    private static func srgbToLinear(_ encoded: Float) -> Float {
+        if encoded <= 0.04045 { return encoded / 12.92 }
+        return pow((encoded + 0.055) / 1.055, 2.4)
     }
 
     private static func nextPowerOfTwo(_ value: Int) -> Int {

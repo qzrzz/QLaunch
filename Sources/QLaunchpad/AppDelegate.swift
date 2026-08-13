@@ -205,7 +205,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Typing an ASCII letter or number anywhere on the launchpad starts
             // a search. Commit the first character before requesting focus so it
             // cannot be lost while SwiftUI installs the native field editor.
-            if !(self.launchpadPanel.firstResponder is NSTextView),
+            // A folder replaces the search field with its title — do not steal
+            // those keys back into search.
+            if self.store.openedFolderID == nil,
+               !(self.launchpadPanel.firstResponder is NSTextView),
                let characters = self.searchCharacters(from: event) {
                 self.store.updateSearch(self.store.searchText + characters)
                 NotificationCenter.default.post(name: .qlaunchpadFocusSearch, object: nil)
@@ -257,6 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func openAppFromLaunchpad(_ app: AppInfo) {
+        store.recordAppLaunch(app)
         beginDismissal(openingAppID: app.id)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             QLaunchAppLauncher.open(app)

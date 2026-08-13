@@ -69,21 +69,49 @@ export const sectionsContentMap: Record<SupportedLang, SectionConfig[]> = {
       id: "why",
       title: "为什么选择 QLaunch",
       description:
-        "系统 Launchpad 不再顺手？QLaunch 用原生 AppKit + Metal 把它找回来——128pt 图标、流畅翻页、安静的液态玻璃界面。",
+        "相比同类工具操作更加流畅、更高画质显示图标。120Hz 响应、Display P3 高色域、Liquid Glass、过渡动画、拼音搜索。高质量的实现最简单的核心功能，让你感觉不到它的存在。",
+      cards: [],
+    },
+
+    {
+      id: "what",
+      title: "QLaunch 是什么",
+      description:
+        "QLaunch 是 macOS 应用启动台 —— 展示系统中的应用程序，并启动他们。 macOS 从 26 开始遗弃了 Launchpad，并试图用小小的 Spotlight 搜索框取代它，但我们喜欢整页精美的应用程序图标带来的赏心悦目的体验",
       cards: [],
     },
     {
       id: "performance",
-      title: "Metal 高性能",
+      title: "Metal 高性能 GPU 渲染",
       description:
-        "图标与标签走 Metal atlas，CADisplayLink 最高 120fps。弹簧翻页、边缘橡胶回弹、开合缩放淡入，全程顺滑。",
+        "QLaunch 使用 Metal 直接调用 GPU 进行图像渲染，实现最高可达 120 Hz 的响应速度，和超越同类工具的图像质量。",
       cards: [],
     },
     {
       id: "glass",
-      title: "壁纸模糊与液态玻璃",
-      description:
-        "读取当前桌面壁纸，CIGaussianBlur 真模糊 + vignette。搜索框在新系统使用液态玻璃，旧系统用分层 material 精心近似。",
+      title: "Liquid Glass",
+      description: "适配最新 macOS 的液态玻璃 UI 效果",
+      cards: [],
+    },
+
+    {
+      id: "pingyin",
+      title: "拼音搜索",
+      description: "中文用户不用切换输入法了，无脑输入，无论当前输入法是英文还是拼音都能搜索到目标",
+      cards: [],
+    },
+
+    {
+      id: "ai",
+      title: "AI 帮你整理应用，开放且免费",
+      description: "能让 AI 帮你整理应用程序，不是内置的付费功能，而是开放接口给你自己的 AI 调用",
+      cards: [],
+    },
+
+    {
+      id: "open",
+      title: "高质量核心功能，剩下的交给你  Vibe Coding",
+      description: "需要更多功能，开源代码让你的 AI Agent 去实现吧",
       cards: [],
     },
   ],

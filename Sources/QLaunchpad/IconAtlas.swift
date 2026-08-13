@@ -10,8 +10,13 @@ private var iconTextureRasterScale: CGFloat {
 /// One linear Display P3 texture per app.
 ///
 /// - **Quality:** `RGBA16Float`, 4× raster.
-/// - **Performance:** linear Display P3 quantized to `RGBA8Unorm`, 2× raster.
-/// - **Low memory:** same 2× RGBA8 bake as performance (residency is page-windowed).
+/// - **Performance:** same linear bake, packed as `RGBA8Unorm_srgb`, 2× raster.
+/// - **Low memory:** same 2× sRGB8 bake as performance (residency is page-windowed).
+///
+/// 8-bit modes store `sRGB(premul)` in `RGBA8Unorm_srgb` so sampling returns
+/// linear light (no dark posterization). The shader then converts to
+/// `sRGB(C)*a` before presenting into a non-sRGB Display P3 drawable —
+/// an sRGB framebuffer would encode `sRGB(C*a)` and harden icon AA.
 final class IconTextureStore: @unchecked Sendable {
     private struct CacheKey: Hashable {
         let appID: String
@@ -322,7 +327,7 @@ final class IconTextureStore: @unchecked Sendable {
         return texture
     }
 
-    // MARK: Performance — linear Display P3 quantized to RGBA8Unorm
+    // MARK: Performance — linear Display P3 packed as RGBA8Unorm_srgb
 
     private func makeLinearUNorm8Texture(
         for app: AppInfo,
@@ -330,37 +335,7 @@ final class IconTextureStore: @unchecked Sendable {
     ) -> MTLTexture? {
         guard let raster = makeLinearFloat16Context(pixelSize: px) else { return nil }
         drawIcon(app: app, into: raster.context, pixelSize: px)
-
-        let pixelCount = px * px
-        var unorm = [UInt8](repeating: 0, count: pixelCount * 4)
-        raster.data.withMemoryRebound(to: Float16.self, capacity: pixelCount * 4) { src in
-            for i in 0..<(pixelCount * 4) {
-                // Linear light, same domain as the float16 drawable. Clamp
-                // extended-range peaks so 8-bit storage stays valid.
-                let x = Float(src[i])
-                let y = min(max(x, 0), 1)
-                unorm[i] = UInt8(y * 255.0 + 0.5)
-            }
-        }
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm,
-            width: px,
-            height: px,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead]
-        descriptor.storageMode = .shared
-        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
-        unorm.withUnsafeBytes { raw in
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, px, px),
-                mipmapLevel: 0,
-                withBytes: raw.baseAddress!,
-                bytesPerRow: px * 4
-            )
-        }
-        return texture
+        return makeSRGBUNorm8Texture(device: device, float16: raster.data, pixelSize: px)
     }
 
     private func drawIcon(app: AppInfo, into context: CGContext, pixelSize px: Int) {
@@ -582,38 +557,12 @@ final class FolderIconTextureStore {
             pixelSize: px,
             iconPointSize: iconPointSize
         )
-
-        let pixelCount = px * px
-        var unorm = [UInt8](repeating: 0, count: pixelCount * 4)
-        raster.data.withMemoryRebound(to: Float16.self, capacity: pixelCount * 4) { src in
-            for i in 0..<(pixelCount * 4) {
-                let x = Float(src[i])
-                let y = min(max(x, 0), 1)
-                unorm[i] = UInt8(y * 255.0 + 0.5)
-            }
-        }
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm,
-            width: px,
-            height: px,
-            mipmapped: false
+        return makeSRGBUNorm8Texture(
+            device: device,
+            float16: raster.data,
+            pixelSize: px,
+            label: "QLaunch folder icon"
         )
-        descriptor.usage = [.shaderRead]
-        descriptor.storageMode = .shared
-        guard let texture = device.makeTexture(descriptor: descriptor) else {
-            return nil
-        }
-        unorm.withUnsafeBytes { raw in
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, px, px),
-                mipmapLevel: 0,
-                withBytes: raw.baseAddress!,
-                bytesPerRow: px * 4
-            )
-        }
-        texture.label = "QLaunch folder icon"
-        return texture
     }
 
     private func composeFolder(
@@ -658,4 +607,59 @@ final class FolderIconTextureStore {
         }
         NSGraphicsContext.restoreGraphicsState()
     }
+}
+
+/// Display P3 uses the sRGB OETF. Encode premultiplied linear RGB; leave
+/// alpha linear. `rgba8Unorm_srgb` decodes RGB back to linear premul.
+private func encodeLinearToSRGB8(_ linear: Float) -> UInt8 {
+    let x = min(max(linear, 0), 1)
+    let encoded: Float
+    if x <= 0.0031308 {
+        encoded = x * 12.92
+    } else {
+        encoded = 1.055 * pow(x, 1.0 / 2.4) - 0.055
+    }
+    return UInt8(encoded * 255.0 + 0.5)
+}
+
+private func makeSRGBUNorm8Texture(
+    device: MTLDevice,
+    float16 data: UnsafeMutableRawPointer,
+    pixelSize px: Int,
+    label: String? = nil
+) -> MTLTexture? {
+    let pixelCount = px * px
+    var unorm = [UInt8](repeating: 0, count: pixelCount * 4)
+    data.withMemoryRebound(to: Float16.self, capacity: pixelCount * 4) { src in
+        var pixel = 0
+        while pixel < pixelCount {
+            let base = pixel * 4
+            unorm[base]     = encodeLinearToSRGB8(Float(src[base]))
+            unorm[base + 1] = encodeLinearToSRGB8(Float(src[base + 1]))
+            unorm[base + 2] = encodeLinearToSRGB8(Float(src[base + 2]))
+            let alpha = min(max(Float(src[base + 3]), 0), 1)
+            unorm[base + 3] = UInt8(alpha * 255.0 + 0.5)
+            pixel += 1
+        }
+    }
+
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba8Unorm_srgb,
+        width: px,
+        height: px,
+        mipmapped: false
+    )
+    descriptor.usage = [.shaderRead]
+    descriptor.storageMode = .shared
+    guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+    texture.label = label
+    unorm.withUnsafeBytes { raw in
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, px, px),
+            mipmapLevel: 0,
+            withBytes: raw.baseAddress!,
+            bytesPerRow: px * 4
+        )
+    }
+    return texture
 }

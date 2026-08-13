@@ -78,6 +78,23 @@ img {
   background: #000;
 }
 
+.heroVideo {
+  width: 756px;
+  height: 491px;
+  margin: 0 auto 72px;
+  overflow: hidden;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--card-radius);
+  background: #111;
+}
+
+.heroVideo__media {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+}
+
 /* ==========================================================================
    Section 分区
    ========================================================================== */

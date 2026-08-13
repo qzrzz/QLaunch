@@ -362,6 +362,10 @@ enum LaunchpadCLI {
         if let path, path != "-" {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
             do {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
                 try payload.write(to: url, options: .atomic)
             } catch {
                 throw CLIError.io("failed to write \(path): \(error.localizedDescription)")

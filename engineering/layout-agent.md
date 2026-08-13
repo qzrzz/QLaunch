@@ -16,11 +16,11 @@
 优先用 bun 脚本（只 spawn 上述打包二进制，**永远不** `swift run`、不 `open -a`、不把 argv 送给已运行的 GUI）：
 
 ```sh
-bun run layout:export -- --out /tmp/qlaunch-layout.json
+bun run layout:export -- --out "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json"
 # 编辑该文件
-bun run layout:import -- --in /tmp/qlaunch-layout.json --dry-run --strict
-bun run layout:import -- --in /tmp/qlaunch-layout.json --merge --strict
-bun run layout:validate -- --in /tmp/qlaunch-layout.json
+bun run layout:import -- --in "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json" --dry-run --strict
+bun run layout:import -- --in "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json" --merge --strict
+bun run layout:validate -- --in "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json"
 ```
 
 `scripts/layout.ts` 查找顺序（先到先用）：正在运行的 Dev 包 → 正在运行的 Release 包 → `build/DerivedData/Build/Products/Debug/QLaunch Dev.app` → `build/DerivedData/Build/Products/Release/QLaunch.app` → `/Applications/QLaunch.app`。**正在运行的二进制只有路径落在仓库根下才采用**（`isUnderRoot`）；`/Applications/QLaunch.app` 在跑也会被跳过，然后落到 DerivedData / `/Applications` 的存在性检查。找不到时先 `bun run dev`。
@@ -29,10 +29,10 @@ bun run layout:validate -- --in /tmp/qlaunch-layout.json
 
 ```sh
 "build/DerivedData/Build/Products/Debug/QLaunch Dev.app/Contents/MacOS/QLaunchpad" \
-  export --out /tmp/qlaunch-layout.json
+  export --out "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json"
 
 "build/DerivedData/Build/Products/Release/QLaunch.app/Contents/MacOS/QLaunchpad" \
-  import --in /tmp/qlaunch-layout.json --dry-run --strict
+  import --in "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json" --dry-run --strict
 ```
 
 从打包 `.app` 启动时，偏好域就是该包的 `CFBundleIdentifier`（Release `com.qzrzz.qlaunchpad`，Dev `com.qzrzz.qlaunchpad.dev`）。裸 `swift run QLaunchpad …` **没有**这些 bundle id，会被拒绝，必须显式 `--domain` / `--dev` / `--app`。不要把它当作默认入口。
@@ -216,16 +216,16 @@ QLaunchpad help
 分享布局时去掉本机路径：
 
 ```sh
-bun run layout:export -- --out /tmp/qlaunch-layout.json --no-paths
+bun run layout:export -- --out "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json" --no-paths
 ```
 
 不要把未脱敏（带 `/Users/<name>/…`）的 JSON 提交到公共仓库。
 
 ## Agent 工作流
 
-1. `bun run layout:export -- --out /tmp/qlaunch-layout.json`
+1. `bun run layout:export -- --out "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json"`
 2. 只改 JSON：按用户意图重排 `items` / 一层 `folder` / 可选 `hidden`。保留 `catalog` 原样。不要改 Swift。
-3. `bun run layout:import -- --in /tmp/qlaunch-layout.json --dry-run --strict`，确认 `skippedUnknown` 为空。
+3. `bun run layout:import -- --in "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json" --dry-run --strict`，确认 `skippedUnknown` 为空。
 4. 默认再跑 `--merge --strict`。用户明确要求「只留这些图标」时才用 `--replace`。
 5. 已运行的 GUI 应热更新；不要 `open -a`。
 
@@ -243,10 +243,10 @@ bun run layout:export -- --out /tmp/qlaunch-layout.json --no-paths
 优先：
 
 ```sh
-bun run layout:export -- --out /tmp/qlaunch-layout.json
+bun run layout:export -- --out "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json"
 # 编辑该文件
-bun run layout:import -- --in /tmp/qlaunch-layout.json --dry-run --strict
-bun run layout:import -- --in /tmp/qlaunch-layout.json --merge --strict
+bun run layout:import -- --in "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json" --dry-run --strict
+bun run layout:import -- --in "$HOME/Library/Application Support/QLaunch/qlaunch-layout.json" --merge --strict
 ```
 
 禁止：

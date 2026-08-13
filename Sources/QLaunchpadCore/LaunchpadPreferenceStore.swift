@@ -134,11 +134,20 @@ public enum LaunchpadPreferenceStore {
     }
 
     public static func layoutBackupFileURL(domain: String) -> URL {
+        layoutSupportDirectory(domain: domain)
+            .appendingPathComponent("layout.backup.json")
+    }
+
+    public static func layoutWorkingFileURL(domain: String) -> URL {
+        layoutSupportDirectory(domain: domain)
+            .appendingPathComponent("qlaunch-layout.json")
+    }
+
+    public static func layoutSupportDirectory(domain: String) -> URL {
         let folderName = domain == developmentDomain ? "QLaunch Dev" : "QLaunch"
         return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
             .appendingPathComponent(folderName, isDirectory: true)
-            .appendingPathComponent("layout.backup.json")
     }
 
     public static func writeLayoutBackup(domain: String, document: LaunchpadLayoutDocument) throws {

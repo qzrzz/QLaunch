@@ -2,6 +2,7 @@ import AppKit
 import Metal
 import MetalKit
 import QuartzCore
+import QLaunchpadCore
 import simd
 
 // MARK: - GPU instance layout (three float4s, 48-byte stride)
@@ -14,7 +15,8 @@ private struct SpriteInstance {
     var centerSize: SIMD4<Float>
     /// xy = atlas UV origin (top-left), zw = atlas UV size
     var uvRect: SIMD4<Float>
-    /// x = kind (0 focus plate, 1 icon, 2 pressed icon, 3 text), y = alpha
+    /// x = kind (0 focus plate, 1 icon, 2 pressed icon, 3 text), y = alpha,
+    /// z = 1 snap text origin + size to framebuffer pixels
     var kindAlpha: SIMD4<Float>
 
     static func focus(center: CGPoint, size: CGFloat, alpha: Float) -> SpriteInstance {
@@ -43,12 +45,13 @@ private struct SpriteInstance {
         center: CGPoint,
         size: CGSize,
         uv: SIMD4<Float>,
-        alpha: Float
+        alpha: Float,
+        snapToPixels: Bool
     ) -> SpriteInstance {
         SpriteInstance(
             centerSize: SIMD4(Float(center.x), Float(center.y), Float(size.width), Float(size.height)),
             uvRect: uv,
-            kindAlpha: SIMD4(3, alpha, 0, 0)
+            kindAlpha: SIMD4(3, alpha, snapToPixels ? 1 : 0, 0)
         )
     }
 
@@ -56,6 +59,8 @@ private struct SpriteInstance {
 
 private struct FrameUniforms {
     var viewport: SIMD2<Float>
+    /// Framebuffer pixels. Text snap uses `drawable / viewport`.
+    var drawable: SIMD2<Float>
     /// x: icon filter mode (1 = quality binomial, 0 = performance).
     var mode: SIMD2<Float> = .zero
 }
@@ -185,6 +190,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var dragHoverProgress: CGFloat = 0
     private var didDrag = false
     private var isPanningPage = false
+    private var pageIndicatorClick = false
     private var panLastPoint: CGPoint = .zero
     private var contextMenuApp: AppInfo?
     private var contextMenuFolder: AppFolder?
@@ -256,8 +262,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             fatalError("Unable to compile QLaunch shaders")
         }
 
-        // Quality / performance stay on linear float16. Low memory uses 8-bit
-        // BGRA (not sRGB) so blending stays premultiplied and framebuffers shrink.
+        // Quality: linear float16 drawable. Performance / low memory: 8-bit
+        // Display P3 (not sRGB). An sRGB drawable encodes premul as sRGB(C*a),
+        // but the window server wants sRGB(C)*a — that warp turns AA into jaggies.
         guard
             let pipelines16 = Self.makeSpritePipelines(
                 device: device,
@@ -378,9 +385,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         return (icon, text)
     }
 
-    /// Match the layer to the active quality. Performance / low memory: 8-bit drawable.
-    /// Only `colorPixelFormat` is updated live — replacing `CAMetalLayer` breaks
-    /// MTKView's drawable until relaunch. Drawable count is init-only.
+    /// Match the layer to the active quality. Performance / low memory: 8-bit
+    /// Display P3. Only `colorPixelFormat` is updated live — replacing
+    /// `CAMetalLayer` breaks MTKView's drawable until relaunch. Drawable count
+    /// is init-only.
     private func applyDrawableConfiguration(for quality: IconRenderQuality) {
         let format: MTLPixelFormat = quality.usesUnorm8Drawable ? .bgra8Unorm : .rgba16Float
         colorPixelFormat = format
@@ -392,7 +400,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         metalLayer.framebufferOnly = false
         metalLayer.isOpaque = false
-        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        // 8-bit: shader emits gamma-premul Display P3 (`sRGB(C)*a`). Quality
+        // stays linear float16 for the EDR compositor.
+        metalLayer.colorspace = CGColorSpace(
+            name: quality.usesUnorm8Drawable
+                ? CGColorSpace.displayP3
+                : CGColorSpace.extendedLinearDisplayP3
+        )
     }
 
     private var appliedDrawableCount: Int?
@@ -414,10 +428,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     struct Sprite {
         float4 centerSize; // xy center, zw size (points, top-left y)
         float4 uvRect;     // xy origin, zw size (Metal top-left UV)
-        float4 kindAlpha;  // x kind, y alpha
+        float4 kindAlpha;  // x kind, y alpha, z snap-to-pixel
     };
     struct Uniforms {
         float2 viewport;
+        float2 drawable;
         // x: 1 = quality (4×4 binomial), 0 = performance (bilinear)
         float2 mode;
     };
@@ -427,6 +442,27 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         float kind;
         float alpha;
     };
+
+    // Display P3 uses the sRGB OETF. Convert linear premul → gamma premul so
+    // a transparent 8-bit layer composites with sRGB(C)*a, not sRGB(C*a).
+    float ql_linear_to_srgb(float x) {
+        x = saturate(x);
+        if (x <= 0.0031308) return x * 12.92;
+        return 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+    }
+
+    float4 ql_present(float4 c, float encodeGammaPremul) {
+        if (encodeGammaPremul < 0.5) return c;
+        float a = saturate(c.a);
+        if (a <= 1.0e-6) return float4(0.0);
+        float3 straight = saturate(c.rgb / a);
+        float3 encoded = float3(
+            ql_linear_to_srgb(straight.r),
+            ql_linear_to_srgb(straight.g),
+            ql_linear_to_srgb(straight.b)
+        );
+        return float4(encoded * a, a);
+    }
 
     vertex VertexOut ql_vertex(
         uint vid [[vertex_id]],
@@ -442,6 +478,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         Sprite s = sprites[iid];
         float2 local = corners[vid];
         float2 pixel = s.centerSize.xy + local * s.centerSize.zw;
+        // Resting labels: snap origin and size in framebuffer pixels so a
+        // 1:1 atlas quad cannot pick up a half-pixel from Float / NDC.
+        if (s.kindAlpha.z > 0.5 && u.drawable.x > 0.5 && u.viewport.x > 0.5) {
+            float2 origin = s.centerSize.xy - 0.5 * s.centerSize.zw;
+            float2 originPx = origin / u.viewport * u.drawable;
+            float2 sizePx = s.centerSize.zw / u.viewport * u.drawable;
+            originPx = floor(originPx + 0.5);
+            sizePx = floor(sizePx + 0.5);
+            float2 fb = originPx + (local + 0.5) * sizePx;
+            pixel = fb / u.drawable * u.viewport;
+        }
         // Top-left pixel space → NDC (y flips).
         float2 ndc = float2(
             pixel.x / u.viewport.x * 2.0 - 1.0,
@@ -469,11 +516,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             float feather = max(fwidth(shape) * 0.75, 0.002);
             float coverage = 1.0 - smoothstep(1.0 - feather, 1.0 + feather, shape);
             float a = coverage * 0.34 * in.alpha;
-            return float4(0.0, 0.0, 0.0, a);
+            return ql_present(float4(0.0, 0.0, 0.0, a), 1.0 - u.mode.x);
         }
 
-        // sample(): quality = rgba16Float linear; performance = rgba8Unorm linear
-        // (same light domain — no sRGB decode).
+        // sample(): quality = rgba16Float linear; performance = rgba8Unorm_srgb
+        // (hardware decodes to the same linear light domain).
         float4 c;
         if (u.mode.x > 0.5) {
             // Quality: 4x linear float16 + 4×4 separable binomial in screen space.
@@ -492,7 +539,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             }
             c *= (1.0 / 64.0);
         } else {
-            // Performance: 2x linear 8-bit — hardware bilinear, already linear light.
+            // Performance: 2x sRGB 8-bit — hardware bilinear in decoded linear light.
             // Multi-tap when clearly minifying (entrance scale / zoom).
             float2 texSize = float2(atlas.get_width(), atlas.get_height());
             float2 uvDx = dfdx(in.uv);
@@ -514,7 +561,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // Pressed brightness is a real premultiplied opacity, not an RGB-only
         // darkening. Keeping RGB and alpha on the same curve prevents a launched
         // icon from appearing to brighten when its dismissal fade begins.
-        return c * (in.alpha * pressed);
+        return ql_present(c * (in.alpha * pressed), 1.0 - u.mode.x);
     }
 
     fragment float4 ql_text_fragment(
@@ -523,8 +570,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         sampler samp [[sampler(0)]],
         constant Uniforms &u [[buffer(1)]])
     {
-        // Text atlas is already linear Display P3 + premultiplied alpha, exactly
-        // like icon textures. Filtering and blending therefore stay linear.
+        // Atlas already matches the drawable (linear float16 or gamma P3).
+        // Do not run ql_present: it would decode encoded 8-bit coverage twice.
         return atlas.sample(samp, in.uv) * in.alpha;
     }
     """
@@ -670,7 +717,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private func updateReorderDestination(at point: CGPoint) {
         guard let source = dragSource,
               didDrag,
-              !store.isSearching,
+              store.allowsUserLayoutEditing,
               store.openedFolderID == nil,
               contentTransitionPhase == .idle else {
             return
@@ -802,8 +849,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if isDragCancelledByLayout {
             discardCancelledDrag()
         }
-        resourcePrewarmSignature = nil
-        scheduleResourcePrewarmingIfNeeded(prune: true)
+        // Page-turn publishes pageOffset many times a second. Replanning the
+        // icon window on each event hitchs the trackpad gesture.
+        if !store.isPageGestureActive {
+            resourcePrewarmSignature = nil
+            scheduleResourcePrewarmingIfNeeded(prune: true)
+        }
         startDisplayLink()
         needsDisplay = true
     }
@@ -1083,7 +1134,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let folderStore = folderIconTextures
         let preset = GridLayoutPreset.current
         let scale = windowScale
-        let labelApps = textAtlasApps(for: items)
+        let labelApps = textAtlasApps(for: residentTextAtlasItems())
         let textSignature = TextAtlasSignature(
             apps: labelApps,
             scale: scale,
@@ -1420,6 +1471,25 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     // MARK: Search transition
 
+    /// Root tiles, every app (including folder members), and folder titles.
+    /// Resident quality / performance keep this set so view swaps do not
+    /// rebuild the atlas on the first fade-in frame.
+    private func residentTextAtlasItems() -> [LaunchpadItem] {
+        var items: [LaunchpadItem] = []
+        var seen = Set<String>()
+        func append(_ item: LaunchpadItem) {
+            guard seen.insert(item.id).inserted else { return }
+            items.append(item)
+        }
+        for item in store.launchpadItems {
+            append(item)
+        }
+        for app in store.apps {
+            append(.app(app))
+        }
+        return items
+    }
+
     private func textAtlasApps(for items: [LaunchpadItem]) -> [AppInfo] {
         var result: [AppInfo] = []
         var seen = Set<String>()
@@ -1433,8 +1503,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             case .app(let app):
                 append(app)
             case .folder(let folder):
-                // Closed folders only show the folder title. Member names are
-                // baked when the folder is opened (`displayedItems` become those apps).
                 let memberURL = folder.appIDs.lazy.compactMap { self.store.app(withID: $0)?.url }.first
                     ?? URL(fileURLWithPath: "/Applications")
                 append(
@@ -1666,7 +1734,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 labelItems = itemsForPages(around: labelPage, radius: 1, in: displayedItems)
             }
         } else {
-            labelItems = displayedItems
+            // Keep every app + folder title resident so opening/closing a
+            // folder does not rebuild the quality atlas on the fade-in frame.
+            labelItems = residentTextAtlasItems()
         }
         let labelApps = textAtlasApps(for: labelItems)
         if lastTextSignature?.matches(labelApps, scale: scale, options: textAtlasOptions) != true,
@@ -1676,9 +1746,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 scale: scale,
                 options: textAtlasOptions
             )
-            // Full-catalog atlases are built on the prewarm queue. Doing them
-            // here freezes Settings when switching to performance / quality.
-            if textAtlasOptions.fitToContent || !store.isApplyingRenderQuality {
+            // Full-catalog icon bakes stay on the prewarm queue. Text is cheap
+            // enough to rebuild immediately so quality-mode labels do not sit
+            // on the previous 1:1 atlas until icons finish.
+            if textAtlasOptions.fitToContent
+                || !store.isApplyingRenderQuality
+                || textAtlas.sheets.isEmpty {
                 textAtlas.rebuild(with: labelApps, scale: scale, options: textAtlasOptions)
                 lastTextSignature = textSignature
             }
@@ -1694,12 +1767,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         if contentTransitionPhase != .fadingOut {
             let pageTarget = store.isPageGestureActive ? store.pageOffset : store.targetPage
-            let distance = pageTarget - currentPageOffset
-            if abs(distance) > 0.0005 {
-                let k = store.isPageGestureActive ? 56.0 : pageSpringResponse
-                currentPageOffset += distance * (1.0 - exp(-dt * k))
-            } else {
+            if store.isPageGestureActive {
+                // Trackpad/pan must follow 1:1. A spring here lags noisy deltas
+                // and the grid looks like it is shaking.
                 currentPageOffset = pageTarget
+            } else {
+                let distance = pageTarget - currentPageOffset
+                if abs(distance) > 0.0005 {
+                    currentPageOffset += distance * (1.0 - exp(-dt * pageSpringResponse))
+                } else {
+                    currentPageOffset = pageTarget
+                }
             }
         }
 
@@ -1731,8 +1809,16 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let presentAlpha = Float(max(contentAlpha, 0))
         let gridAlpha = presentAlpha * max(contentTransitionAlpha, 0)
         guard gridAlpha > 0.001 else {
-            clearDrawableIfAvailable()
-            stopDisplayLinkIfIdle()
+            // A folder/search swap ends fade-out at alpha 0 in the same
+            // draw. Clearing here blanks the layer until the next atlas
+            // rebuild finishes — quality text bake made that a long hitch.
+            if contentTransitionPhase == .idle {
+                clearDrawableIfAvailable()
+                stopDisplayLinkIfIdle()
+            } else {
+                startDisplayLink()
+                needsDisplay = true
+            }
             return
         }
 
@@ -1796,6 +1882,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         var uniforms = FrameUniforms(
             viewport: SIMD2(Float(bounds.width), Float(bounds.height)),
+            drawable: SIMD2(Float(drawableSize.width), Float(drawableSize.height)),
             mode: SIMD2(IconRenderQuality.current.shaderQualityMode, 0)
         )
 
@@ -2367,20 +2454,28 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 if showLabels,
                    let label = textAtlas.layouts[itemID],
                    labelsBySheet.indices.contains(label.sheet) {
+                    let snapToPixels = abs(itemScale - 1) < 0.001
                     let lc = CGPoint(
                         x: c.x,
                         y: c.y + metrics.iconSize * itemScale * 0.5
                             + 6 + label.heightPoints * 0.5 * itemScale
                     )
+                    // Resting: size is an integer framebuffer pixel count so the
+                    // vertex shader can snap the origin without stretching UVs.
+                    // Animation keeps the point size and skips the snap.
+                    let size = snapToPixels
+                        ? pixelAlignedLabelSize(label)
+                        : CGSize(
+                            width: label.widthPoints * itemScale,
+                            height: label.heightPoints * itemScale
+                        )
                     labelsBySheet[label.sheet].append(
                         .label(
                             center: lc,
-                            size: CGSize(
-                                width: label.widthPoints * itemScale,
-                                height: label.heightPoints * itemScale
-                            ),
+                            size: size,
                             uv: label.uv,
-                            alpha: drawnAlpha * 0.9
+                            alpha: drawnAlpha * 0.95,
+                            snapToPixels: snapToPixels
                         )
                     )
                 }
@@ -2398,6 +2493,28 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     private var windowScale: CGFloat {
         window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    /// Actual framebuffer pixels per view point. Prefer drawable metrics over
+    /// `backingScaleFactor` so a 1:1 label covers an integer number of pixels
+    /// even if the layer scale and window scale briefly disagree.
+    private var pixelsPerPoint: CGSize {
+        let fallback = max(windowScale, 1)
+        let scaleX = drawableSize.width / max(bounds.width, 1)
+        let scaleY = drawableSize.height / max(bounds.height, 1)
+        return CGSize(
+            width: scaleX >= 0.5 ? scaleX : fallback,
+            height: scaleY >= 0.5 ? scaleY : fallback
+        )
+    }
+
+    /// Display size whose framebuffer coverage equals the atlas texel count.
+    private func pixelAlignedLabelSize(_ label: LabelLayout) -> CGSize {
+        let scale = pixelsPerPoint
+        return CGSize(
+            width: CGFloat(label.widthPixels) / scale.width,
+            height: CGFloat(label.heightPixels) / scale.height
+        )
     }
 
     override func layout() {
@@ -2441,7 +2558,23 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         didDrag = false
         dragDestination = nil
         isPanningPage = false
+        pageIndicatorClick = false
         panLastPoint = dragStart
+
+        if LaunchpadFieldHitArea.rect(in: bounds).contains(dragStart) {
+            return
+        }
+        if LaunchpadPageIndicatorHitArea.isEnabled(
+            pageCount: store.pageCount,
+            isSearching: store.isSearching
+        ), LaunchpadPageIndicatorHitArea.rect(
+            in: bounds,
+            pageCount: store.pageCount,
+            currentPage: store.currentPage
+        ).contains(dragStart) {
+            pageIndicatorClick = true
+            return
+        }
 
         if contentTransitionPhase != .idle {
             isPanningPage = true
@@ -2473,7 +2606,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     x: dragPoint.x - iconCenter.x,
                     y: dragPoint.y - iconCenter.y
                 )
-                startDisplayLink()
+                if store.allowsUserLayoutEditing {
+                    startDisplayLink()
+                }
                 needsDisplay = true
                 return
             }
@@ -2498,20 +2633,42 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard contentTransitionPhase == .idle else { return nil }
         let point = convert(event.locationInWindow, from: nil)
-        let metrics = GridMetrics(size: bounds.size)
-        guard let hit = metrics.hitTest(point: point, pageOffset: interactionPageOffset) else {
+        if LaunchpadFieldHitArea.rect(in: bounds).contains(point) {
             return nil
         }
-        let index = hit.page * store.pageCapacity + hit.localIndex
-        guard displayedItems.indices.contains(index) else { return nil }
-
-        if case .folder(let folder) = displayedItems[index] {
-            contextMenuApp = nil
-            contextMenuFolder = folder
-            return makeFolderContextMenu(for: folder)
+        if LaunchpadPageIndicatorHitArea.isEnabled(
+            pageCount: store.pageCount,
+            isSearching: store.isSearching
+        ), LaunchpadPageIndicatorHitArea.rect(
+            in: bounds,
+            pageCount: store.pageCount,
+            currentPage: store.currentPage
+        ).contains(point) {
+            return nil
         }
-        guard case .app(let app) = displayedItems[index] else { return nil }
 
+        let metrics = GridMetrics(size: bounds.size)
+        if let hit = metrics.hitTest(point: point, pageOffset: interactionPageOffset) {
+            let index = hit.page * store.pageCapacity + hit.localIndex
+            if displayedItems.indices.contains(index) {
+                if case .folder(let folder) = displayedItems[index] {
+                    contextMenuApp = nil
+                    contextMenuFolder = folder
+                    return makeFolderContextMenu(for: folder)
+                }
+                if case .app(let app) = displayedItems[index] {
+                    return makeAppContextMenu(for: app)
+                }
+            }
+        }
+
+        guard !store.isSearching else { return nil }
+        contextMenuApp = nil
+        contextMenuFolder = nil
+        return makeLayoutSelectorMenu()
+    }
+
+    private func makeAppContextMenu(for app: AppInfo) -> NSMenu {
         contextMenuFolder = nil
         contextMenuApp = app
         store.focusApp(id: app.id)
@@ -2538,7 +2695,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             folderSubmenu.addItem(item)
         }
         moveToFolderItem.submenu = folderSubmenu
-        moveToFolderItem.isEnabled = !store.orderedFolders.isEmpty
+        moveToFolderItem.isEnabled = store.allowsUserLayoutEditing && !store.orderedFolders.isEmpty
         menu.addItem(moveToFolderItem)
 
         if currentFolderID != nil {
@@ -2548,6 +2705,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 keyEquivalent: ""
             )
             removeItem.target = self
+            removeItem.isEnabled = store.allowsUserLayoutEditing
         }
         menu.addItem(.separator())
         let hideItem = menu.addItem(withTitle: "隐藏", action: #selector(hideContextMenuApp), keyEquivalent: "")
@@ -2556,6 +2714,62 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             item.target = self
         }
         return menu
+    }
+
+    private func makeLayoutSelectorMenu() -> NSMenu {
+        let menu = NSMenu(title: "布局")
+
+        let userHeader = NSMenuItem(title: "用户布局", action: nil, keyEquivalent: "")
+        userHeader.isEnabled = false
+        menu.addItem(userHeader)
+        for profile in store.layoutProfiles {
+            let item = NSMenuItem(
+                title: profile.name,
+                action: #selector(selectLayoutFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = LaunchpadLayoutSelectorID.user(profile.id)
+            item.state = (store.layoutMode.isUser && store.activeLayoutProfileID == profile.id) ? .on : .off
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        let autoHeader = NSMenuItem(title: "自动布局", action: nil, keyEquivalent: "")
+        autoHeader.isEnabled = false
+        menu.addItem(autoHeader)
+        for kind in LaunchpadAutoLayoutKind.allCases {
+            let item = NSMenuItem(
+                title: kind.title,
+                action: #selector(selectLayoutFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = LaunchpadLayoutSelectorID.auto(kind)
+            if case .auto(let current) = store.layoutMode, current == kind {
+                item.state = .on
+            }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func selectLayoutFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        do {
+            try store.selectLayoutSelector(id)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "无法切换布局"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "好")
+            if let window {
+                alert.beginSheetModal(for: window)
+            } else {
+                alert.runModal()
+            }
+        }
     }
 
     private func makeFolderContextMenu(for folder: AppFolder) -> NSMenu {
@@ -2602,6 +2816,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             QLaunchAppLauncher.open(app)
         }
+        store.recordAppLaunch(app)
     }
 
     @objc private func revealContextMenuApp() {
@@ -2707,6 +2922,26 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
         if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
 
+        if !store.allowsUserLayoutEditing,
+           draggedAppID != nil,
+           !isPanningPage,
+           didDrag {
+            draggedAppID = nil
+            dragSource = nil
+            isPanningPage = true
+            store.beginPagePan()
+            startDisplayLink()
+            needsDisplay = true
+            return
+        }
+
+        if pageIndicatorClick {
+            store.selectPage(at: point, in: bounds, scrubbing: true)
+            startDisplayLink()
+            needsDisplay = true
+            return
+        }
+
         if store.openedFolderID != nil, !isPanningPage {
             updateEdgePageDirection(for: point)
             updateFolderDrag(at: point)
@@ -2741,8 +2976,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             edgePageDirection = 0
             dragHoverTargetID = nil
             isPanningPage = false
+            pageIndicatorClick = false
             store.setFolderDragState(isDragging: false)
             needsDisplay = true
+        }
+        if pageIndicatorClick {
+            let point = convert(event.locationInWindow, from: nil)
+            store.selectPage(at: point, in: bounds, scrubbing: true)
+            startDisplayLink()
+            return
         }
         if isDragCancelledByLayout {
             if isPanningPage {
@@ -2757,6 +2999,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             if store.openedFolderID != nil {
                 if !didDrag {
                     store.exitFolder()
+                }
+                return
+            }
+            // Search results: a blank click clears the query and returns to the
+            // page that was visible before search. A drag still pans results.
+            if store.isSearching {
+                if !didDrag {
+                    store.updateSearch("")
                 }
                 return
             }
@@ -2782,6 +3032,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 return
             }
             guard let app = store.app(withID: draggedAppID) else { return }
+            store.recordAppLaunch(app)
             NotificationCenter.default.post(
                 name: .qlaunchpadDismiss,
                 object: nil,
@@ -2835,6 +3086,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 return
             }
             guard case .app(let app) = item else { return }
+            store.recordAppLaunch(app)
             NotificationCenter.default.post(
                 name: .qlaunchpadDismiss,
                 object: nil,
@@ -2844,6 +3096,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 QLaunchAppLauncher.open(app)
             }
         }
+    }
+
+    override func wantsScrollEventsForSwipeTracking(on axis: NSEvent.GestureAxis) -> Bool {
+        axis == .horizontal
+    }
+
+    override func wantsForwardedScrollEvents(for axis: NSEvent.GestureAxis) -> Bool {
+        axis == .horizontal
     }
 
     override func scrollWheel(with event: NSEvent) {
