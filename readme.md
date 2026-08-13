@@ -1,4 +1,4 @@
-# QLaunch
+# 🚀 QLaunch
 
 简单、高性能的 macOS Launchpad 替代方案。设计师级别图标高质量渲染、120Hz 高帧率、 液态玻璃、过渡动画。
 
