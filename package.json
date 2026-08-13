@@ -1,7 +1,7 @@
 {
   "name": "qlaunchpad",
-  "version": "1.0.0",
-  "buildNumber": 4,
+  "version": "1.0.1",
+  "buildNumber": 5,
   "private": true,
   "description": "QLaunch — 简单高性能的 macOS Launchpad",
   "type": "module",

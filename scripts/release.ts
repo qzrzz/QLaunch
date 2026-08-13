@@ -8,6 +8,7 @@
  * 4. 生成 QLaunch-<version>.dmg（新用户安装）
  * 5. 基于本机 release/ 历史做 delta，调用 generate_appcast 写出 appcast.xml
  * 6. 上传 GitHub Release：DMG、ZIP、notes、appcast、delta
+ * 7. 写出 docs/download.json（及 web/public/download.json）供官网直链安装包
  *
  * 应用检查更新的 feed：
  *   https://github.com/qzrzz/QLaunch/releases/latest/download/appcast.xml
@@ -30,7 +31,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   SPARKLE_FEED_URL,
   SPARKLE_PUBLIC_ED_KEY,
@@ -54,6 +55,29 @@ const RELEASE_CACHE_ARCHIVES_DIR = join(RELEASE_CACHE_DIR, "archives");
 const RELEASE_CACHE_APPCAST_PATH = join(RELEASE_CACHE_DIR, "appcast.xml");
 const RELEASE_CACHE_MANIFEST_PATH = join(RELEASE_CACHE_DIR, "manifest.json");
 const MAX_DELTA_BASELINES = 3;
+const DOWNLOAD_JSON_PATHS = [
+  join(ROOT_DIR, "docs/download.json"),
+  join(ROOT_DIR, "web/public/download.json"),
+];
+
+interface DownloadAssetInfo {
+  name: string;
+  url: string;
+  size: number;
+  sha256: string;
+}
+
+interface DownloadManifest {
+  schemaVersion: 1;
+  name: "QLaunch";
+  version: string;
+  build: string;
+  tag: string;
+  publishedAt: string;
+  htmlUrl: string;
+  dmg: DownloadAssetInfo;
+  zip: DownloadAssetInfo;
+}
 
 interface ReleaseCacheEntry {
   version: string;
@@ -424,6 +448,62 @@ async function persistReleaseCache(
   );
 }
 
+function githubAssetUrl(repository: string, tag: string, name: string): string {
+  return "https://github.com/" + repository + "/releases/download/" + tag + "/" + name;
+}
+
+async function describeDownloadAsset(
+  path: string,
+  repository: string,
+  tag: string,
+): Promise<DownloadAssetInfo> {
+  if (!existsSync(path) || Bun.file(path).size === 0) {
+    throw new Error("无法写入官网下载信息：安装包不存在 " + path);
+  }
+  const name = basename(path);
+  return {
+    name,
+    url: githubAssetUrl(repository, tag, name),
+    size: Bun.file(path).size,
+    sha256: await createFileSha256(path),
+  };
+}
+
+async function writeDownloadManifest(options: {
+  version: string;
+  build: string;
+  repository: string;
+  dmgPath: string;
+  zipPath: string;
+}): Promise<void> {
+  const { version, build, repository, dmgPath, zipPath } = options;
+  const tag = "v" + version;
+  const manifest: DownloadManifest = {
+    schemaVersion: 1,
+    name: "QLaunch",
+    version,
+    build,
+    tag,
+    publishedAt: new Date().toISOString(),
+    htmlUrl: "https://github.com/" + repository + "/releases/tag/" + tag,
+    dmg: await describeDownloadAsset(dmgPath, repository, tag),
+    zip: await describeDownloadAsset(zipPath, repository, tag),
+  };
+
+  const body = JSON.stringify(manifest, null, 2) + "\n";
+  for (const path of DOWNLOAD_JSON_PATHS) {
+    mkdirSync(dirname(path), { recursive: true });
+    const temporaryPath = path + "." + process.pid + ".tmp";
+    try {
+      await Bun.write(temporaryPath, body);
+      renameSync(temporaryPath, path);
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+    console.log("▸ 已写入官网下载信息: " + path);
+  }
+}
+
 function listGeneratedDeltaPaths(): string[] {
   if (!existsSync(UPDATES_DIR)) return [];
   return readdirSync(UPDATES_DIR)
@@ -621,8 +701,15 @@ async function main(): Promise<void> {
       env,
     );
     await persistReleaseCache(version, buildNumber, "v" + version, zipPath, appcastPath);
+    await writeDownloadManifest({
+      version,
+      build: buildNumber,
+      repository,
+      dmgPath,
+      zipPath,
+    });
   } else {
-    console.log("ℹ️ 已跳过 GitHub Release 与 release/ 缓存（--no-publish）");
+    console.log("ℹ️ 已跳过 GitHub Release、release/ 缓存与官网 download.json（--no-publish）");
   }
 }
 
