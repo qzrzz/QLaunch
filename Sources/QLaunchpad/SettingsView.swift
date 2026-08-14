@@ -926,28 +926,56 @@ private struct AboutSettingsView: View {
     }
 
     private var versionCard: some View {
-        aboutCard(header: "版本") {
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.blue)
-                    .frame(width: 22)
+        aboutCard(header: "软件更新") {
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.blue)
+                        .frame(width: 22)
 
-                Text(versionLabel)
-                    .font(.body)
-                    .textSelection(.enabled)
+                    Text(versionLabel)
+                        .font(.body)
+                        .textSelection(.enabled)
 
-                Spacer(minLength: 12)
+                    Spacer(minLength: 12)
 
-                Button("检查更新") {
-                    updater.checkForUpdates()
+                    Button("检查更新") {
+                        updater.checkForUpdates()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!updater.isCheckEnabled)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(!updater.isCheckEnabled)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+
+                aboutDivider()
+
+                HStack(spacing: 12) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.blue)
+                        .frame(width: 22)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("自动检查更新")
+                        Text("启动时静默检查，之后按计划后台检查")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 12)
+
+                    Toggle("自动检查更新", isOn: $updater.automaticallyChecksForUpdates)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
         }
     }
 
