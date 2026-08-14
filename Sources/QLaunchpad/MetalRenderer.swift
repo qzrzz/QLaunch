@@ -2166,6 +2166,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         encoder.endEncoding()
         commandBuffer.present(drawable)
+        // A fade presentation intentionally primes at alpha 0, so its first
+        // frame takes this clear-only path. It must still complete the same
+        // first-frame handshake as a frame containing sprites; otherwise the
+        // panel stays on the wallpaper forever and the fade never starts.
+        attachFirstFrameCompletion(to: commandBuffer)
         commandBuffer.commit()
     }
 
