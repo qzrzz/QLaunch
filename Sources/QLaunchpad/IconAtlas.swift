@@ -20,6 +20,9 @@ private var iconTextureRasterScale: CGFloat {
 final class IconTextureStore: @unchecked Sendable {
     private struct CacheKey: Hashable {
         let appID: String
+        /// The same stable app ID may resolve to another installed bundle after
+        /// a rescan. Never serve the previous bundle's pixels for the new path.
+        let sourcePath: String
         let pixelSize: Int
         /// Avoid reusing a texture when quality/format flips at the same size.
         let quality: String
@@ -29,8 +32,8 @@ final class IconTextureStore: @unchecked Sendable {
     private let iconCache = AppIconCache()
     private let cacheLock = NSLock()
     private var cache: [CacheKey: MTLTexture] = [:]
-    /// In-flight background bakes (appID|quality|pixelSize).
-    private var inflightBakes = Set<String>()
+    /// In-flight background bakes use the same complete identity as the cache.
+    private var inflightBakes = Set<CacheKey>()
     /// When non-nil, only these app IDs may be baked or retained (page window).
     private var allowedAppIDs: Set<String>?
     // Serial: NSGraphicsContext / CG drawing is not safe across concurrent workers.
@@ -90,10 +93,12 @@ final class IconTextureStore: @unchecked Sendable {
     }
 
     func rebuild(with apps: [AppInfo]) {
-        let ids = Set(apps.map(\.id))
+        let sourcePaths = Dictionary(uniqueKeysWithValues: apps.map {
+            ($0.id, $0.resourceSourcePath)
+        })
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        for key in cache.keys where !ids.contains(key.appID) {
+        for key in cache.keys where sourcePaths[key.appID] != key.sourcePath {
             cache.removeValue(forKey: key)
         }
     }
@@ -124,11 +129,7 @@ final class IconTextureStore: @unchecked Sendable {
             cache.removeValue(forKey: key)
         }
         // Drop stale in-flight work for apps that left the window.
-        inflightBakes = inflightBakes.filter { token in
-            let appID = token.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
-                .first.map(String.init) ?? ""
-            return appIDs.contains(appID)
-        }
+        inflightBakes = inflightBakes.filter { appIDs.contains($0.appID) }
         cacheLock.unlock()
     }
 
@@ -145,11 +146,7 @@ final class IconTextureStore: @unchecked Sendable {
         let requestedPixelSize = Int(
             GridLayoutPreset.current.iconPointSize * quality.rasterScale
         )
-        let key = CacheKey(
-            appID: app.id,
-            pixelSize: requestedPixelSize,
-            quality: quality.rawValue
-        )
+        let key = cacheKey(for: app, pixelSize: requestedPixelSize, quality: quality.rawValue)
         cacheLock.lock()
         defer { cacheLock.unlock() }
         guard pixelSize == requestedPixelSize, cachedQualityRaw == quality.rawValue else {
@@ -169,16 +166,7 @@ final class IconTextureStore: @unchecked Sendable {
         let requestedPixelSize = Int(
             GridLayoutPreset.current.iconPointSize * quality.rasterScale
         )
-        let key = CacheKey(
-            appID: app.id,
-            pixelSize: requestedPixelSize,
-            quality: quality.rawValue
-        )
-        let flight = bakeKey(
-            appID: app.id,
-            pixelSize: requestedPixelSize,
-            quality: quality.rawValue
-        )
+        let key = cacheKey(for: app, pixelSize: requestedPixelSize, quality: quality.rawValue)
         for _ in 0..<750 {
             cacheLock.lock()
             if pixelSize == requestedPixelSize,
@@ -187,7 +175,7 @@ final class IconTextureStore: @unchecked Sendable {
                 cacheLock.unlock()
                 return existing
             }
-            let waiting = inflightBakes.contains(flight)
+            let waiting = inflightBakes.contains(key)
             cacheLock.unlock()
             if !waiting {
                 return texture(for: app, allowCreate: true)
@@ -209,11 +197,7 @@ final class IconTextureStore: @unchecked Sendable {
             cache.removeAll(keepingCapacity: true)
             inflightBakes.removeAll(keepingCapacity: true)
         }
-        let key = CacheKey(
-            appID: app.id,
-            pixelSize: requestedPixelSize,
-            quality: quality.rawValue
-        )
+        let key = cacheKey(for: app, pixelSize: requestedPixelSize, quality: quality.rawValue)
         if let existing = cache[key] {
             cacheLock.unlock()
             return existing
@@ -225,11 +209,6 @@ final class IconTextureStore: @unchecked Sendable {
             return nil
         }
 
-        let flight = bakeKey(
-            appID: app.id,
-            pixelSize: requestedPixelSize,
-            quality: quality.rawValue
-        )
         cacheLock.lock()
         if let allowed = allowedAppIDs, !allowed.contains(app.id) {
             cacheLock.unlock()
@@ -242,37 +221,41 @@ final class IconTextureStore: @unchecked Sendable {
         // The draw path may have enqueued the same miss immediately before a
         // resident prewarm task reaches it. Let the first producer own the bake
         // so opening a window never doubles the expensive icon raster work.
-        if inflightBakes.contains(flight) {
+        if inflightBakes.contains(key) {
             cacheLock.unlock()
             return nil
         }
-        inflightBakes.insert(flight)
+        inflightBakes.insert(key)
         cacheLock.unlock()
 
         let texture = bakeAndStore(app: app, pixelSize: requestedPixelSize, quality: quality)
         cacheLock.lock()
-        inflightBakes.remove(flight)
+        inflightBakes.remove(key)
         cacheLock.unlock()
         return texture
     }
 
-    private func bakeKey(appID: String, pixelSize: Int, quality: String) -> String {
-        "\(appID)|\(quality)|\(pixelSize)"
+    private func cacheKey(for app: AppInfo, pixelSize: Int, quality: String) -> CacheKey {
+        CacheKey(
+            appID: app.id,
+            sourcePath: app.resourceSourcePath,
+            pixelSize: pixelSize,
+            quality: quality
+        )
     }
 
     private func enqueueBake(app: AppInfo, pixelSize: Int, quality: IconRenderQuality) {
-        let flight = bakeKey(appID: app.id, pixelSize: pixelSize, quality: quality.rawValue)
+        let key = cacheKey(for: app, pixelSize: pixelSize, quality: quality.rawValue)
         cacheLock.lock()
         if let allowed = allowedAppIDs, !allowed.contains(app.id) {
             cacheLock.unlock()
             return
         }
-        if inflightBakes.contains(flight)
-            || cache[CacheKey(appID: app.id, pixelSize: pixelSize, quality: quality.rawValue)] != nil {
+        if inflightBakes.contains(key) || cache[key] != nil {
             cacheLock.unlock()
             return
         }
-        inflightBakes.insert(flight)
+        inflightBakes.insert(key)
         cacheLock.unlock()
 
         bakeQueue.async { [weak self] in
@@ -285,7 +268,7 @@ final class IconTextureStore: @unchecked Sendable {
                 _ = self.bakeAndStore(app: app, pixelSize: pixelSize, quality: quality)
             }
             self.cacheLock.lock()
-            self.inflightBakes.remove(flight)
+            self.inflightBakes.remove(key)
             self.cacheLock.unlock()
             if stillAllowed {
                 self.scheduleBakeNotification()
@@ -322,11 +305,7 @@ final class IconTextureStore: @unchecked Sendable {
             quality: quality
         ) else { return nil }
 
-        let key = CacheKey(
-            appID: app.id,
-            pixelSize: requestedPixelSize,
-            quality: quality.rawValue
-        )
+        let key = cacheKey(for: app, pixelSize: requestedPixelSize, quality: quality.rawValue)
         cacheLock.lock()
         defer { cacheLock.unlock() }
         if pixelSize != requestedPixelSize || cachedQualityRaw != quality.rawValue {

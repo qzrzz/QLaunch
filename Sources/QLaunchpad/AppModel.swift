@@ -91,6 +91,9 @@ struct AppInfo: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
     let url: URL
+    /// Pre-normalized once because icon cache lookups run for every visible item
+    /// on every frame.
+    let resourceSourcePath: String
     let bundleIdentifier: String
     /// Search metadata generated once while the application catalog is built.
     /// Full pinyin and initials include polyphone variants so 音乐 matches
@@ -110,6 +113,7 @@ struct AppInfo: Identifiable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.url = url
+        self.resourceSourcePath = url.standardizedFileURL.path
         self.bundleIdentifier = bundleIdentifier
         self.pinyin = PinyinSearchMetadata.make(for: name)
         self.installedAt = installedAt
@@ -429,6 +433,10 @@ enum GridNavigationDirection {
 @MainActor
 final class AppStore: ObservableObject {
     @Published private(set) var apps: [AppInfo] = []
+    /// Stable-ID lookup used heavily by folder previews and texture planning.
+    /// `apps` is only replaced by catalog scans; reordering does not invalidate
+    /// the values stored here.
+    private var appsByID: [String: AppInfo] = [:]
     @Published private(set) var filteredApps: [AppInfo] = []
     @Published private(set) var launchpadItems: [LaunchpadItem] = []
     @Published private(set) var folders: [AppFolder] = []
@@ -655,7 +663,7 @@ final class AppStore: ObservableObject {
     }
 
     func app(withID id: String) -> AppInfo? {
-        apps.first { $0.id == id }
+        appsByID[id]
     }
 
     func folder(withID id: String) -> AppFolder? {
@@ -697,6 +705,9 @@ final class AppStore: ObservableObject {
             let hiddenBeforeReload = hiddenAppIDs
             if catalogChanged {
                 apps = result
+                appsByID = result.reduce(into: [:]) { index, app in
+                    index[app.id] = app
+                }
                 rebindAutoLayoutItemsToCurrentCatalog()
                 rebuildAutoLayoutFallbackItems()
             }
@@ -1295,7 +1306,9 @@ final class AppStore: ObservableObject {
         momentumPhase: NSEvent.Phase,
         isPrecise: Bool
     ) {
-        isKeyboardNavigationActive = false
+        if isKeyboardNavigationActive {
+            isKeyboardNavigationActive = false
+        }
 
         let began = phase.contains(.began)
         let ended = phase.contains(.ended) || phase.contains(.cancelled)
@@ -1394,7 +1407,9 @@ final class AppStore: ObservableObject {
     }
 
     private func resetPageScrollGesture() {
-        isPageGestureActive = false
+        if isPageGestureActive {
+            isPageGestureActive = false
+        }
         scrollAccumulated = 0
         scrollAxis = .undecided
         scrollAxisAccumX = 0
@@ -1435,7 +1450,9 @@ final class AppStore: ObservableObject {
     }
 
     private func applySettledPage(_ page: Double) {
-        targetPage = page
+        if targetPage != page {
+            targetPage = page
+        }
         pageOffset = page
         pageVelocity = 0
         resetPageScrollGesture()

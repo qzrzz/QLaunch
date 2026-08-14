@@ -92,6 +92,31 @@ private struct AppListSignature: Equatable, Sendable {
     }
 }
 
+/// Stable identity of the bundle data used to build icon resources. App IDs can
+/// remain unchanged when a rescan resolves the primary copy to a different path.
+private struct AppResourceSignature: Equatable, Sendable {
+    private struct Entry: Equatable, Sendable {
+        let id: String
+        let sourcePath: String
+    }
+
+    private let entries: [Entry]
+
+    init(apps: [AppInfo]) {
+        entries = apps.map {
+            Entry(id: $0.id, sourcePath: $0.resourceSourcePath)
+        }
+    }
+
+    func matches(_ apps: [AppInfo]) -> Bool {
+        guard entries.count == apps.count else { return false }
+        return zip(entries, apps).allSatisfy { entry, app in
+            entry.id == app.id
+                && entry.sourcePath == app.resourceSourcePath
+        }
+    }
+}
+
 private struct TextAtlasSignature: Equatable, Sendable {
     let apps: AppListSignature
     let scale: CGFloat
@@ -110,7 +135,7 @@ private struct TextAtlasSignature: Equatable, Sendable {
 
 /// Identity of the icon GPU cache window (catalog + visible list + page + quality).
 private struct IconPrewarmSignature: Equatable, Sendable {
-    let catalog: AppListSignature
+    let catalog: AppResourceSignature
     /// Root / folder / search list currently shown (search changes this without
     /// changing the full catalog).
     let display: AppListSignature
@@ -147,7 +172,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     private var currentPageOffset = 0.0
     private var lastRenderQuality = IconRenderQuality.current
-    private var lastCatalogSignature: AppListSignature?
+    private var lastCatalogSignature: AppResourceSignature?
+    /// Folder metadata covered by the current resource-prewarm plan. Page-only
+    /// changes must not invalidate a full-catalog resident bake.
+    private var lastResourceFolders: [AppFolder]?
     private var lastTextSignature: TextAtlasSignature?
     private var pendingTextSignature: TextAtlasSignature?
     private var textAtlasBuildTask: Task<Void, Never>?
@@ -884,10 +912,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if isDragCancelledByLayout {
             discardCancelledDrag()
         }
-        // Page-turn publishes pageOffset many times a second. Replanning the
-        // icon window on each event hitchs the trackpad gesture.
+        // Page changes and other @Published values can emit several store-change
+        // notifications for one input event. Only invalidate a completed plan
+        // when data that affects icon resources actually changed.
         if !store.isPageGestureActive {
-            resourcePrewarmSignature = nil
+            let catalogChanged = lastCatalogSignature?.matches(store.apps) != true
+            let foldersChanged = lastResourceFolders != store.folders
+            if catalogChanged || foldersChanged {
+                resourcePrewarmSignature = nil
+            }
             scheduleResourcePrewarmingIfNeeded(prune: true)
         }
         // A catalog update during first-page bake must not present a rest-pose
@@ -936,6 +969,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         iconsMissingTexture.removeAll(keepingCapacity: true)
         iconRevealStartedAt.removeAll(keepingCapacity: true)
         lastCatalogSignature = nil
+        lastResourceFolders = nil
         resourcePrewarmSignature = nil
         isResourcePrewarmingPaused = false
 
@@ -955,6 +989,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         cancelTextAtlasBuild()
         textAtlas.clear()
         lastCatalogSignature = nil
+        lastResourceFolders = nil
         lastTextSignature = nil
         resourcePrewarmSignature = nil
         lastTextureWindowPage = -1
@@ -1273,7 +1308,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard !catalog.isEmpty else { return }
 
         let signature = IconPrewarmSignature(
-            catalog: AppListSignature(apps: catalog),
+            catalog: AppResourceSignature(apps: catalog),
             display: AppListSignature(apps: catalog),
             page: -1,
             quality: IconRenderQuality.current.rawValue
@@ -1291,6 +1326,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         resourcePrewarmSignature = signature
         resourcePrewarmTask?.cancel()
         lastCatalogSignature = signature.catalog
+        lastResourceFolders = store.folders
         lastTextureWindowPage = -1
 
         if displayedItems.isEmpty {
@@ -1384,7 +1420,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let targetPage = max(0, page ?? Int(currentPageOffset.rounded()))
         let displaySignature = AppListSignature(items: items)
         let signature = IconPrewarmSignature(
-            catalog: AppListSignature(apps: catalog),
+            catalog: AppResourceSignature(apps: catalog),
             display: displaySignature,
             page: store.isSearching ? -2 : targetPage,
             quality: IconRenderQuality.current.rawValue
@@ -1417,6 +1453,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         resourcePrewarmSignature = signature
         resourcePrewarmTask?.cancel()
         lastCatalogSignature = signature.catalog
+        lastResourceFolders = store.folders
 
         if displayedItems.isEmpty {
             displayedItems = store.displayItems
@@ -1606,6 +1643,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     private func pauseResourcePrewarming() {
         isResourcePrewarmingPaused = true
+        // A matching signature is only reusable after a plan completed. If its
+        // task is still present, cancellation leaves work unfinished and the
+        // next resume must create a replacement task.
+        if resourcePrewarmTask != nil {
+            resourcePrewarmSignature = nil
+        }
         resourcePrewarmTask?.cancel()
         resourcePrewarmTask = nil
         firstPagePrepareTask?.cancel()
