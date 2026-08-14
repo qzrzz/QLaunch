@@ -655,7 +655,10 @@ final class FolderIconTextureStore: @unchecked Sendable {
     private func padImage(for preset: GridLayoutPreset) -> CGImage? {
         let pixelSize = Int(preset.iconPointSize * iconTextureRasterScale)
         let resourceName = pixelSize > 512 ? "glass-pad-1024" : "glass-pad-512"
-        guard let url = Bundle.module.url(forResource: resourceName, withExtension: "png"),
+        guard let url = QLaunchpadResources.bundle?.url(
+                  forResource: resourceName,
+                  withExtension: "png"
+              ),
               let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
         return image
