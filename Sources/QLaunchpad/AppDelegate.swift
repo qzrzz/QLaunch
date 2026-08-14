@@ -47,10 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isRecordingHotKey = false
     private var launchReason: LaunchpadLaunchReason = .user
     private var ignoreReopenUntil: Date?
+    /// Ignore Dock reopen until the first homepage icons are on screen.
+    private var ignoreLaunchReopen = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // The login-item Apple Event is only reliable while launch is in flight.
         launchReason = LaunchpadLaunchProbe.currentReason()
+        // Overlap the filesystem scan with panel / Metal setup.
+        store.load()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -115,8 +119,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // `open -a`) present the launchpad. A login-item start stays in the
         // background so it does not interrupt the desktop coming up.
         if launchReason.shouldPresentLaunchpad, launchpadPanel != nil {
-            ignoreReopenUntil = Date().addingTimeInterval(0.8)
+            ignoreLaunchReopen = true
             showLaunchpad()
+        } else if let container = containerView {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.store.waitUntilLoaded()
+                await container.metal.prepareFirstPageIcons()
+            }
         }
     }
 
@@ -147,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // The same launch can deliver reopen immediately after
         // applicationDidFinishLaunching. Ignore that echo so a user start
         // that already presented the launchpad is not toggled closed.
+        if ignoreLaunchReopen { return true }
         if let ignoreReopenUntil, Date() < ignoreReopenUntil {
             return true
         }
@@ -451,6 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         activeAnimationStyle = animationStyle
 
         store.beginPresenting()
+        containerView.metal.beginPresentationHold()
 
         launchpadPanel.setFrame(screen.frame, display: false)
         // Disable AppKit's automatic utility-window transition when the user
@@ -507,9 +519,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "animationStyle": animationStyle.rawValue
             ]
         )
-        // The launch scan is CPU-heavy even though it is detached. Keep it out
-        // of the presentation interval so icon/text prewarming and animation do
-        // not compete with filesystem and Spotlight metadata work.
+        // Refresh the catalog after the open animation. The first-page bake
+        // already waited for the initial scan so this pass does not block UI.
         DispatchQueue.main.asyncAfter(deadline: .now() + animationStyle.duration) { [weak self] in
             guard let self,
                   generation == self.presentationGeneration,
@@ -517,6 +528,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                   self.launchpadPanel.isVisible else { return }
             self.store.load()
         }
+        ignoreLaunchReopen = false
+        ignoreReopenUntil = Date().addingTimeInterval(0.8)
         isAnimating = false
         updateStatusMenu()
     }
@@ -538,6 +551,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
+        ignoreLaunchReopen = false
         isAnimating = true
         presentationGeneration &+= 1
         let generation = presentationGeneration

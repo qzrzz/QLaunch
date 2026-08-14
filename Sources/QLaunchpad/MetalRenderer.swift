@@ -155,6 +155,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// Prewarm only a sliding page window — full-catalog upload was hundreds of MB.
     private var resourcePrewarmSignature: IconPrewarmSignature?
     private var resourcePrewarmTask: Task<Void, Never>?
+    private var firstPagePrepareTask: Task<Void, Never>?
     private var isResourcePrewarmingPaused = false
     private var lastTextureWindowPage: Int = -1
     /// Low-memory only: IDs whose texture was missing on a previous drawn frame.
@@ -889,6 +890,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             resourcePrewarmSignature = nil
             scheduleResourcePrewarmingIfNeeded(prune: true)
         }
+        // A catalog update during first-page bake must not present a rest-pose
+        // frame. That drawable would flash at full opacity before fly-in.
+        guard !isHoldingPresentationPrime else { return }
         startDisplayLink()
         needsDisplay = true
     }
@@ -906,6 +910,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     @objc private func iconTexturesUpdated() {
+        guard !isHoldingPresentationPrime else { return }
         // Background bakes finished — paint without doing work on this path.
         needsDisplay = true
         startDisplayLink()
@@ -986,6 +991,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             presentFrom = store.presentationProgress
             presentTo = 0
             pauseResourcePrewarming()
+            firstFrameWaiters.removeAll(keepingCapacity: true)
+            isFirstFrameCompletionScheduled = false
+            isPrimingPresentationFrame = false
         }
         let fullDuration = showing ? style.duration : style.dismissalDuration
         presentDurationActive = fullDuration * CFTimeInterval(abs(presentTo - presentFrom))
@@ -1073,27 +1081,174 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         store.presentationProgress = progress
     }
 
+    /// True while wallpaper is up and Metal must stay hidden until a phase-0
+    /// start frame (with first-page textures) has been submitted.
+    private var isHoldingPresentationPrime: Bool {
+        isPrimingPresentationFrame && firstFrameWaiters.isEmpty
+    }
+
+    /// Stop background baking and display-link draws so first-page icons are
+    /// not painted at rest while the wallpaper is already on screen.
+    func beginPresentationHold() {
+        pauseResourcePrewarming()
+        isResourcePrewarmingPaused = true
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
     /// Submit the icon layer's presentation-start frame while the window already
-    /// shows its cached wallpaper. Icon timing starts after the GPU completes it.
+    /// shows its cached wallpaper. Icon timing starts after the first page of
+    /// textures is resident and the GPU completes that start frame.
     func submitFirstPresentationFrame(
         style: LaunchpadAnimationStyle,
         completion: @escaping () -> Void
     ) {
-        firstFrameWaiters.append(completion)
         animatingPresentation = false
         isShowingPresentation = true
         isPrimingPresentationFrame = true
         presentationStyle = style
         applyPresentationPhase(0)
-        // Do not clear textures here. Resume residency so a second open can paint
-        // from cache immediately (especially quality / performance modes).
+        beginPresentationHold()
+
+        if isFirstPageReady() {
+            firstFrameWaiters.append(completion)
+            beginPrimedPresentationDraw()
+            return
+        }
+
+        firstPagePrepareTask?.cancel()
+        firstPagePrepareTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.store.waitUntilLoaded()
+            guard !Task.isCancelled, self.isPrimingPresentationFrame else { return }
+            await self.prepareFirstPageIcons()
+            guard !Task.isCancelled,
+                  self.isPrimingPresentationFrame,
+                  self.store.presentation == .presenting else { return }
+            // Re-assert the transparent start pose. Catalog updates during the
+            // wait must not leak a rest-pose frame into the reveal.
+            self.applyPresentationPhase(0)
+            self.firstFrameWaiters.append(completion)
+            self.beginPrimedPresentationDraw()
+        }
+    }
+
+    private func beginPrimedPresentationDraw() {
+        applyPresentationPhase(0)
         isResourcePrewarmingPaused = false
         if !IconRenderQuality.current.usesLazyTextureLoading {
             iconTextures.setAllowedAppIDs(nil)
+            folderIconTextures.setAllowedFolderIDs(nil)
         }
         scheduleResourcePrewarmingIfNeeded(prune: IconRenderQuality.current.usesLazyTextureLoading)
         startDisplayLink()
         needsDisplay = true
+    }
+
+    private struct FirstPageIconWork {
+        var apps: [AppInfo]
+        var folders: [(folder: AppFolder, members: [AppInfo])]
+    }
+
+    /// Apps and folder previews on the page that will actually appear first.
+    private func firstPageIconWork() -> FirstPageIconWork {
+        let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
+        let capacity = max(store.pageCapacity, 1)
+        let page = max(0, Int((displayedItems.isEmpty ? store.pageOffset : currentPageOffset).rounded()))
+        let start = min(items.count, page * capacity)
+        let end = min(items.count, start + capacity)
+        guard start < end else {
+            return FirstPageIconWork(apps: [], folders: [])
+        }
+
+        var apps: [AppInfo] = []
+        var folders: [(AppFolder, [AppInfo])] = []
+        for item in items[start..<end] {
+            switch item {
+            case .app(let app):
+                apps.append(app)
+            case .folder(let folder):
+                let current = store.folder(withID: folder.id) ?? folder
+                folders.append((current, current.appIDs.compactMap { store.app(withID: $0) }))
+            }
+        }
+        return FirstPageIconWork(apps: apps, folders: folders)
+    }
+
+    private func isFirstPageReady() -> Bool {
+        let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
+        if items.isEmpty {
+            return !store.isLoading
+        }
+        let work = firstPageIconWork()
+        if work.apps.isEmpty && work.folders.isEmpty {
+            return true
+        }
+        let preset = GridLayoutPreset.current
+        return work.apps.allSatisfy { iconTextures.cachedTexture(for: $0) != nil }
+            && work.folders.allSatisfy { entry in
+                folderIconTextures.texture(
+                    for: entry.folder,
+                    members: entry.members,
+                    preset: preset,
+                    allowCreate: false
+                ) != nil
+            }
+    }
+
+    /// Bake the visible first page at user-initiated priority so presentation
+    /// never starts with missing homepage icons.
+    func prepareFirstPageIcons() async {
+        if displayedItems.isEmpty, !store.activeDisplayItems.isEmpty {
+            displayedItems = store.activeDisplayItems
+            lastDisplaySignature = AppListSignature(items: displayedItems)
+            contentTransitionPhase = .idle
+            contentTransitionAlpha = 1
+        }
+
+        let work = firstPageIconWork()
+        guard !work.apps.isEmpty || !work.folders.isEmpty else { return }
+
+        let preset = GridLayoutPreset.current
+        let alreadyReady = work.apps.allSatisfy { iconTextures.cachedTexture(for: $0) != nil }
+            && work.folders.allSatisfy { entry in
+                folderIconTextures.texture(
+                    for: entry.folder,
+                    members: entry.members,
+                    preset: preset,
+                    allowCreate: false
+                ) != nil
+            }
+        if alreadyReady { return }
+
+        if IconRenderQuality.current.usesLazyTextureLoading {
+            iconTextures.expandAllowedAppIDs(Set(work.apps.map(\.id)))
+            folderIconTextures.expandAllowedFolderIDs(Set(work.folders.map(\.folder.id)))
+        } else {
+            iconTextures.setAllowedAppIDs(nil)
+            folderIconTextures.setAllowedFolderIDs(nil)
+        }
+
+        let textureStore = iconTextures
+        let folderStore = folderIconTextures
+        let apps = work.apps
+        let folders = work.folders
+        await Task.detached(priority: .userInitiated) {
+            for app in apps {
+                guard !Task.isCancelled else { return }
+                autoreleasepool { _ = textureStore.ensureTexture(for: app) }
+            }
+            for entry in folders {
+                guard !Task.isCancelled else { return }
+                autoreleasepool {
+                    _ = folderStore.ensureTexture(
+                        for: entry.folder,
+                        members: entry.members,
+                        preset: preset
+                    )
+                }
+            }
+        }.value
     }
 
     /// Prewarm icon GPU resources according to the active render-quality profile.
@@ -1115,7 +1270,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// Original-style full-catalog upload for quality & performance modes.
     private func scheduleResidentResourcePrewarming() {
         let catalog = store.apps
-        let visibleApps = store.filteredApps
         guard !catalog.isEmpty else { return }
 
         let signature = IconPrewarmSignature(
@@ -1140,45 +1294,57 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         lastTextureWindowPage = -1
 
         if displayedItems.isEmpty {
-            displayedItems = store.displayItems
+            displayedItems = store.activeDisplayItems
             lastDisplaySignature = AppListSignature(items: displayedItems)
             contentTransitionPhase = .idle
             contentTransitionAlpha = 1
         }
 
         let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
-        let capacity = max(store.pageCapacity, 1)
-        let firstPageEnd = min(capacity, visibleApps.isEmpty ? catalog.count : visibleApps.count)
-        let firstPageApps: [AppInfo]
-        if !visibleApps.isEmpty {
-            firstPageApps = Array(visibleApps.prefix(firstPageEnd))
-        } else {
-            firstPageApps = Array(catalog.prefix(firstPageEnd))
-        }
-        let firstPageIDs = Set(firstPageApps.map(\.id))
-        let remainingApps = catalog.filter { !firstPageIDs.contains($0.id) }
+        let pageWork = firstPageIconWork()
+        let firstPageAppIDs = Set(pageWork.apps.map(\.id))
+        let firstPageFolderIDs = Set(pageWork.folders.map(\.folder.id))
+        let remainingApps = catalog.filter { !firstPageAppIDs.contains($0.id) }
 
-        // Bake folder composites for the whole item list (resident).
-        var allFolders: [(AppFolder, [AppInfo])] = []
-        var seenFolders = Set<String>()
+        // Remaining folder composites after the visible first page.
+        var remainingFolders: [(AppFolder, [AppInfo])] = []
+        var seenFolders = firstPageFolderIDs
         for item in items {
             guard case .folder(let folder) = item else { continue }
             let current = store.folder(withID: folder.id) ?? folder
             guard seenFolders.insert(current.id).inserted else { continue }
             let members = current.appIDs.compactMap { store.app(withID: $0) }
-            allFolders.append((current, members))
+            remainingFolders.append((current, members))
         }
 
         let textureStore = iconTextures
         let folderStore = folderIconTextures
         let preset = GridLayoutPreset.current
+        let firstPageApps = pageWork.apps
+        let firstPageFolders = pageWork.folders
 
         resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
             for app in firstPageApps {
                 guard !Task.isCancelled else { return }
-                autoreleasepool { _ = textureStore.texture(for: app, allowCreate: true) }
+                autoreleasepool { _ = textureStore.ensureTexture(for: app) }
             }
-            for entry in allFolders {
+            for entry in firstPageFolders {
+                guard !Task.isCancelled else { return }
+                autoreleasepool {
+                    _ = folderStore.ensureTexture(
+                        for: entry.folder,
+                        members: entry.members,
+                        preset: preset
+                    )
+                }
+            }
+
+            // Reveal the visible batch once. Remaining off-page resident bakes
+            // must not wake the main thread once per completed texture.
+            guard !Task.isCancelled else { return }
+            await refreshAfterPriorityPrewarming(expectedSignature: signature)
+
+            for entry in remainingFolders {
                 guard !Task.isCancelled else { return }
                 autoreleasepool {
                     _ = folderStore.texture(
@@ -1189,11 +1355,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     )
                 }
             }
-
-            // Reveal the visible batch once. Remaining off-page resident bakes
-            // must not wake the main thread once per completed texture.
-            guard !Task.isCancelled else { return }
-            await refreshAfterPriorityPrewarming(expectedSignature: signature)
 
             for app in remainingApps {
                 guard !Task.isCancelled else { return }
@@ -1447,6 +1608,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         isResourcePrewarmingPaused = true
         resourcePrewarmTask?.cancel()
         resourcePrewarmTask = nil
+        firstPagePrepareTask?.cancel()
+        firstPagePrepareTask = nil
     }
 
     private func resumeResourcePrewarming() {
@@ -1720,6 +1883,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     // MARK: Draw
 
     func draw(in view: MTKView) {
+        // Wallpaper is already up. Do not encode a rest-pose grid until the
+        // phase-0 start frame is the one first-frame waiters will reveal.
+        if isHoldingPresentationPrime {
+            clearDrawableIfAvailable()
+            return
+        }
+
         // Layout / render-quality changes need a matching raster size. Clears
         // the previous cache when the pixel edge length changes.
         iconTextures.configure(for: GridLayoutPreset.current)
@@ -1830,7 +2000,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         // Never stick at zero alpha while the panel is on-screen.
-        if !animatingPresentation,
+        // Skip during the transparent prime frame — forcing alpha to 1 here
+        // would reveal settled icons and then replay the open animation.
+        if !isPrimingPresentationFrame,
+           !animatingPresentation,
            store.presentation != .dismissing,
            contentAlpha < 0.01,
            window?.isVisible == true {

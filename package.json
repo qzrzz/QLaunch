@@ -1,6 +1,6 @@
 {
   "name": "qlaunchpad",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "buildNumber": 7,
   "private": true,
   "description": "QLaunch — 简单高性能的 macOS Launchpad",
