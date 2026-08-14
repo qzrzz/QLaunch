@@ -1,5 +1,25 @@
 import AppKit
 
+enum QLaunchpadResources {
+    private static let bundleName = "QLaunchpad_QLaunchpad.bundle"
+
+    /// Resolve resources without using SwiftPM's generated `Bundle.module`
+    /// accessor. In a packaged app SwiftPM looks beside the `.app`, while the
+    /// resource bundle belongs in `Contents/Resources`; on another machine its
+    /// build-directory fallback is also unavailable and traps the process.
+    static var bundle: Bundle? {
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent(bundleName),
+            Bundle.main.executableURL?
+                .deletingLastPathComponent()
+                .appendingPathComponent(bundleName),
+            Bundle.main.bundleURL.appendingPathComponent(bundleName),
+        ].compactMap { $0 }
+
+        return candidates.lazy.compactMap(Bundle.init(url:)).first
+    }
+}
+
 enum QLaunchpadAppIcon {
     /// Full-color app icon (Dock / About / applicationIconImage).
     static var image: NSImage? {
@@ -31,27 +51,10 @@ enum QLaunchpadAppIcon {
     }
 
     private static func image(named name: String) -> NSImage? {
-        guard let bundle = resourceBundle,
+        guard let bundle = QLaunchpadResources.bundle,
               let url = bundle.url(forResource: name, withExtension: "png") else {
             return nil
         }
         return NSImage(contentsOf: url)
-    }
-
-    private static var resourceBundle: Bundle? {
-        let bundleName = "QLaunchpad_QLaunchpad.bundle"
-        let appCandidates = [
-            Bundle.main.resourceURL?.appendingPathComponent(bundleName),
-            Bundle.main.bundleURL.appendingPathComponent(bundleName),
-        ].compactMap { $0 }
-
-        for url in appCandidates {
-            if let bundle = Bundle(url: url) {
-                return bundle
-            }
-        }
-
-        // Fallback for `swift run` / `swift build` executable launches.
-        return Bundle.module
     }
 }
