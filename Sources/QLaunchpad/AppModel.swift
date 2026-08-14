@@ -725,6 +725,18 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Wait for the first catalog. A later rescan does not block presentation.
+    func waitUntilLoaded() async {
+        if !apps.isEmpty { return }
+        if let scanTask {
+            await scanTask.value
+            return
+        }
+        if !isLoading { return }
+        load()
+        await scanTask?.value
+    }
+
     func exportLayout(includeCatalog: Bool = true, includePaths: Bool = true) -> LaunchpadLayoutDocument {
         let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
         var seen = Set<String>()

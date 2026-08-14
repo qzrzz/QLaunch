@@ -161,6 +161,42 @@ final class IconTextureStore: @unchecked Sendable {
     /// - Parameter allowCreate: When `false`, never rasterize on the caller
     ///   thread (used by the Metal draw loop). A background bake is enqueued
     ///   instead so scrolling stays smooth.
+    /// Bake if missing. If another worker already owns this icon, wait for it
+    /// instead of returning a miss and leaving the first page incomplete.
+    func ensureTexture(for app: AppInfo) -> MTLTexture? {
+        if let cached = cachedTexture(for: app) { return cached }
+        let quality = IconRenderQuality.current
+        let requestedPixelSize = Int(
+            GridLayoutPreset.current.iconPointSize * quality.rasterScale
+        )
+        let key = CacheKey(
+            appID: app.id,
+            pixelSize: requestedPixelSize,
+            quality: quality.rawValue
+        )
+        let flight = bakeKey(
+            appID: app.id,
+            pixelSize: requestedPixelSize,
+            quality: quality.rawValue
+        )
+        for _ in 0..<750 {
+            cacheLock.lock()
+            if pixelSize == requestedPixelSize,
+               cachedQualityRaw == quality.rawValue,
+               let existing = cache[key] {
+                cacheLock.unlock()
+                return existing
+            }
+            let waiting = inflightBakes.contains(flight)
+            cacheLock.unlock()
+            if !waiting {
+                return texture(for: app, allowCreate: true)
+            }
+            Thread.sleep(forTimeInterval: 0.004)
+        }
+        return cachedTexture(for: app) ?? texture(for: app, allowCreate: true)
+    }
+
     func texture(for app: AppInfo, allowCreate: Bool = true) -> MTLTexture? {
         let quality = IconRenderQuality.current
         let requestedPixelSize = Int(
@@ -503,6 +539,50 @@ final class FolderIconTextureStore: @unchecked Sendable {
         if let existing = backgroundCache[key] { return existing }
         backgroundCache[key] = texture
         return texture
+    }
+
+    func ensureTexture(
+        for folder: AppFolder,
+        members: [AppInfo],
+        preset: GridLayoutPreset
+    ) -> MTLTexture? {
+        if let cached = texture(
+            for: folder,
+            members: members,
+            preset: preset,
+            allowCreate: false
+        ) {
+            return cached
+        }
+        let quality = IconRenderQuality.current
+        let previewMembers = Array(members.prefix(9))
+        guard !previewMembers.isEmpty else { return nil }
+        let pixelSize = Int(preset.iconPointSize * quality.rasterScale)
+        let key = CacheKey(
+            folderID: folder.id,
+            appIDs: previewMembers.map(\.id),
+            pixelSize: pixelSize,
+            quality: quality.rawValue
+        )
+        for _ in 0..<750 {
+            cacheLock.lock()
+            if let existing = cache[key] {
+                cacheLock.unlock()
+                return existing
+            }
+            let waiting = inflightBakes[key] == cacheGeneration
+            cacheLock.unlock()
+            if !waiting {
+                return texture(
+                    for: folder,
+                    members: members,
+                    preset: preset,
+                    allowCreate: true
+                )
+            }
+            Thread.sleep(forTimeInterval: 0.004)
+        }
+        return texture(for: folder, members: members, preset: preset, allowCreate: true)
     }
 
     func texture(
