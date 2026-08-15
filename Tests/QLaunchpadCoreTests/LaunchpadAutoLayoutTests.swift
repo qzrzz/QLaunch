@@ -116,6 +116,29 @@ final class LaunchpadAutoLayoutTests: XCTestCase {
         XCTAssertFalse(LaunchpadLayoutMode.auto(.recentlyUsed).isUser)
     }
 
+    func testDragHintMessageMatchesCurrentSortingPhrase() {
+        XCTAssertEqual(
+            LaunchpadAutoLayoutKind.installDateDescending.dragHintMessage,
+            "当前在按安装时间排序，如果要拖拽排序，在空白处右键选择用户布局"
+        )
+        XCTAssertEqual(
+            LaunchpadAutoLayoutKind.installDateAscending.sortingPhrase,
+            "按安装时间排序"
+        )
+        XCTAssertEqual(
+            LaunchpadAutoLayoutKind.recentlyUsed.dragHintMessage,
+            "当前在按最近使用排序，如果要拖拽排序，在空白处右键选择用户布局"
+        )
+        XCTAssertEqual(
+            LaunchpadAutoLayoutKind.nameAscending.sortingPhrase,
+            "按名称排序"
+        )
+        XCTAssertEqual(
+            LaunchpadAutoLayoutKind.iconColor.dragHintMessage,
+            "当前在按图标颜色排序，如果要拖拽排序，在空白处右键选择用户布局"
+        )
+    }
+
     func testSelectorIDParse() {
         let user = LaunchpadLayoutSelectorID.parse(LaunchpadLayoutSelectorID.user("default"))
         XCTAssertEqual(user.profileID, "default")

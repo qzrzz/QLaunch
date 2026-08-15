@@ -511,6 +511,9 @@ final class AppStore: ObservableObject {
     private var layoutGeneration: UInt64 = 0
     /// Bumped by import / external reload so Metal can drop an in-flight drag.
     private(set) var dragGeneration: UInt64 = 0
+    /// Blocked icon-drags while an automatic layout is active. The hint is
+    /// shown on the second attempt so a single accidental drag stays quiet.
+    private var autoLayoutReorderHintAttempts = 0
 
     private enum PageScrollAxis {
         case undecided
@@ -885,10 +888,19 @@ final class AppStore: ObservableObject {
         if case .auto(let kind) = mode {
             scheduleAutoLayoutIfNeeded(kind)
         }
+        autoLayoutReorderHintAttempts = 0
         cancelActiveDrag()
         layoutGeneration += 1
         refreshFilteredApps(resetPage: true)
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    /// First blocked drag stays silent. The second returns the hint copy.
+    func noteBlockedAutoLayoutReorder() -> String? {
+        guard case .auto(let kind) = layoutMode, !isSearching else { return nil }
+        autoLayoutReorderHintAttempts += 1
+        guard autoLayoutReorderHintAttempts == 2 else { return nil }
+        return kind.dragHintMessage
     }
 
     func recordAppLaunch(_ app: AppInfo) {

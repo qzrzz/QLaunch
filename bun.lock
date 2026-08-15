@@ -7,6 +7,7 @@
       "dependencies": {
         "@types/node": "26.2.0",
         "qpage": "link:qpage",
+        "qrls": "link:qrls",
         "qzrzz-com": "link:qzrzz-com",
       },
     },
@@ -15,6 +16,8 @@
     "@types/node": ["@types/node@26.2.0", "https://registry.npmmirror.com/@types/node/-/node-26.2.0.tgz", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-5IviulTZeRNp2vAJ514cc/HUlY5nZ9fCbq9DMyC52BrhFZACo3nI0R7qBxhQmo/d27NFe96ur/b7Wwxklda+kg=="],
 
     "qpage": ["qpage@link:qpage", { "bin": { "qpage": "./dist/cli.js" } }],
+
+    "qrls": ["qrls@link:qrls", {}],
 
     "qzrzz-com": ["qzrzz-com@link:qzrzz-com", { "bin": { "qzrzz-com": "./publish/qzrzz-com.ts" } }],
 

@@ -62,7 +62,7 @@ export const SPARKLE_PUBLIC_ED_KEY =
   Bun.env.SPARKLE_PUBLIC_ED_KEY?.trim() || "rIu1scWZ0i+1pucGPQPhBmKpHUNjrJuiU2jDHHRAA20=";
 export const SPARKLE_FEED_URL =
   Bun.env.SPARKLE_FEED_URL?.trim() ||
-  "https://github.com/qzrzz/QLaunch/releases/latest/download/appcast.xml";
+  "https://download.qzrzz.com/qlaunch/appcast.xml";
 const SPARKLE_RPATH = "@executable_path/../Frameworks";
 
 const commandEnvironment = {

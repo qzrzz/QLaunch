@@ -105,11 +105,10 @@ export async function generateAppcast(
 if (import.meta.main) {
   const updatesDir = process.argv[2];
   if (!updatesDir) die("usage: bun scripts/generate-appcast.ts <updates-dir>");
-  const repository = process.env.GITHUB_REPOSITORY ?? "qzrzz/QLaunch";
-  const tag = process.env.RELEASE_TAG;
-  if (!tag) die("请设置 RELEASE_TAG，例如 RELEASE_TAG=v1.0.0");
+  // 正式发布时 enclosure 走 R2；凭据与前缀见 scripts/qrls-publish.ts
+  const { R2_ONLINE_URL } = await import("./qrls-publish");
   await generateAppcast(updatesDir, {
-    downloadUrlPrefix: `https://github.com/${repository}/releases/download/${tag}/`,
+    downloadUrlPrefix: `${R2_ONLINE_URL}/`,
     edKeyFile: process.env.SPARKLE_PRIVATE_KEY_FILE,
     account: process.env.SPARKLE_ACCOUNT ?? process.env.SPARKLE_KEY_ACCOUNT ?? "qjiao",
   });

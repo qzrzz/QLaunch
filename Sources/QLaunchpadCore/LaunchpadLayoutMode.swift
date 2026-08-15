@@ -20,6 +20,20 @@ public enum LaunchpadAutoLayoutKind: String, CaseIterable, Sendable, Codable, Ha
         case .iconColor: "按图标颜色排序"
         }
     }
+
+    /// Phrase used when an automatic grid blocks drag-to-reorder.
+    public var sortingPhrase: String {
+        switch self {
+        case .recentlyUsed: "按最近使用排序"
+        case .nameAscending, .nameDescending: "按名称排序"
+        case .installDateAscending, .installDateDescending: "按安装时间排序"
+        case .iconColor: "按图标颜色排序"
+        }
+    }
+
+    public var dragHintMessage: String {
+        "当前在\(sortingPhrase)，如果要拖拽排序，在空白处右键选择用户布局"
+    }
 }
 
 public enum LaunchpadLayoutMode: Equatable, Sendable {

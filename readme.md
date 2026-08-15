@@ -64,7 +64,7 @@ bun run dev               # 构建 Debug .app 并前台运行
 bun run debug             # 构建 Debug .app 并用 Instruments 打开
 bun run debug -- --record # 同上，并用 xctrace Time Profiler 直接录制
 bun run build             # 构建 Release .app、DMG、ZIP（不发布）
-bun run release           # 签名、公证并发布 GitHub Release
+bun run release           # 签名、公证，经 QRls 发布到 R2 与 GitHub
 bun run clean             # 清理构建产物
 bun run check             # 检查 Swift Package 结构
 bun run layout:export     # 导出当前网格顺序 / 文件夹 / 隐藏列表为 JSON

@@ -222,6 +222,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var didDrag = false
     private var isPanningPage = false
     private var pageIndicatorClick = false
+    /// True when this gesture started on an icon in automatic layout and was
+    /// converted to a page pan because reorder is disabled.
+    private var pendingAutoLayoutReorderHint = false
     /// View-space origin of the current empty-area page pan (1:1 with the pointer).
     private var panStartPoint: CGPoint = .zero
     private var contextMenuApp: AppInfo?
@@ -692,6 +695,18 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             startTime: CACurrentMediaTime()
         )
         startDisplayLink()
+    }
+
+    private func presentAutoLayoutReorderHintIfNeeded() {
+        guard let message = store.noteBlockedAutoLayoutReorder() else { return }
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "好")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func beginEmptyAreaPagePan(from point: CGPoint) {
@@ -2805,6 +2820,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         dragDestination = nil
         isPanningPage = false
         pageIndicatorClick = false
+        pendingAutoLayoutReorderHint = false
         panStartPoint = dragStart
 
         if LaunchpadFieldHitArea.rect(in: bounds).contains(dragStart) {
@@ -3163,6 +3179,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
            draggedAppID != nil,
            !isPanningPage,
            didDrag {
+            if case .auto = store.layoutMode {
+                pendingAutoLayoutReorderHint = true
+            }
             draggedAppID = nil
             dragSource = nil
             beginEmptyAreaPagePan(from: dragStart)
@@ -3208,6 +3227,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             dragHoverTargetID = nil
             isPanningPage = false
             pageIndicatorClick = false
+            pendingAutoLayoutReorderHint = false
             store.setFolderDragState(isDragging: false)
             needsDisplay = true
         }
@@ -3225,6 +3245,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return
         }
         if isPanningPage {
+            let shouldHintAutoLayoutReorder = pendingAutoLayoutReorderHint && didDrag
             store.endPagePan()
             startDisplayLink()
             if store.openedFolderID != nil {
@@ -3246,6 +3267,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             // pan and must not dismiss the Launchpad on mouse-up.
             if !didDrag {
                 NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
+            } else if shouldHintAutoLayoutReorder {
+                presentAutoLayoutReorderHintIfNeeded()
             }
             return
         }

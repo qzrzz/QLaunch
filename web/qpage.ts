@@ -21,6 +21,7 @@ export const page: IPageMeta = {
   metaDesc: "最流畅的 macOS 应用启动台，简单、无感、赏心悦目、开源免费，Metal 渲染",
   githubRepo: "https://github.com/qzrzz/QLaunch",
   onlineUrl: "https://qzrzz.com/QLaunch",
+  downloadBase: "https://download.qzrzz.com/qlaunch",
   mainScreenshotImage: UrlMainScreenshotImage,
   mainScreenshotVideo: UrlMainScreenshotVideo,
 };

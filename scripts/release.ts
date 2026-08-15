@@ -7,22 +7,24 @@
  * 3. notarize + staple
  * 4. 生成 QLaunch-<version>.dmg（新用户安装）
  * 5. 基于本机 release/ 历史做 delta，调用 generate_appcast 写出 appcast.xml
- * 6. 上传 GitHub Release：DMG、ZIP、notes、appcast、delta
- * 7. 写出 web/download.json 与 docs/download.json，供官网直链安装包
+ * 6. 用 QRls 发布到 R2（主源），默认同时镜像 GitHub Release；download.json 由 QRls 生成并上传
  *
  * 应用检查更新的 feed：
- *   https://github.com/qzrzz/QLaunch/releases/latest/download/appcast.xml
+ *   https://download.qzrzz.com/qlaunch/appcast.xml
  *
  * 依赖 .env：
  *   MACOS_SIGNING_IDENTITY / APPLE_* / QLAUNCHPAD_NOTARY_PROFILE
  *   SPARKLE_ACCOUNT            Keychain 账户（默认 qjiao，与内置公钥一致）
  *   SPARKLE_PRIVATE_KEY_FILE   可选，私钥备份文件；默认读钥匙串
  *   SPARKLE_BIN / SPARKLE_BIN_DIR  可选，generate_appcast 所在 bin
+ *   R2_ONLINE_URL / R2_BUCKET / R2_PATH  可选，覆盖 QRls R2 目标
+ *   PUBLISH_GITHUB=0           只发 R2、不同步 GitHub
  *
  * 用法:
  *   bun scripts/release.ts [X.Y.Z]
  *   bun scripts/release.ts [X.Y.Z] --no-publish
  *   bun scripts/release.ts [X.Y.Z] --publish-only
+ *   bun scripts/release.ts [X.Y.Z] --force
  */
 
 import {
@@ -38,18 +40,19 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import {
-  SPARKLE_FEED_URL,
   SPARKLE_PUBLIC_ED_KEY,
   buildApp,
   captureCommand,
   runCommand,
 } from "./build-app";
-import {
-  createFileSha256,
-  ensureDownloadManifest,
-  writeDownloadManifest,
-} from "./download-json";
 import { generateAppcast } from "./generate-appcast";
+import {
+  PUBLISH_GITHUB,
+  R2_ONLINE_URL,
+  SPARKLE_FEED_URL,
+  publishWithQrls,
+  r2PublicUrl,
+} from "./qrls-publish";
 import {
   isSemVer,
   readBuildNumber,
@@ -238,6 +241,14 @@ function copyFileAtomically(source: string, destination: string): void {
   }
 }
 
+async function createFileSha256(path: string): Promise<string> {
+  const hash = new Bun.CryptoHasher("sha256");
+  for await (const chunk of Bun.file(path).stream()) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
+}
+
 function readReleaseCacheManifest(): ReleaseCacheManifest {
   if (!existsSync(RELEASE_CACHE_MANIFEST_PATH)) {
     return { schemaVersion: 1, entries: [] };
@@ -337,21 +348,37 @@ async function prepareLocalDeltaBaselines(
   }
 }
 
-async function normalizeAppcastArchiveUrls(
-  path: string,
-  repository: string,
-): Promise<void> {
-  const original = readFileSync(path, "utf8");
-  const normalized = original.replace(/<item>[\s\S]*?<\/item>/g, (item): string => {
-    const version = item.match(
+/** 读取本地 Sparkle 缓存里各历史版本的完整 ZIP 地址。 */
+function readPreviousAppcastZipUrls(): Map<string, string> {
+  const urls = new Map<string, string>();
+  if (!existsSync(RELEASE_CACHE_APPCAST_PATH)) return urls;
+  const previous = readFileSync(RELEASE_CACHE_APPCAST_PATH, "utf8");
+  for (const match of previous.matchAll(/<item>[\s\S]*?<\/item>/g)) {
+    const itemVersion = match[0].match(
       /<sparkle:shortVersionString>([^<]+)<\/sparkle:shortVersionString>/,
     )?.[1];
-    if (!version || !/^[0-9A-Za-z.+-]+$/.test(version)) return item;
+    const archiveUrl = match[0].match(/<enclosure\s+url="([^"]+\.zip)"/)?.[1];
+    if (itemVersion && archiveUrl) urls.set(itemVersion, archiveUrl);
+  }
+  return urls;
+}
+
+/** 当前版本 ZIP 改写到 R2；历史 item 恢复 generate_appcast 之前的原始 URL。 */
+async function normalizeAppcastArchiveUrls(path: string, version: string): Promise<void> {
+  const original = readFileSync(path, "utf8");
+  const previousZipByVersion = readPreviousAppcastZipUrls();
+  const normalized = original.replace(/<item>[\s\S]*?<\/item>/g, (item): string => {
+    const itemVersion = item.match(
+      /<sparkle:shortVersionString>([^<]+)<\/sparkle:shortVersionString>/,
+    )?.[1];
+    if (!itemVersion || !/^[0-9A-Za-z.+-]+$/.test(itemVersion)) return item;
     const archiveUrl =
-      "https://github.com/" + repository + "/releases/download/" +
-      "v" + version + "/" + ARTIFACT_PREFIX + "-" + version + ".zip";
+      itemVersion === version
+        ? r2PublicUrl(ARTIFACT_PREFIX + "-" + itemVersion + ".zip")
+        : previousZipByVersion.get(itemVersion);
+    if (!archiveUrl) return item;
     return item
-      .replace(/<title>[^<]*<\/title>/, "<title>" + version + "</title>")
+      .replace(/<title>[^<]*<\/title>/, "<title>" + itemVersion + "</title>")
       .replace(/(<enclosure\s+url=")[^"]+\.zip(")/, "$1" + archiveUrl + "$2");
   });
   if (normalized !== original) {
@@ -443,11 +470,9 @@ async function generateSparkleUpdates(options: {
   buildNumber: string;
   notes: string;
   env: Record<string, string>;
-  repository: string;
   sign: boolean;
 }): Promise<{ zipPath: string; notesPath: string; appcastPath: string }> {
-  const { appPath, version, buildNumber, notes, env, repository, sign } = options;
-  const tag = "v" + version;
+  const { appPath, version, buildNumber, notes, env, sign } = options;
   const zipName = ARTIFACT_PREFIX + "-" + version + ".zip";
   const notesName = ARTIFACT_PREFIX + "-" + version + ".md";
   const zipPath = join(UPDATES_DIR, zipName);
@@ -480,14 +505,14 @@ async function generateSparkleUpdates(options: {
     await generateAppcast(
       UPDATES_DIR,
       {
-        downloadUrlPrefix: "https://github.com/" + repository + "/releases/download/" + tag + "/",
+        downloadUrlPrefix: R2_ONLINE_URL + "/",
         edKeyFile: privateKeyFile,
         account,
         versions: [buildNumber],
       },
       ROOT_DIR,
     );
-    await normalizeAppcastArchiveUrls(appcastPath, repository);
+    await normalizeAppcastArchiveUrls(appcastPath, version);
   } else {
     writeFileSync(
       appcastPath,
@@ -503,51 +528,11 @@ async function generateSparkleUpdates(options: {
   return { zipPath, notesPath, appcastPath };
 }
 
-function isTransientNetworkError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /EOF|timeout|timed out|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|temporar|network|502|503|504|connection reset|TLS handshake|i\/o timeout/i
-    .test(message);
-}
-
-async function sleep(ms: number): Promise<void> {
-  await Bun.sleep(ms);
-}
-
-async function runGh(command: string[], attempts = 5): Promise<void> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      await runCommand(command);
-      return;
-    } catch (error) {
-      lastError = error;
-      if (!isTransientNetworkError(error) || attempt === attempts) throw error;
-      const delay = 2000 * attempt;
-      console.warn(
-        "⚠️ GitHub 请求中断，" + delay / 1000 + "s 后重试 (" + attempt + "/" + attempts + "): " +
-          command.join(" "),
-      );
-      await sleep(delay);
-    }
-  }
-  throw lastError;
-}
-
-async function githubReleaseExists(tag: string, repository: string): Promise<boolean> {
-  try {
-    await captureCommand(["gh", "release", "view", tag, "--repo", repository]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function collectReleaseAssets(version: string): {
   dmgPath: string;
   zipPath: string;
   notesPath: string;
   appcastPath: string;
-  assets: string[];
 } {
   const dmgPath = join(ROOT_DIR, "build/QLaunch-" + version + ".dmg");
   const zipPath = join(UPDATES_DIR, ARTIFACT_PREFIX + "-" + version + ".zip");
@@ -558,94 +543,104 @@ function collectReleaseAssets(version: string): {
   if (missing.length > 0) {
     throw new Error("找不到已构建的发布产物:\n  " + missing.join("\n  "));
   }
-  return {
+  return { dmgPath, zipPath, notesPath, appcastPath };
+}
+
+/**
+ * 用 QRls 上传安装包：主发 R2，默认同时镜像 GitHub。
+ */
+async function publishWithQrlsRelease(options: {
+  version: string;
+  buildNumber: string;
+  dmgPath: string;
+  zipPath: string;
+  notesPath: string;
+  appcastPath: string;
+  repository: string;
+  changelog: string;
+  force?: boolean;
+}): Promise<void> {
+  const {
+    version,
+    buildNumber,
     dmgPath,
     zipPath,
     notesPath,
     appcastPath,
-    assets: [dmgPath, zipPath, notesPath, appcastPath, ...listGeneratedDeltaPaths()],
-  };
-}
-
-async function publishToGitHub(
-  version: string,
-  assets: string[],
-  notesPath: string,
-  env: Record<string, string>,
-): Promise<void> {
-  if (!Bun.which("gh")) {
-    throw new Error("未找到 gh，请先安装 GitHub CLI 并登录");
-  }
-  const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;
+    repository,
+    changelog,
+    force,
+  } = options;
   const tag = "v" + version;
-
-  if (await githubReleaseExists(tag, repository)) {
-    console.log("▸ 更新已有 GitHub Release " + tag + "…");
-    await runGh([
-      "gh", "release", "edit", tag, "--repo", repository,
-      "--title", "QLaunch " + tag,
-      "--notes-file", notesPath,
-    ]);
-  } else {
-    console.log("▸ 创建 GitHub Release " + tag + "…");
-    try {
-      await runGh([
-        "gh", "release", "create", tag, "--repo", repository,
-        "--title", "QLaunch " + tag,
-        "--notes-file", notesPath,
-      ]);
-    } catch (error) {
-      if (await githubReleaseExists(tag, repository)) {
-        console.warn("⚠️ 创建时网络中断，但 Release 已存在，继续上传产物");
-      } else {
-        throw error;
-      }
-    }
+  console.log("▸ 用 QRls 发布 " + tag + " 到 R2（" + R2_ONLINE_URL + "）…");
+  const qrlsResult = await publishWithQrls({
+    name: ARTIFACT_PREFIX,
+    version,
+    build: buildNumber,
+    repository,
+    dmgPath,
+    zipPath,
+    notesPath,
+    appcastPath,
+    deltaPaths: listGeneratedDeltaPaths(),
+    changelog,
+    force,
+    statePath: join(RELEASE_CACHE_DIR, ".qrls-state.json"),
+  });
+  if (qrlsResult.sparkle?.appcast) {
+    await Bun.write(appcastPath, qrlsResult.sparkle.appcast);
   }
-
-  for (const asset of assets) {
-    console.log("▸ 上传 " + basename(asset) + "…");
-    await runGh(["gh", "release", "upload", tag, asset, "--repo", repository, "--clobber"]);
+  console.log("✓ QRls 已发布: " + tag);
+  console.log("  Sparkle feed: " + (qrlsResult.sparkle?.feedUrl ?? SPARKLE_FEED_URL));
+  console.log("  download.json: " + r2PublicUrl("download.json"));
+  if (PUBLISH_GITHUB) {
+    console.log("  GitHub: https://github.com/" + repository + "/releases/tag/" + tag);
   }
-  console.log("✓ GitHub Release 已发布: " + tag);
-  console.log("  Sparkle feed: " + SPARKLE_FEED_URL);
 }
 
 async function publishExistingBuild(
   version: string,
   buildNumber: string,
   env: Record<string, string>,
+  force = false,
 ): Promise<void> {
   const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;
-  const { dmgPath, zipPath, notesPath, appcastPath, assets } = collectReleaseAssets(version);
-  console.log("\n📦 QLaunch 补发 GitHub Release");
+  const { dmgPath, zipPath, notesPath, appcastPath } = collectReleaseAssets(version);
+  const changelog = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
+  console.log("\n📦 QLaunch 补发 QRls 发布");
   console.log("▸ 版本: " + version + " | Build: " + buildNumber);
   console.log("▸ Sparkle feed: " + SPARKLE_FEED_URL);
   console.log("  DMG: " + dmgPath);
   console.log("  Sparkle ZIP: " + zipPath);
   console.log("  appcast: " + appcastPath);
 
-  await publishToGitHub(version, assets, notesPath, env);
-  await persistReleaseCache(version, buildNumber, "v" + version, zipPath, appcastPath);
-  await writeDownloadManifest({
+  await publishWithQrlsRelease({
     version,
-    build: buildNumber,
-    repository,
+    buildNumber,
     dmgPath,
     zipPath,
+    notesPath,
+    appcastPath,
+    repository,
+    changelog,
+    force,
   });
+  await persistReleaseCache(version, buildNumber, "v" + version, zipPath, appcastPath);
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const noPublish = args.includes("--no-publish");
   const publishOnly = args.includes("--publish-only");
+  const force = args.includes("--force");
   if (noPublish && publishOnly) {
     throw new Error("不能同时使用 --no-publish 与 --publish-only");
   }
-  const versionArgs = args.filter((arg) => arg !== "--no-publish" && arg !== "--publish-only");
+  const versionArgs = args.filter(
+    (arg) => arg !== "--no-publish" && arg !== "--publish-only" && arg !== "--force",
+  );
   if (versionArgs.length > 1 || versionArgs[0]?.startsWith("--")) {
-    throw new Error("用法: bun scripts/release.ts [X.Y.Z] [--no-publish|--publish-only]");
+    throw new Error("用法: bun scripts/release.ts [X.Y.Z] [--no-publish|--publish-only] [--force]");
   }
   const versionOverride = versionArgs[0];
   if (versionOverride && !isSemVer(versionOverride)) {
@@ -655,12 +650,11 @@ async function main(): Promise<void> {
   const env = loadEnv();
   requireSparklePublicKey();
   const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;
-  await ensureDownloadManifest(repository);
 
   if (publishOnly) {
     const version = versionOverride ?? readPackageVersion();
     const buildNumber = readBuildNumber();
-    await publishExistingBuild(version, buildNumber, env);
+    await publishExistingBuild(version, buildNumber, env, force);
     return;
   }
 
@@ -711,7 +705,6 @@ async function main(): Promise<void> {
     buildNumber,
     notes,
     env,
-    repository,
     sign: publishing,
   });
 
@@ -724,22 +717,20 @@ async function main(): Promise<void> {
   console.log("  签名: " + identity + " | 公证: " + (notarized ? "是" : "否"));
 
   if (publishing) {
-    await publishToGitHub(
+    await publishWithQrlsRelease({
       version,
-      [dmgPath, zipPath, notesPath, appcastPath, ...listGeneratedDeltaPaths()],
-      notesPath,
-      env,
-    );
-    await persistReleaseCache(version, buildNumber, "v" + version, zipPath, appcastPath);
-    await writeDownloadManifest({
-      version,
-      build: buildNumber,
-      repository,
+      buildNumber,
       dmgPath,
       zipPath,
+      notesPath,
+      appcastPath,
+      repository,
+      changelog: notes,
+      force,
     });
+    await persistReleaseCache(version, buildNumber, "v" + version, zipPath, appcastPath);
   } else {
-    console.log("ℹ️ 已跳过 GitHub Release、release/ 缓存与官网 download.json（--no-publish）");
+    console.log("ℹ️ 已跳过 QRls 发布与 release/ 缓存（--no-publish）");
   }
 }
 
