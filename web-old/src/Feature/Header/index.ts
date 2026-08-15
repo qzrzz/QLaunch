@@ -1,1 +1,0 @@
-export { StickyHeader } from "./StickyHeader";

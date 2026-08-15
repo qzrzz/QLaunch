@@ -14,6 +14,8 @@ export const page: IPageMeta = {
   productTitle: "QLaunch",
   productTitleCN: "启动台",
   tagline: "最流畅的 macOS 应用启动台，简单、无感、赏心悦目、开源免费",
+  taglineShort: "最流畅的 macOS 应用启动台",
+  platforms:["macos"],
   icon: UrlIcon,
   iconFull: UrlIconFull,
   metaDesc: "最流畅的 macOS 应用启动台，简单、无感、赏心悦目、开源免费，Metal 渲染",

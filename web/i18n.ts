@@ -2,9 +2,9 @@ import type { II18nConfig } from "qpage";
 
 /**
  * QLaunch 官网国际化多语言配置文件
- * 
+ *
  * 遵循 qpage 配置规范，以简体中文（zh-Hans）为默认语言，
- * 并提供英文(en)、日文(ja)、韩文(ko)、越南文(vi)、葡萄牙文(pt)、西班牙文(es)、德文(de)、法文(fr)、俄文(ru)9种目标语言支持。
+ * 并提供英文(en)、日文(ja)、韩文(ko)、越南文(vi)、葡萄牙文(pt)、西班牙文(es)、德文(de)、法文(fr)、俄文(ru) 9 种目标语言支持。
  * 保持专业、清晰且带有亲和力的表达风格，确保专有名词（QLaunch、macOS、Metal、Liquid Glass、Pinyin、Vibe Coding 等）的统一性。
  */
 const i18n: II18nConfig = {
@@ -15,7 +15,7 @@ const i18n: II18nConfig = {
       name: "简体中文",
     },
 
-    // 英语
+    // 英语 (English)
     en: {
       name: "English",
       page: {
@@ -63,11 +63,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Download",
-        viewOnGithub: "View on GitHub",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "Select language",
+        otherProducts: "Other Products",
+        moreProducts: "More Products",
+        productLinks: "Products",
+        contact: "Contact",
+        officialWebsite: "Website",
+        docs: "Docs",
+        changelog: "Changelog",
       },
     },
 
-    // 日语
+    // 日语 (Japanese)
     ja: {
       name: "日本語",
       page: {
@@ -115,11 +123,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "ダウンロード",
-        viewOnGithub: "GitHub で見る",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "言語を選択",
+        otherProducts: "その他の製品",
+        moreProducts: "その他の製品",
+        productLinks: "製品",
+        contact: "お問い合わせ",
+        officialWebsite: "公式サイト",
+        docs: "ドキュメント",
+        changelog: "更新履歴",
       },
     },
 
-    // 韩语
+    // 韩语 (Korean)
     ko: {
       name: "한국어",
       page: {
@@ -138,7 +154,7 @@ const i18n: II18nConfig = {
           id: "what",
           title: "QLaunch란 무엇인가",
           description:
-            "QLaunch는 macOS용 응용 프로그램 런치패드로, 시스템 앱을 한눈에 보여주고 간편하게 실행합니다. macOS 26부터 기존 Launchpad가 제거되고 작은 Spotlight 검색창으로 대체되었지만, 우리는 전체 화면을 가득 채우는 아름다운 앱 아이콘의 visual experience를 여전히 사랑합니다.",
+            "QLaunch는 macOS용 응용 프로그램 런치패드로, 시스템 앱을 한눈에 보여주고 간편하게 실행합니다. macOS 26부터 기존 Launchpad가 제거되고 작은 Spotlight 검색창으로 대체되었지만, 우리는 전체 화면을 가득 채우는 아름다운 앱 아이콘의 시각적 즐거움을 여전히 사랑합니다.",
         },
         {
           id: "performance",
@@ -148,7 +164,7 @@ const i18n: II18nConfig = {
         },
         {
           id: "pingyin",
-          title: "병음(Pinyin) 검색 지원",
+          title: "병음(Pinyin) 검색",
           description:
             "중국어 사용자는 더 이상 입력기를 전환할 필요가 없습니다. 현재 입력 모드가 영문이든 병음이든 상관없이 원하는 앱을 즉시 검색할 수 있습니다.",
         },
@@ -167,11 +183,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "다운로드",
-        viewOnGithub: "GitHub에서 보기",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "언어 선택",
+        otherProducts: "기타 제품",
+        moreProducts: "더 많은 제품",
+        productLinks: "제품",
+        contact: "문의",
+        officialWebsite: "공식 웹사이트",
+        docs: "문서",
+        changelog: "변경 로그",
       },
     },
 
-    // 越南语
+    // 越南语 (Vietnamese)
     vi: {
       name: "Tiếng Việt",
       page: {
@@ -219,11 +243,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Tải về",
-        viewOnGithub: "Xem trên GitHub",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "Chọn ngôn ngữ",
+        otherProducts: "Sản phẩm khác",
+        moreProducts: "Thêm sản phẩm",
+        productLinks: "Sản phẩm",
+        contact: "Liên hệ",
+        officialWebsite: "Trang web chính thức",
+        docs: "Tài liệu",
+        changelog: "Nhật ký thay đổi",
       },
     },
 
-    // 葡萄牙语
+    // 葡萄牙语 (Portuguese)
     pt: {
       name: "Português",
       page: {
@@ -242,7 +274,7 @@ const i18n: II18nConfig = {
           id: "what",
           title: "O que é o QLaunch",
           description:
-            "O QLaunch é um Launchpad de aplicativos para macOS — exibe os aplicativos do sistema e os inicia com facilidade. A partir do macOS 26, a Apple descontinuou o Launchpad em favor de uma pequena caixa de busca Spotlight, mas nós continuarmos amando a experiência visual encantadora em tela cheia com belos ícones.",
+            "O QLaunch é um Launchpad de aplicativos para macOS — exibe os aplicativos do sistema e os inicia com facilidade. A partir do macOS 26, a Apple descontinuou o Launchpad em favor de uma pequena caixa de busca Spotlight, mas nós continuamos amando a experiência visual encantadora em tela cheia com belos ícones.",
         },
         {
           id: "performance",
@@ -258,7 +290,7 @@ const i18n: II18nConfig = {
         },
         {
           id: "ai",
-          title: "AI para organizar seus apps, aberto e gratuito",
+          title: "IA para organizar seus apps, aberto e gratuito",
           description:
             "Deixe a IA organizar seus aplicativos. Não é um recurso pago integrado, mas uma API aberta pronta para ser chamada pela sua própria IA.",
         },
@@ -271,11 +303,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Baixar",
-        viewOnGithub: "Ver no GitHub",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "Selecionar idioma",
+        otherProducts: "Outros produtos",
+        moreProducts: "Mais produtos",
+        productLinks: "Produtos",
+        contact: "Contato",
+        officialWebsite: "Site oficial",
+        docs: "Documentação",
+        changelog: "Histórico de alterações",
       },
     },
 
-    // 西班牙语
+    // 西班牙语 (Spanish)
     es: {
       name: "Español",
       page: {
@@ -323,11 +363,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Descargar",
-        viewOnGithub: "Ver en GitHub",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "Seleccionar idioma",
+        otherProducts: "Otros productos",
+        moreProducts: "Más productos",
+        productLinks: "Productos",
+        contact: "Contacto",
+        officialWebsite: "Sitio web oficial",
+        docs: "Documentación",
+        changelog: "Registro de cambios",
       },
     },
 
-    // 德语
+    // 德语 (German)
     de: {
       name: "Deutsch",
       page: {
@@ -375,11 +423,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Herunterladen",
-        viewOnGithub: "Auf GitHub ansehen",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "Sprache auswählen",
+        otherProducts: "Weitere Produkte",
+        moreProducts: "Mehr Produkte",
+        productLinks: "Produkte",
+        contact: "Kontakt",
+        officialWebsite: "Offizielle Website",
+        docs: "Dokumentation",
+        changelog: "Änderungsprotokoll",
       },
     },
 
-    // 法语
+    // 法语 (French)
     fr: {
       name: "Français",
       page: {
@@ -396,7 +452,7 @@ const i18n: II18nConfig = {
         },
         {
           id: "what",
-          title: "Pourquoi QLaunch",
+          title: "Qu'est-ce que QLaunch",
           description:
             "QLaunch est un Launchpad d'applications pour macOS — il affiche les applications du système et les lance en un clin d'œil. Depuis macOS 26, Apple a remplacé Launchpad par une simple barre de recherche Spotlight, mais nous continuons de chérir l'expérience plein écran et le plaisir visuel des magnifiques icônes d'applications.",
         },
@@ -427,11 +483,19 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Télécharger",
-        viewOnGithub: "Voir sur GitHub",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "Choisir la langue",
+        otherProducts: "Autres produits",
+        moreProducts: "Plus de produits",
+        productLinks: "Produits",
+        contact: "Contact",
+        officialWebsite: "Site officiel",
+        docs: "Documentation",
+        changelog: "Journal des modifications",
       },
     },
 
-    // 俄语
+    // 俄语 (Russian)
     ru: {
       name: "Русский",
       page: {
@@ -479,7 +543,15 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Скачать",
-        viewOnGithub: "Смотреть на GitHub",
+        viewOnGithub: "GitHub",
+        langSwitchAria: "Выбрать язык",
+        otherProducts: "Другие продукты",
+        moreProducts: "Больше продуктов",
+        productLinks: "Продукты",
+        contact: "Контакты",
+        officialWebsite: "Официальный сайт",
+        docs: "Документация",
+        changelog: "История изменений",
       },
     },
   },

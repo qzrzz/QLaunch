@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@types/node": "26.2.0",
-    "qpage": "link:qpage"
+    "qpage": "link:qpage",
+    "qzrzz-com": "link:qzrzz-com"
   },
   "packageManager": "bun@1.3.14",
   "buildNumber": 11
