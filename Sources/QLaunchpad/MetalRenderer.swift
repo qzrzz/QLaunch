@@ -229,6 +229,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var panStartPoint: CGPoint = .zero
     private var contextMenuApp: AppInfo?
     private var contextMenuFolder: AppFolder?
+    /// Session-only: first successful icon download after launch shows a hint.
+    private static var didShowIconDownloadHint = false
 
     // Keep visual positions separate from the catalog order so reordering an
     // item does not make the surrounding icons jump to their new cells.
@@ -2933,6 +2935,26 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         menu.addItem(withTitle: "显示简介", action: #selector(showContextMenuAppInfo), keyEquivalent: "")
         menu.addItem(.separator())
 
+        let iconImageItem = NSMenuItem(title: "图标图片", action: nil, keyEquivalent: "")
+        let iconImageMenu = NSMenu(title: "图标图片")
+        let currentSizeItem = NSMenuItem(
+            title: "下载当前图标尺寸",
+            action: #selector(downloadContextMenuAppIconAtCurrentSize),
+            keyEquivalent: ""
+        )
+        currentSizeItem.target = self
+        iconImageMenu.addItem(currentSizeItem)
+        let maximumSizeItem = NSMenuItem(
+            title: "下载最大图标尺寸",
+            action: #selector(downloadContextMenuAppIconAtMaximumSize),
+            keyEquivalent: ""
+        )
+        maximumSizeItem.target = self
+        iconImageMenu.addItem(maximumSizeItem)
+        iconImageItem.submenu = iconImageMenu
+        menu.addItem(iconImageItem)
+        menu.addItem(.separator())
+
         let currentFolderID = store.folderContaining(appID: app.id)?.id
         let moveToFolderItem = NSMenuItem(title: "移入文件夹", action: nil, keyEquivalent: "")
         let folderSubmenu = NSMenu(title: "移入文件夹")
@@ -3087,6 +3109,46 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         alert.messageText = app.name
         alert.informativeText = "版本：\(version)\n标识符：\(app.bundleIdentifier)\n位置：\(app.url.path)"
         alert.icon = NSWorkspace.shared.icon(forFile: app.url.path)
+        alert.addButton(withTitle: "好")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    @objc private func downloadContextMenuAppIconAtCurrentSize() {
+        exportContextMenuAppIcon(pixelSize: AppIconExporter.currentPixelSize)
+    }
+
+    @objc private func downloadContextMenuAppIconAtMaximumSize() {
+        guard let app = contextMenuApp else { return }
+        exportContextMenuAppIcon(pixelSize: AppIconExporter.maximumPixelSize(for: app))
+    }
+
+    private func exportContextMenuAppIcon(pixelSize: Int) {
+        guard let app = contextMenuApp else { return }
+        do {
+            _ = try AppIconExporter.exportPNG(for: app, pixelSize: pixelSize)
+            presentFirstIconDownloadHintIfNeeded()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "无法下载图标"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "好")
+            if let window {
+                alert.beginSheetModal(for: window)
+            } else {
+                alert.runModal()
+            }
+        }
+    }
+
+    private func presentFirstIconDownloadHintIfNeeded() {
+        guard !Self.didShowIconDownloadHint else { return }
+        Self.didShowIconDownloadHint = true
+        let alert = NSAlert()
+        alert.messageText = "已下载到下载文件夹中"
         alert.addButton(withTitle: "好")
         if let window {
             alert.beginSheetModal(for: window)
