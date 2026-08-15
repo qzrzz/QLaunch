@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="QLaunch — a simple, high-performance macOS Launchpad."
+    />
+    <meta property="og:title" content="QLaunch" />
+    <meta
+      property="og:description"
+      content="A simple, high-performance native macOS Launchpad with 128pt icons, Metal rendering, and liquid glass UI."
+    />
+    <meta property="og:image" content="./icon-128.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="./icon-128.png" />
+    <link rel="apple-touch-icon" href="./icon-128.png" />
+    <title>QLaunch</title>
+    <script>
+      (function () {
+        try {
+          var path = window.location.pathname;
+          var isExplicitSubpath = path.indexOf("/zh-Hans") !== -1;
+          if (isExplicitSubpath) {
+            localStorage.setItem("qlaunchpad_lang", "zh-Hans");
+            return;
+          }
+          var saved = localStorage.getItem("qlaunchpad_lang");
+          var targetLang = saved;
+          if (!targetLang) {
+            var langs = navigator.languages || (navigator.language ? [navigator.language] : []);
+            for (var i = 0; i < langs.length; i++) {
+              var l = (langs[i] || "").toLowerCase();
+              if (l.indexOf("zh") === 0) {
+                targetLang = "zh-Hans";
+                break;
+              }
+              if (l.indexOf("en") === 0) {
+                targetLang = "en";
+                break;
+              }
+            }
+          }
+          if (targetLang === "zh-Hans") {
+            window.location.replace(
+              "./zh-Hans/" + window.location.search + window.location.hash
+            );
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,126 @@
+/* 顶栏：随页面滚动始终吸顶显示 */
+.stickyHeader {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  margin: 0;
+  padding: 14px 24px;
+  background: rgba(0, 0, 0, 0.78);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+}
+
+.stickyHeaderBrand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  color: #fff;
+  font-family: "Pally-Variable", "GeneralSans-Variable", "SF Pro Display", sans-serif;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+}
+
+.stickyHeaderBrand img {
+  border-radius: 7px;
+}
+
+.stickyHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.stickyHeaderNav {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.stickyHeaderLink {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-decoration: none;
+  transition: color 0.15s ease;
+  white-space: nowrap;
+}
+
+.stickyHeaderLink:hover {
+  color: #fff;
+}
+
+.stickyHeaderLink--action,
+.stickyHeaderLink--external {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.stickyHeaderLink--action {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  transition:
+    color 0.15s ease,
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.stickyHeaderLink--action:hover {
+  color: #000;
+  background: #fff;
+  border-color: #fff;
+}
+
+@media (max-width: 760px) {
+  .stickyHeader {
+    gap: 8px;
+    padding: 10px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left));
+    padding-top: max(10px, env(safe-area-inset-top));
+  }
+
+  .stickyHeaderBrand {
+    gap: 8px;
+    font-size: 16px;
+  }
+
+  .stickyHeaderActions {
+    gap: 4px;
+  }
+
+  .stickyHeaderNav {
+    flex-wrap: nowrap;
+    gap: 0 8px;
+  }
+
+  /* 小屏只留 Download，Why / GitHub 仍在首屏与页脚 */
+  .stickyHeaderNav .stickyHeaderLink:not(.stickyHeaderLink--action) {
+    display: none;
+  }
+
+  .stickyHeaderLink--action {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 12px;
+  }
+}
+
+@media (max-width: 360px) {
+  .stickyHeaderBrand span {
+    display: none;
+  }
+}

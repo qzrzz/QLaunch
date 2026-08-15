@@ -11,8 +11,11 @@
     "release": "bun scripts/release.ts",
     "run": "bun scripts/dev.ts",
     "clean": "bun scripts/clean.ts",
-    "web:dev": "qpage --dev ./web-new ./dist",
-    "web:build": "qpage ./web-new ./dist",
+    "web:dev": "qpage --dev ./web ./docs",
+    "web:build": "qpage ./web ./docs",
+    "web:preview": "qpage --preview ./web ./docs",
+    "web:i18n:codex": "codex exec 根据./web/translate.md完成翻译任务",
+    "web:i18n:gemini": "agy -p 根据./web/translate.md完成翻译任务",
     "check": "SWIFT_MODULECACHE_PATH=/private/tmp/qlaunchpad-swift-module-cache CLANG_MODULE_CACHE_PATH=/private/tmp/qlaunchpad-clang-module-cache swift package describe"
   },
   "dependencies": {
@@ -20,5 +23,5 @@
     "qpage": "link:qpage"
   },
   "packageManager": "bun@1.3.14",
-  "buildNumber": 10
+  "buildNumber": 11
 }
