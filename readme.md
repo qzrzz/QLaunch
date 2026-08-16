@@ -10,7 +10,7 @@
   简单、高性能的 macOS Launchpad 替代方案。设计师级别图标高质量渲染、120Hz 高帧率、 液态玻璃、过渡动画。
 </p>
 
-- 主页：[https://qzrzz.github.io/QLaunch/](https://qzrzz.github.io/QLaunch/)
+- 主页：[https://qzrzz.com/QLaunch](https://qzrzz.com/QLaunch)
 - 下载：[https://github.com/qzrzz/QLaunch/releases](https://github.com/qzrzz/QLaunch/releases)
 
 <table>
