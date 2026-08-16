@@ -136,6 +136,10 @@ private struct TextAtlasSignature: Equatable, Sendable {
 /// Identity of the icon GPU cache window (catalog + visible list + page + quality).
 private struct IconPrewarmSignature: Equatable, Sendable {
     let catalog: AppResourceSignature
+    /// Folder membership affects flattened folder textures independently of
+    /// the application catalog or the list that happened to be visible when
+    /// the prewarm job was scheduled.
+    let folders: [AppFolder]
     /// Root / folder / search list currently shown (search changes this without
     /// changing the full catalog).
     let display: AppListSignature
@@ -219,6 +223,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var dragHoverTargetID: String?
     private var dragHoverVisualTargetID: String?
     private var dragHoverProgress: CGFloat = 0
+    private var groupingCandidateID: String?
+    private var groupingCandidateSince: CFTimeInterval = 0
+    private var lastGroupingMotionPoint: CGPoint?
+    private var lastGroupingMotionTime: CFTimeInterval = 0
+    private var groupingMotionSpeed: CGFloat = 0
+    /// Passing over a tile continues to reorder. Holding briefly over its wider
+    /// center region locks grouping, matching the familiar Launchpad gesture.
+    private let groupingAcquireRadiusScale: CGFloat = 0.88
+    private let groupingReleaseRadiusScale: CGFloat = 0.98
+    private let groupingDwellDuration: CFTimeInterval = 0.2
+    private let groupingMaximumIntentSpeed: CGFloat = 320
     private var didDrag = false
     private var isPanningPage = false
     private var pageIndicatorClick = false
@@ -673,7 +688,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     private func tickDragVisualAnimations(now: CFTimeInterval, dt: CFTimeInterval) {
-        let hoverTarget: CGFloat = didDrag && dragHoverTargetID != nil ? 1 : 0
+        let hoverTarget: CGFloat = didDrag
+            && (groupingCandidateID != nil || dragHoverTargetID != nil) ? 1 : 0
         let hoverStep = CGFloat(1 - exp(-dt * 18))
         dragHoverProgress += (hoverTarget - dragHoverProgress) * hoverStep
         if hoverTarget == 0, dragHoverProgress < 0.001 {
@@ -685,6 +701,26 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
            now - animation.startTime >= dragReleaseDuration {
             dragReleaseAnimation = nil
         }
+    }
+
+    /// Low-pass pointer velocity separates a pass-through reorder gesture from
+    /// a deliberate pause over another icon. Sampling on the display link also
+    /// lets speed decay naturally after the pointer stops moving.
+    private func updateGroupingMotion(at point: CGPoint, now: CFTimeInterval) {
+        guard let previousPoint = lastGroupingMotionPoint,
+              lastGroupingMotionTime > 0 else {
+            lastGroupingMotionPoint = point
+            lastGroupingMotionTime = now
+            groupingMotionSpeed = 0
+            return
+        }
+        let elapsed = max(now - lastGroupingMotionTime, 1.0 / 240.0)
+        let instantaneous = hypot(point.x - previousPoint.x, point.y - previousPoint.y)
+            / CGFloat(elapsed)
+        let weight = CGFloat(1 - exp(-elapsed * 18))
+        groupingMotionSpeed += (instantaneous - groupingMotionSpeed) * weight
+        lastGroupingMotionPoint = point
+        lastGroupingMotionTime = now
     }
 
     private func beginDragReleaseAnimation(itemID: String) {
@@ -808,10 +844,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             x: dragPoint.x - dragGrabOffset.x,
             y: dragPoint.y - dragGrabOffset.y
         )
+        let now = CACurrentMediaTime()
+        updateGroupingMotion(at: draggedCenter, now: now)
 
         // Once a grouping preview is active, keep it until the dragged icon is
-        // moved clearly away. This hysteresis makes releasing near the boundary
-        // reliable instead of flickering between group and reorder states.
+        // moved clearly away or accelerates into a reorder gesture. This small
+        // hysteresis makes releasing near the boundary reliable without making
+        // the target sticky across neighbouring grid cells.
         if let activeTargetID = dragHoverTargetID,
            let activeIndex = displayedItems.firstIndex(where: { $0.id == activeTargetID }) {
             let visualIndex = reorderVisualSlots[activeTargetID] ?? Double(activeIndex)
@@ -819,16 +858,19 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 globalIndex: visualIndex,
                 pageOffset: interactionPageOffset
             )
-            if hypot(draggedCenter.x - center.x, draggedCenter.y - center.y)
-                <= metrics.iconSize * 0.92 {
+            if groupingMotionSpeed <= groupingMaximumIntentSpeed * 1.5,
+               hypot(draggedCenter.x - center.x, draggedCenter.y - center.y)
+                <= metrics.iconSize * groupingReleaseRadiusScale {
                 return
             }
+            setDragHoverTarget(nil)
+            groupingCandidateID = nil
         }
 
         // Acquire grouping from the actual dragged icon center rather than the
         // pointer. Grabbing an icon near an edge therefore remains just as easy
         // as grabbing it in the middle.
-        let groupingRadius = metrics.iconSize * 0.72
+        let groupingRadius = metrics.iconSize * groupingAcquireRadiusScale
         var groupingCandidate: (id: String, distance: CGFloat)?
         for (index, item) in displayedItems.enumerated() where item.id != draggedAppID {
             let visualIndex = reorderVisualSlots[item.id] ?? Double(index)
@@ -842,14 +884,31 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 groupingCandidate = (item.id, distance)
             }
         }
-        if let groupingCandidate {
-            setDragHoverTarget(groupingCandidate.id)
+        if let groupingCandidate,
+           groupingMotionSpeed <= groupingMaximumIntentSpeed {
+            if groupingCandidateID != groupingCandidate.id {
+                groupingCandidateID = groupingCandidate.id
+                groupingCandidateSince = now
+                if dragHoverVisualTargetID != groupingCandidate.id {
+                    dragHoverVisualTargetID = groupingCandidate.id
+                    dragHoverProgress = 0
+                }
+            } else if now - groupingCandidateSince >= groupingDwellDuration {
+                setDragHoverTarget(groupingCandidate.id)
+                return
+            }
+            // While the pointer is deliberately slow over the icon center,
+            // freeze its slot. The progressive folder preview communicates
+            // that continuing to hold will switch from reorder to grouping.
+            startDisplayLink()
             return
+        } else {
+            groupingCandidateID = nil
+            setDragHoverTarget(nil)
         }
 
-        // Reordering uses a wider acquisition area than normal clicking. Its
-        // outer region remains available for sorting, while the central overlap
-        // region below is reserved for grouping.
+        // Fast movement and the outer portion of a cell remain available for
+        // sorting even while the path crosses another icon.
         guard let hit = metrics.hitTest(
             point: point,
             pageOffset: interactionPageOffset,
@@ -1326,6 +1385,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         let signature = IconPrewarmSignature(
             catalog: AppResourceSignature(apps: catalog),
+            folders: store.folders,
             display: AppListSignature(apps: catalog),
             page: -1,
             quality: IconRenderQuality.current.rawValue
@@ -1353,21 +1413,23 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             contentTransitionAlpha = 1
         }
 
-        let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
         let pageWork = firstPageIconWork()
         let firstPageAppIDs = Set(pageWork.apps.map(\.id))
         let firstPageFolderIDs = Set(pageWork.folders.map(\.folder.id))
         let remainingApps = catalog.filter { !firstPageAppIDs.contains($0.id) }
 
-        // Remaining folder composites after the visible first page.
+        // Remaining folder composites after the visible first page. Use the
+        // authoritative folder collection rather than `displayedItems`: store
+        // notifications can arrive before an animated grid replacement has
+        // installed its new visible list. Depending on that stale list leaves
+        // a newly-created or edited folder without a texture indefinitely,
+        // because the resident catalog signature otherwise looks complete.
         var remainingFolders: [(AppFolder, [AppInfo])] = []
         var seenFolders = firstPageFolderIDs
-        for item in items {
-            guard case .folder(let folder) = item else { continue }
-            let current = store.folder(withID: folder.id) ?? folder
-            guard seenFolders.insert(current.id).inserted else { continue }
-            let members = current.appIDs.compactMap { store.app(withID: $0) }
-            remainingFolders.append((current, members))
+        for folder in store.folders {
+            guard seenFolders.insert(folder.id).inserted else { continue }
+            let members = folder.appIDs.compactMap { store.app(withID: $0) }
+            remainingFolders.append((folder, members))
         }
 
         let textureStore = iconTextures
@@ -1438,6 +1500,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let displaySignature = AppListSignature(items: items)
         let signature = IconPrewarmSignature(
             catalog: AppResourceSignature(apps: catalog),
+            folders: store.folders,
             display: displaySignature,
             page: store.isSearching ? -2 : targetPage,
             quality: IconRenderQuality.current.rawValue
@@ -2803,6 +2866,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         dragDestination = nil
         dragHoverTargetID = nil
         dragHoverVisualTargetID = nil
+        groupingCandidateID = nil
+        lastGroupingMotionPoint = nil
+        groupingMotionSpeed = 0
         didDrag = false
         store.setFolderDragState(isDragging: false)
     }
@@ -2817,6 +2883,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         dragHoverTargetID = nil
         dragHoverVisualTargetID = nil
         dragHoverProgress = 0
+        groupingCandidateID = nil
+        lastGroupingMotionPoint = nil
+        lastGroupingMotionTime = 0
+        groupingMotionSpeed = 0
         dragReleaseAnimation = nil
         didDrag = false
         dragDestination = nil
@@ -2867,6 +2937,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     x: dragPoint.x - iconCenter.x,
                     y: dragPoint.y - iconCenter.y
                 )
+                lastGroupingMotionPoint = iconCenter
+                lastGroupingMotionTime = CACurrentMediaTime()
                 if store.allowsUserLayoutEditing {
                     startDisplayLink()
                 }
@@ -3027,7 +3099,19 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             }
             menu.addItem(item)
         }
+
+        menu.addItem(.separator())
+        let settingsItem = menu.addItem(
+            withTitle: "设置",
+            action: #selector(openSettingsFromContextMenu),
+            keyEquivalent: ""
+        )
+        settingsItem.target = self
         return menu
+    }
+
+    @objc private func openSettingsFromContextMenu() {
+        NotificationCenter.default.post(name: .qlaunchpadOpenSettings, object: nil)
     }
 
     @objc private func selectLayoutFromMenu(_ sender: NSMenuItem) {
@@ -3279,6 +3363,19 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        // AppKit may coalesce the last mouse-drag sample into mouse-up. Resolve
+        // that final position before consuming `dragHoverTargetID`, otherwise a
+        // visually valid drop can still use the previous non-grouping target.
+        if didDrag,
+           draggedAppID != nil,
+           !isPanningPage,
+           store.openedFolderID == nil,
+           contentTransitionPhase == .idle {
+            let releasePoint = convert(event.locationInWindow, from: nil)
+            dragPoint = CGPoint(x: releasePoint.x, y: bounds.height - releasePoint.y)
+            updateReorderDestination(at: releasePoint)
+        }
+
         defer {
             dragSource = nil
             draggedAppID = nil
@@ -3287,6 +3384,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             dragGrabOffset = .zero
             edgePageDirection = 0
             dragHoverTargetID = nil
+            groupingCandidateID = nil
+            lastGroupingMotionPoint = nil
+            lastGroupingMotionTime = 0
+            groupingMotionSpeed = 0
             isPanningPage = false
             pageIndicatorClick = false
             pendingAutoLayoutReorderHint = false
