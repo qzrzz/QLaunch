@@ -93,6 +93,35 @@ final class LaunchpadCLIProcessTests: XCTestCase {
         XCTAssertEqual(read.hiddenIDs, original.hiddenIDs)
     }
 
+    func testInfiniteCanvasExportUsesDynamicRowCount() throws {
+        let applicationID = dryRunDomain as CFString
+        CFPreferencesSetAppValue(
+            LaunchpadPersistence.gridLayoutPresetKey as CFString,
+            "infinite-canvas-128" as CFString,
+            applicationID
+        )
+        XCTAssertTrue(CFPreferencesAppSynchronize(applicationID))
+
+        let result = try runCLI([
+            "export",
+            "--domain", dryRunDomain,
+            "--compact",
+            "--no-catalog",
+        ])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let data = try XCTUnwrap(result.stdout.data(using: .utf8))
+        let document = try LaunchpadLayoutDocument.makeDecoder().decode(
+            LaunchpadLayoutDocument.self,
+            from: data
+        )
+        let grid = try XCTUnwrap(document.grid)
+        let expectedRows = max(1, Int(ceil(Double(max(document.items.count, 1)) / 16.0)))
+        XCTAssertEqual(grid.preset, "infinite-canvas-128")
+        XCTAssertEqual(grid.columns, 16)
+        XCTAssertEqual(grid.rows, expectedRows)
+        XCTAssertEqual(grid.pageCapacity, expectedRows * 16)
+    }
+
     private struct CLIResult {
         var exitCode: Int32
         var stdout: String
@@ -152,6 +181,7 @@ final class LaunchpadCLIProcessTests: XCTestCase {
         CFPreferencesSetAppValue(LaunchpadPersistence.itemOrderKey as CFString, nil, applicationID)
         CFPreferencesSetAppValue(LaunchpadPersistence.foldersKey as CFString, nil, applicationID)
         CFPreferencesSetAppValue(LaunchpadPersistence.hiddenAppsKey as CFString, nil, applicationID)
+        CFPreferencesSetAppValue(LaunchpadPersistence.gridLayoutPresetKey as CFString, nil, applicationID)
         CFPreferencesAppSynchronize(applicationID)
         let plist = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Preferences/\(domain).plist")

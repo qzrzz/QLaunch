@@ -7,9 +7,9 @@ enum AppIconExportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .downloadsDirectoryUnavailable:
-            return "找不到下载目录。"
+            return L10n.tr("error.icon.downloadsDirectory")
         case .rasterizationFailed:
-            return "无法生成图标图片。"
+            return L10n.tr("error.icon.generate")
         }
     }
 }
@@ -18,7 +18,7 @@ enum AppIconExportError: LocalizedError {
 enum AppIconExporter {
     /// Pixel size of the icon texture currently baked for the grid.
     static var currentPixelSize: Int {
-        Int(GridLayoutPreset.current.iconPointSize * IconRenderQuality.current.rasterScale)
+        GridLayoutPreset.current.iconPixelSize(for: IconRenderQuality.current)
     }
 
     static func maximumPixelSize(for app: AppInfo) -> Int {

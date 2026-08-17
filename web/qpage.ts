@@ -15,7 +15,7 @@ export const page: IPageMeta = {
   productTitleCN: "启动台",
   tagline: "最流畅的 macOS 应用启动台，简单、无感、赏心悦目、开源免费",
   taglineShort: "最流畅的 macOS 应用启动台",
-  platforms:["macos"],
+  platforms: ["macos"],
   icon: UrlIcon,
   iconFull: UrlIconFull,
   metaDesc: "最流畅的 macOS 应用启动台，简单、无感、赏心悦目、开源免费，Metal 渲染",
@@ -57,6 +57,13 @@ export const sections: ISection[] = [
     title: "拼音搜索",
     description: "中文用户不用切换输入法了，无脑输入，无论当前输入法是英文还是拼音都能搜索到目标",
     cards: [{ style: "center", image: "./assets/s6.png" }],
+  },
+
+  {
+    id: "infcolors",
+    title: "无限画布 + 按颜色排序",
+    description: "在画布中陈列所有应用程序图标，通过缩放、平移自由浏览，还可以根据图标颜色排序",
+    cards: [{ style: "center", video: "./assets/无限画布模式.mp4" }],
   },
 
   {

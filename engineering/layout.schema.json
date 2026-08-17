@@ -79,7 +79,7 @@
         "pageCapacity": {
           "type": "integer",
           "minimum": 1,
-          "description": "columns * rows. Typical values: 8 (4x2-256), 20 (5x4-128), 24 (6x4-128), 35 (7x5-128)."
+          "description": "columns * rows. Typical values: 8 (4x2-256), 20 (5x4-128), 24 (6x4-128), 35 (7x5-128 or 7x5-64), 56 (8x7-64). The 128pt and 256pt infinite canvases use 16 × N and have one logical page."
         }
       }
     },

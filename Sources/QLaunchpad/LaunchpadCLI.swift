@@ -59,7 +59,7 @@ enum LaunchpadCLI {
         let snapshot = try scanAndReconcile(domain: domain, failOnCorruptFolders: false)
         let document = makeDocument(
             snapshot,
-            grid: gridSnapshot(domain: domain),
+            grid: gridSnapshot(domain: domain, itemCount: snapshot.order.count),
             includeCatalog: options.includeCatalog,
             includePaths: options.includePaths,
             appVersion: appVersion(options)
@@ -250,7 +250,7 @@ enum LaunchpadCLI {
         )
     }
 
-    private static func gridSnapshot(domain: String) -> LaunchpadLayoutGrid {
+    private static func gridSnapshot(domain: String, itemCount: Int) -> LaunchpadLayoutGrid {
         let raw = LaunchpadPreferenceStore.readString(
             domain: domain,
             key: LaunchpadPersistence.gridLayoutPresetKey
@@ -261,11 +261,12 @@ enum LaunchpadCLI {
         } else {
             preset = .defaultPreset
         }
+        let rows = preset.exportedRows(itemCount: itemCount)
         return LaunchpadLayoutGrid(
             preset: preset.rawValue,
             columns: preset.columns,
-            rows: preset.rows,
-            pageCapacity: preset.columns * preset.rows
+            rows: rows,
+            pageCapacity: preset.columns * rows
         )
     }
 
@@ -324,7 +325,7 @@ enum LaunchpadCLI {
     private static func writeBackupFailOpen(domain: String, snapshot: Snapshot, appVersion: String?) {
         let document = makeDocument(
             snapshot,
-            grid: gridSnapshot(domain: domain),
+            grid: gridSnapshot(domain: domain, itemCount: snapshot.order.count),
             includeCatalog: true,
             includePaths: true,
             appVersion: appVersion

@@ -156,6 +156,7 @@ final class ApplicationSourceListNSView: NSView, NSTableViewDataSource, NSTableV
     }
 
     func update(items: [ApplicationSourceItem], selection: String?, isLoading: Bool) {
+        updateLocalization()
         let itemsChanged = self.items != items
         self.items = items
         if itemsChanged {
@@ -180,6 +181,13 @@ final class ApplicationSourceListNSView: NSView, NSTableViewDataSource, NSTableV
         } else {
             spinner.stopAnimation(nil)
         }
+    }
+
+    private func updateLocalization() {
+        addRemoveControl.setAccessibilityLabel(L10n.tr("sources.addOrRemove"))
+        addRemoveControl.toolTip = L10n.tr("sources.addOrRemove.help")
+        rescanButton.title = L10n.tr("sources.rescan")
+        rescanButton.setAccessibilityLabel(L10n.tr("sources.rescan.accessibility"))
     }
 
     private func configureTable() {
@@ -229,8 +237,8 @@ final class ApplicationSourceListNSView: NSView, NSTableViewDataSource, NSTableV
         separator.titlePosition = .noTitle
         separator.translatesAutoresizingMaskIntoConstraints = false
 
-        let plus = NSImage(systemSymbolName: "plus", accessibilityDescription: "添加应用文件夹")
-        let minus = NSImage(systemSymbolName: "minus", accessibilityDescription: "移除所选文件夹")
+        let plus = NSImage(systemSymbolName: "plus", accessibilityDescription: L10n.tr("sources.add"))
+        let minus = NSImage(systemSymbolName: "minus", accessibilityDescription: L10n.tr("sources.removeSelected"))
         addRemoveControl.segmentCount = 2
         addRemoveControl.trackingMode = .momentary
         addRemoveControl.segmentStyle = .smallSquare
@@ -242,8 +250,8 @@ final class ApplicationSourceListNSView: NSView, NSTableViewDataSource, NSTableV
         addRemoveControl.setEnabled(false, forSegment: 1)
         addRemoveControl.target = self
         addRemoveControl.action = #selector(addRemoveClicked)
-        addRemoveControl.setAccessibilityLabel("添加或移除应用文件夹")
-        addRemoveControl.toolTip = "添加应用文件夹，或移除所选自定义文件夹"
+        addRemoveControl.setAccessibilityLabel(L10n.tr("sources.addOrRemove"))
+        addRemoveControl.toolTip = L10n.tr("sources.addOrRemove.help")
         addRemoveControl.translatesAutoresizingMaskIntoConstraints = false
 
         spinner.style = .spinning
@@ -251,13 +259,13 @@ final class ApplicationSourceListNSView: NSView, NSTableViewDataSource, NSTableV
         spinner.isDisplayedWhenStopped = false
         spinner.translatesAutoresizingMaskIntoConstraints = false
 
-        rescanButton.title = "重新扫描"
+        rescanButton.title = L10n.tr("sources.rescan")
         rescanButton.bezelStyle = .recessed
         rescanButton.controlSize = .small
         rescanButton.isBordered = false
         rescanButton.target = self
         rescanButton.action = #selector(rescanClicked)
-        rescanButton.setAccessibilityLabel("重新扫描应用来源")
+        rescanButton.setAccessibilityLabel(L10n.tr("sources.rescan.accessibility"))
         rescanButton.translatesAutoresizingMaskIntoConstraints = false
 
         buttonBar.translatesAutoresizingMaskIntoConstraints = false
@@ -329,7 +337,7 @@ final class ApplicationSourceListNSView: NSView, NSTableViewDataSource, NSTableV
 
         let menu = NSMenu()
         let reveal = NSMenuItem(
-            title: "在 Finder 中显示",
+            title: L10n.tr("common.revealInFinder"),
             action: #selector(revealClickedRow),
             keyEquivalent: ""
         )
@@ -339,7 +347,7 @@ final class ApplicationSourceListNSView: NSView, NSTableViewDataSource, NSTableV
         if items[row].isRemovable {
             menu.addItem(.separator())
             let remove = NSMenuItem(
-                title: "移除",
+                title: L10n.tr("common.remove"),
                 action: #selector(removeClickedRow),
                 keyEquivalent: ""
             )

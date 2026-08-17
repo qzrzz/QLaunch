@@ -4,12 +4,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private enum SettingsTab: String, CaseIterable, Identifiable {
-    case general = "通用"
-    case applications = "应用程序"
-    case ai = "AI 接口"
-    case about = "关于"
+    case general
+    case applications
+    case ai
+    case about
 
     var id: Self { self }
+
+    var title: String { L10n.tr("settings.tab.\(rawValue)") }
 
     var symbol: String {
         switch self {
@@ -23,12 +25,13 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @ObservedObject var store: AppStore
+    @ObservedObject private var language = LocalizationManager.shared
     @State private var selection: SettingsTab = .general
 
     var body: some View {
         HStack(spacing: 0) {
             List(SettingsTab.allCases, selection: $selection) { tab in
-                Label(tab.rawValue, systemImage: tab.symbol)
+                Label(tab.title, systemImage: tab.symbol)
                     .tag(tab)
                     .font(.body.weight(.medium))
                     .padding(.vertical, 5)
@@ -47,7 +50,7 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     Image(systemName: selection.symbol)
                         .foregroundStyle(.secondary)
-                    Text(selection.rawValue)
+                    Text(selection.title)
                         .font(.headline)
                     Spacer()
                 }
@@ -75,11 +78,13 @@ struct SettingsView: View {
         }
         .frame(minWidth: 530, minHeight: 550)
         .ignoresSafeArea(.container, edges: .top)
+        .environment(\.locale, language.locale)
     }
 }
 
 private struct GeneralSettingsView: View {
     @ObservedObject var store: AppStore
+    @ObservedObject private var language = LocalizationManager.shared
     @AppStorage(QLaunchpadPreferences.showMenuBarIconKey)
     private var showMenuBarIcon = QLaunchpadPreferences.defaultShowMenuBarIcon
     @AppStorage(QLaunchpadPreferences.showDockIconKey)
@@ -97,14 +102,29 @@ private struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
-            Section("启动") {
+            Section(L10n.tr("settings.section.language")) {
+                Picker(L10n.tr("settings.language"), selection: $language.selection) {
+                    ForEach(AppLanguage.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                if language.selection == .system {
+                    Text(L10n.tr("settings.language.following", language.effectiveLanguage.displayName))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section(L10n.tr("settings.section.startup")) {
                 Toggle(isOn: launchAtLoginBinding) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("登录时启动 QLaunch")
+                        Text(L10n.tr("settings.launchAtLogin"))
                         Text(
                             launchAtLoginNeedsApproval
-                                ? "已请求登录项，请在系统设置中允许"
-                                : "开机后启动"
+                                ? L10n.tr("settings.launchAtLogin.approval")
+                                : L10n.tr("settings.launchAtLogin.detail")
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -115,8 +135,8 @@ private struct GeneralSettingsView: View {
 
                 Toggle(isOn: $showDockIcon) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("程序坞图标")
-                        Text("程序坞中显示图标，以便从程序坞启动")
+                        Text(L10n.tr("settings.dockIcon"))
+                        Text(L10n.tr("settings.dockIcon.detail"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -127,18 +147,23 @@ private struct GeneralSettingsView: View {
                     notifyAppearanceChanged()
                 }
 
-                Toggle("菜单栏图标", isOn: $showMenuBarIcon)
+                Toggle(L10n.tr("settings.menuBarIcon"), isOn: $showMenuBarIcon)
                 .toggleStyle(.switch)
                 .onChange(of: showMenuBarIcon) { _, _ in
                     notifyAppearanceChanged()
                 }
             }
 
-            Section("显示") {
-                Toggle("显示应用名称", isOn: $showLabels)
-                Picker("布局", selection: $gridLayoutPreset) {
-                    ForEach(GridLayoutPreset.allCases) { preset in
-                        Text(preset.title).tag(preset.rawValue)
+            Section(L10n.tr("settings.section.display")) {
+                Toggle(L10n.tr("settings.showAppNames"), isOn: $showLabels)
+                Picker(L10n.tr("settings.layout"), selection: $gridLayoutPreset) {
+                    ForEach(GridLayoutPreset.menuGroups.indices, id: \.self) { groupIndex in
+                        if groupIndex > 0 {
+                            Divider()
+                        }
+                        ForEach(GridLayoutPreset.menuGroups[groupIndex]) { preset in
+                            Text(preset.title).tag(preset.rawValue)
+                        }
                     }
                 }
                 .pickerStyle(.menu)
@@ -146,7 +171,7 @@ private struct GeneralSettingsView: View {
                     NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
                 }
 
-                Picker("渲染质量", selection: $iconRenderQuality) {
+                Picker(L10n.tr("settings.renderQuality"), selection: $iconRenderQuality) {
                     ForEach(IconRenderQuality.allCases) { quality in
                         Text(quality.title).tag(quality.rawValue)
                     }
@@ -164,7 +189,7 @@ private struct GeneralSettingsView: View {
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("正在应用渲染质量…")
+                        Text(L10n.tr("settings.renderQuality.applying"))
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -176,34 +201,34 @@ private struct GeneralSettingsView: View {
                 }
             }
 
-            Section("动画") {
-                Picker("切换动画", selection: $presentationAnimationStyle) {
+            Section(L10n.tr("settings.section.animation")) {
+                Picker(L10n.tr("settings.animation"), selection: $presentationAnimationStyle) {
                     ForEach(LaunchpadAnimationStyle.allCases) { style in
                         Text(style.title).tag(style.rawValue)
                     }
                 }
-                Text("页面显示/隐藏时图标的出入场动画。")
+                Text(L10n.tr("settings.animation.detail"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("键盘") {
+            Section(L10n.tr("settings.section.keyboard")) {
                 HotKeyRecorderRow()
-                LabeledContent("关闭", value: "Esc")
-                LabeledContent("选择应用", value: "方向键")
-                LabeledContent("打开应用", value: "Return")
+                LabeledContent(L10n.tr("settings.keyboard.close"), value: "Esc")
+                LabeledContent(L10n.tr("settings.keyboard.select"), value: L10n.tr("settings.keyboard.arrows"))
+                LabeledContent(L10n.tr("settings.keyboard.open"), value: "Return")
             }
 
-            Section("清除缓存") {
+            Section(L10n.tr("settings.section.cache")) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("清除缓存")
-                        Text("清除图标、文字和壁纸缓存并重新构建")
+                        Text(L10n.tr("settings.cache.clear"))
+                        Text(L10n.tr("settings.cache.detail"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("清除") {
+                    Button(L10n.tr("common.clear")) {
                         NotificationCenter.default.post(
                             name: .qlaunchpadCacheClearRequested,
                             object: nil
@@ -213,7 +238,7 @@ private struct GeneralSettingsView: View {
                     .buttonStyle(.bordered)
                 }
                 if didClearCache {
-                    Text("缓存已清除，正在重新构建")
+                    Text(L10n.tr("settings.cache.cleared"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -254,13 +279,9 @@ private struct GeneralSettingsView: View {
 
     private func presentLaunchAtLoginError(_ error: Error) {
         let alert = NSAlert()
-        alert.messageText = "无法更改登录项"
-        alert.informativeText = """
-        \(error.localizedDescription)
-
-        请将 QLaunch 放到「应用程序」文件夹后再试。
-        """
-        alert.addButton(withTitle: "好")
+        alert.messageText = L10n.tr("error.loginItem.title")
+        alert.informativeText = L10n.tr("error.loginItem.message", error.localizedDescription)
+        alert.addButton(withTitle: L10n.tr("common.ok"))
         if let window = NSApp.keyWindow ?? NSApp.mainWindow {
             alert.beginSheetModal(for: window)
         } else {
@@ -281,7 +302,7 @@ private struct HotKeyRecorderRow: View {
 
     var body: some View {
         HStack {
-            Text("打开 / 关闭")
+            Text(L10n.tr("settings.keyboard.toggle"))
             Spacer()
             HotKeyRecorder(
                 keyCode: $keyCode,
@@ -378,7 +399,7 @@ private final class HotKeyRecorderNSView: NSView {
         path.stroke()
 
         let title = isRecording
-            ? "按下快捷键"
+            ? L10n.tr("settings.keyboard.record")
             : LaunchpadHotKeyPreferences.displayName(keyCode: keyCode, modifiers: modifiers)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12, weight: .medium),
@@ -400,10 +421,10 @@ private struct ApplicationSettingsView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("应用程序数量", value: "\(store.apps.count)")
+                LabeledContent(L10n.tr("settings.apps.count"), value: "\(store.apps.count)")
             }
 
-            Section("应用来源") {
+            Section(L10n.tr("settings.apps.sources")) {
                 ApplicationSourceList(
                     items: sourceItems,
                     selection: $selectedSource,
@@ -417,16 +438,16 @@ private struct ApplicationSettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("隐藏的应用") {
-                Toggle("在搜索结果中显示隐藏应用", isOn: $store.showHiddenAppsInSearch)
+            Section(L10n.tr("settings.apps.hidden")) {
+                Toggle(L10n.tr("settings.apps.showHidden"), isOn: $store.showHiddenAppsInSearch)
             }
 
             Section {
                 if store.hiddenApps.isEmpty {
                     VStack(spacing: 5) {
-                        Text("暂无应用")
+                        Text(L10n.tr("settings.apps.empty"))
                             .font(.body.weight(.medium))
-                        Text("右键点击应用即可隐藏")
+                        Text(L10n.tr("settings.apps.hideHint"))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -438,19 +459,19 @@ private struct ApplicationSettingsView: View {
                 }
             }
 
-            Section("用户数据") {
+            Section(L10n.tr("settings.section.userData")) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("当前布局文件")
-                        Text("导出或导入当前排序和分组")
+                        Text(L10n.tr("settings.layoutFile"))
+                        Text(L10n.tr("settings.layoutFile.detail"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("导出…") { exportLayoutFile() }
+                    Button(L10n.tr("common.export")) { exportLayoutFile() }
                         .buttonStyle(.bordered)
                         .disabled(store.isLoading || store.apps.isEmpty)
-                    Button("导入…") { importLayoutFile() }
+                    Button(L10n.tr("common.import")) { importLayoutFile() }
                         .buttonStyle(.bordered)
                         .disabled(store.isLoading || store.apps.isEmpty)
                 }
@@ -463,11 +484,11 @@ private struct ApplicationSettingsView: View {
                     .frame(maxWidth: .infinity, minHeight: 22)
                     .disabled(store.isLoading || store.apps.isEmpty)
 
-                    Button("新建") { promptCreateLayoutProfile() }
+                    Button(L10n.tr("common.new")) { promptCreateLayoutProfile() }
                         .buttonStyle(.bordered)
                         .disabled(store.isLoading)
 
-                    Button("删除") { promptDeleteLayoutProfile() }
+                    Button(L10n.tr("common.delete")) { promptDeleteLayoutProfile() }
                         .buttonStyle(.bordered)
                         .disabled(
                             store.isLoading
@@ -507,7 +528,7 @@ private struct ApplicationSettingsView: View {
                     .truncationMode(.middle)
             }
             Spacer()
-            Button("取消隐藏") { store.unhide(app) }
+            Button(L10n.tr("settings.apps.unhide")) { store.unhide(app) }
                 .buttonStyle(.borderless)
         }
         .frame(minHeight: 44)
@@ -515,12 +536,13 @@ private struct ApplicationSettingsView: View {
 
     private func addSource() {
         let panel = NSOpenPanel()
-        panel.title = "选择应用文件夹"
-        panel.prompt = "添加"
+        panel.title = L10n.tr("panel.chooseAppFolder")
+        panel.prompt = L10n.tr("common.add")
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url {
+        presentFilePanel(panel) { url in
+            guard let url else { return }
             store.addApplicationSource(url)
             selectedSource = url.standardizedFileURL.path
         }
@@ -533,7 +555,7 @@ private struct ApplicationSettingsView: View {
                 do {
                     try store.selectLayoutSelector(newID)
                 } catch {
-                    presentAlert(title: "无法切换布局", message: profileErrorMessage(error))
+                    presentAlert(title: L10n.tr("error.layout.switch"), message: profileErrorMessage(error))
                 }
             }
         )
@@ -544,18 +566,18 @@ private struct ApplicationSettingsView: View {
         let folderName = LaunchpadPreferenceStore.layoutBackupFileURL(domain: domain)
             .deletingLastPathComponent()
             .lastPathComponent
-        return "应用程序支持/\(folderName)"
+        return L10n.tr("settings.appSupportPath", folderName)
     }
 
     private func promptCreateLayoutProfile() {
         let alert = NSAlert()
-        alert.messageText = "新建布局"
-        alert.informativeText = "新布局会复制当前排序和分组。"
-        alert.addButton(withTitle: "创建")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.tr("layout.create.title")
+        alert.informativeText = L10n.tr("layout.create.detail")
+        alert.addButton(withTitle: L10n.tr("common.create"))
+        alert.addButton(withTitle: L10n.tr("common.cancel"))
 
-        let field = NSTextField(string: LaunchpadLayoutProfileStore.suggestedNewName(existing: store.layoutProfiles))
-        field.placeholderString = "布局名称"
+        let field = NSTextField(string: suggestedNewLayoutName())
+        field.placeholderString = L10n.tr("layout.name")
         field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
         field.isEditable = true
         field.bezelStyle = .roundedBezel
@@ -566,7 +588,7 @@ private struct ApplicationSettingsView: View {
             do {
                 try self.store.createLayoutProfile(named: field.stringValue)
             } catch {
-                self.presentAlert(title: "无法创建布局", message: self.profileErrorMessage(error))
+                self.presentAlert(title: L10n.tr("error.layout.create"), message: self.profileErrorMessage(error))
             }
         }
         presentAlert(alert, completion: complete)
@@ -578,40 +600,55 @@ private struct ApplicationSettingsView: View {
     private func promptDeleteLayoutProfile() {
         guard store.canDeleteActiveLayoutProfile else { return }
         let alert = NSAlert()
-        alert.messageText = "删除布局「\(store.activeLayoutProfileName)」？"
-        alert.informativeText = "此操作无法撤销。"
-        alert.addButton(withTitle: "删除")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.tr("layout.delete.title", localizedProfileName(id: store.activeLayoutProfileID, name: store.activeLayoutProfileName))
+        alert.informativeText = L10n.tr("layout.delete.detail")
+        alert.addButton(withTitle: L10n.tr("common.delete"))
+        alert.addButton(withTitle: L10n.tr("common.cancel"))
         presentAlert(alert) { response in
             guard response == .alertFirstButtonReturn else { return }
             do {
                 try self.store.deleteLayoutProfile(self.store.activeLayoutProfileID)
             } catch {
-                self.presentAlert(title: "无法删除布局", message: self.profileErrorMessage(error))
+                self.presentAlert(title: L10n.tr("error.layout.delete"), message: self.profileErrorMessage(error))
             }
         }
     }
 
     private func profileErrorMessage(_ error: Error) -> String {
         if let error = error as? LaunchpadLayoutProfileError {
-            return error.errorDescription ?? error.localizedDescription
+            return L10n.profileError(error)
         }
         return layoutErrorMessage(error)
+    }
+
+    private func localizedProfileName(id: String, name: String) -> String {
+        id == LaunchpadLayoutProfileStore.defaultProfileID ? L10n.tr("layout.profile.default") : name
+    }
+
+    private func suggestedNewLayoutName() -> String {
+        let base = L10n.tr("layout.profile.new")
+        let taken = Set(store.layoutProfiles.map(\.name))
+        guard taken.contains(base) else { return base }
+        var index = 2
+        while taken.contains("\(base) \(index)") { index += 1 }
+        return "\(base) \(index)"
     }
 
     private func exportLayoutFile() {
         guard !store.isLoading, !store.apps.isEmpty else { return }
         let panel = NSSavePanel()
-        panel.title = "导出布局"
+        panel.title = L10n.tr("layout.export.title")
         panel.nameFieldStringValue = "QLaunch-layout.json"
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let data = try LaunchpadLayoutDocument.makeEncoder(pretty: true).encode(store.exportLayout())
-            try data.write(to: url, options: .atomic)
-        } catch {
-            presentAlert(title: "无法导出布局", message: layoutErrorMessage(error))
+        presentFilePanel(panel) { url in
+            guard let url else { return }
+            do {
+                let data = try LaunchpadLayoutDocument.makeEncoder(pretty: true).encode(store.exportLayout())
+                try data.write(to: url, options: .atomic)
+            } catch {
+                presentAlert(title: L10n.tr("error.layout.export"), message: layoutErrorMessage(error))
+            }
         }
     }
 
@@ -619,54 +656,53 @@ private struct ApplicationSettingsView: View {
         guard !store.isLoading, !store.apps.isEmpty else { return }
         importStatusMessage = nil
         let panel = NSOpenPanel()
-        panel.title = "导入布局"
-        panel.prompt = "打开"
+        panel.title = L10n.tr("layout.import.title")
+        panel.prompt = L10n.tr("common.open")
         panel.allowedContentTypes = [.json]
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        presentFilePanel(panel) { url in
+            guard let url else { return }
 
-        let document: LaunchpadLayoutDocument
-        do {
-            let data = try Data(contentsOf: url)
-            try LaunchpadLayoutImporter.validateJSONSize(data)
-            document = try LaunchpadLayoutDocument.makeDecoder().decode(
-                LaunchpadLayoutDocument.self,
-                from: data
-            )
-            try LaunchpadLayoutImporter.validate(document)
-        } catch {
-            presentAlert(title: "无法读取布局文件", message: layoutErrorMessage(error))
-            return
-        }
+            let document: LaunchpadLayoutDocument
+            do {
+                let data = try Data(contentsOf: url)
+                try LaunchpadLayoutImporter.validateJSONSize(data)
+                document = try LaunchpadLayoutDocument.makeDecoder().decode(
+                    LaunchpadLayoutDocument.self,
+                    from: data
+                )
+                try LaunchpadLayoutImporter.validate(document)
+            } catch {
+                presentAlert(title: L10n.tr("error.layout.read"), message: layoutErrorMessage(error))
+                return
+            }
 
-        let alert = NSAlert()
-        alert.messageText = "导入布局？"
-        alert.informativeText = """
-        将按文件重排当前排序和分组。文件中未出现的应用会排到最后。隐藏列表仅在文件含 `hidden` 时整表替换；省略 `hidden` 时，写进文件的应用会取消隐藏，其余隐藏项保留。导入前会把当前布局备份到「\(layoutBackupDirectoryLabel)/layout.backup.json」，可再导入该文件恢复。
-        """
-        alert.addButton(withTitle: "导入")
-        alert.addButton(withTitle: "取消")
-
-        let complete: (NSApplication.ModalResponse) -> Void = { response in
-            guard response == .alertFirstButtonReturn else { return }
-            self.applyImportedLayout(document)
-        }
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            alert.beginSheetModal(for: window, completionHandler: complete)
-        } else {
-            complete(alert.runModal())
+            let alert = NSAlert()
+            alert.messageText = L10n.tr("layout.import.confirm.title")
+            alert.informativeText = L10n.tr("layout.import.confirm.detail", layoutBackupDirectoryLabel)
+            alert.addButton(withTitle: L10n.tr("common.importPlain"))
+            alert.addButton(withTitle: L10n.tr("common.cancel"))
+            presentAlert(alert) { response in
+                guard response == .alertFirstButtonReturn else { return }
+                self.applyImportedLayout(document)
+            }
         }
     }
 
     private func applyImportedLayout(_ document: LaunchpadLayoutDocument) {
         do {
             let report = try store.applyLayout(document, mode: .merge)
-            importStatusMessage = "已导入 \(report.importedRootItems) 项，跳过 \(report.skippedUnknown.count) 个未知应用，追加 \(report.appendedLeftover.count) 个新应用"
+            importStatusMessage = L10n.tr(
+                "layout.import.result",
+                report.importedRootItems,
+                report.skippedUnknown.count,
+                report.appendedLeftover.count
+            )
         } catch {
             importStatusMessage = nil
-            presentAlert(title: "无法导入布局", message: layoutErrorMessage(error))
+            presentAlert(title: L10n.tr("error.layout.import"), message: layoutErrorMessage(error))
         }
     }
 
@@ -676,24 +712,24 @@ private struct ApplicationSettingsView: View {
         }
         switch error {
         case .invalidKind:
-            return "不是 QLaunch 布局文件。"
+            return L10n.tr("error.layout.invalidKind")
         case .unsupportedSchemaVersion:
-            return "不支持的布局文件版本。"
+            return L10n.tr("error.layout.unsupportedVersion")
         case .malformed(let reason):
             if reason == "application catalog is empty" {
-                return "应用列表尚未就绪，请等待扫描完成后再导入。"
+                return L10n.tr("error.layout.catalogEmpty")
             }
-            return "布局文件格式无效。"
+            return L10n.tr("error.layout.malformed")
         case .limitExceeded(let limit):
-            return limit == "json" ? "布局文件过大。" : "布局文件超出限制。"
+            return L10n.tr(limit == "json" ? "error.layout.tooLarge" : "error.layout.limitExceeded")
         case .duplicateID:
-            return "布局文件包含重复项。"
+            return L10n.tr("error.layout.duplicate")
         case .nestedFolder:
-            return "布局文件包含嵌套文件夹。"
+            return L10n.tr("error.layout.nestedFolder")
         case .itemHiddenOverlap:
-            return "应用不能同时出现在布局和隐藏列表中。"
+            return L10n.tr("error.layout.hiddenOverlap")
         case .strictUnresolved:
-            return "布局文件包含无法识别的应用。"
+            return L10n.tr("error.layout.unresolved")
         }
     }
 
@@ -701,7 +737,7 @@ private struct ApplicationSettingsView: View {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: L10n.tr("common.ok"))
         presentAlert(alert)
     }
 
@@ -716,6 +752,20 @@ private struct ApplicationSettingsView: View {
         } else {
             alert.runModal()
         }
+    }
+
+    /// File panels default to `.modalPanel`, which sits below Settings and the
+    /// Launchpad overlay (both `.popUpMenu`). A modal loop with an invisible
+    /// panel looks like a freeze. Attach them as a sheet on the host window.
+    private func presentFilePanel(_ panel: NSSavePanel, completion: @escaping (URL?) -> Void) {
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window) { response in
+                completion(response == .OK ? panel.url : nil)
+            }
+            return
+        }
+        panel.level = NSWindow.Level(rawValue: Int(NSWindow.Level.popUpMenu.rawValue) + 1)
+        completion(panel.runModal() == .OK ? panel.url : nil)
     }
 
     private func removeSelectedSource() {
@@ -763,22 +813,24 @@ private struct LayoutProfilePopUp: NSViewRepresentable {
         }
         guard let menu = button.menu else { return }
 
-        let userHeader = NSMenuItem(title: "用户布局", action: nil, keyEquivalent: "")
+        let userHeader = NSMenuItem(title: L10n.tr("layout.user"), action: nil, keyEquivalent: "")
         userHeader.isEnabled = false
         menu.addItem(userHeader)
         for profile in profiles {
-            let item = NSMenuItem(title: profile.name, action: nil, keyEquivalent: "")
+            let title = profile.id == LaunchpadLayoutProfileStore.defaultProfileID
+                ? L10n.tr("layout.profile.default") : profile.name
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.representedObject = LaunchpadLayoutSelectorID.user(profile.id)
             menu.addItem(item)
         }
 
         menu.addItem(.separator())
 
-        let autoHeader = NSMenuItem(title: "自动布局", action: nil, keyEquivalent: "")
+        let autoHeader = NSMenuItem(title: L10n.tr("layout.auto"), action: nil, keyEquivalent: "")
         autoHeader.isEnabled = false
         menu.addItem(autoHeader)
         for kind in LaunchpadAutoLayoutKind.allCases {
-            let item = NSMenuItem(title: kind.title, action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: kind.localizedTitle, action: nil, keyEquivalent: "")
             item.representedObject = LaunchpadLayoutSelectorID.auto(kind)
             menu.addItem(item)
         }
@@ -816,13 +868,13 @@ private struct AISettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("把下面的提示词复制给本地的 AI Agent，比如 Codex、Grok Build、Claude Code、Antigravity、Kimi Work 等")
+                    Text(L10n.tr("settings.ai.detail"))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 12)
-                Button(didCopy ? "已复制" : "复制提示词") {
+                Button(didCopy ? L10n.tr("settings.ai.copied") : L10n.tr("settings.ai.copy")) {
                     copyPrompt()
                 }
                 .buttonStyle(.borderedProminent)
@@ -916,7 +968,7 @@ private struct AboutSettingsView: View {
             Text("QLaunch")
                 .font(.title.weight(.bold))
 
-            Text("高性能、原生 Metal 渲染的 macOS 应用启动器。")
+            Text(L10n.tr("about.tagline"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -926,7 +978,7 @@ private struct AboutSettingsView: View {
     }
 
     private var versionCard: some View {
-        aboutCard(header: "软件更新") {
+        aboutCard(header: L10n.tr("about.updates")) {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     Image(systemName: "arrow.triangle.2.circlepath")
@@ -940,7 +992,7 @@ private struct AboutSettingsView: View {
 
                     Spacer(minLength: 12)
 
-                    Button("检查更新") {
+                    Button(L10n.tr("about.checkUpdates")) {
                         updater.checkForUpdates()
                     }
                     .buttonStyle(.bordered)
@@ -959,8 +1011,8 @@ private struct AboutSettingsView: View {
                         .frame(width: 22)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("自动检查更新")
-                        Text("启动时静默检查，之后按计划后台检查")
+                        Text(L10n.tr("about.autoUpdates"))
+                        Text(L10n.tr("about.autoUpdates.detail"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -968,7 +1020,7 @@ private struct AboutSettingsView: View {
 
                     Spacer(minLength: 12)
 
-                    Toggle("自动检查更新", isOn: $updater.automaticallyChecksForUpdates)
+                    Toggle(L10n.tr("about.autoUpdates"), isOn: $updater.automaticallyChecksForUpdates)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -980,10 +1032,10 @@ private struct AboutSettingsView: View {
     }
 
     private var authorAndCommunityCard: some View {
-        aboutCard(header: "关于作者与社区") {
+        aboutCard(header: L10n.tr("about.authorCommunity")) {
             VStack(spacing: 0) {
                 linkRow(
-                    title: "作者",
+                    title: L10n.tr("about.author"),
                     subtitle: "Qzrzz · https://qzrzz.com/",
                     url: Self.authorURL,
                     icon: authorLogo
@@ -997,21 +1049,21 @@ private struct AboutSettingsView: View {
                 )
                 aboutDivider()
                 linkRow(
-                    title: "X（推特）",
+                    title: L10n.tr("about.twitter"),
                     subtitle: Self.xURL,
                     url: Self.xURL,
                     icon: templateIcon("RemixTwitterX", systemFallback: "at", tint: .primary)
                 )
                 aboutDivider()
                 linkRow(
-                    title: "小红书",
+                    title: L10n.tr("about.xiaohongshu"),
                     subtitle: Self.xiaohongshuURL,
                     url: Self.xiaohongshuURL,
                     icon: templateIcon("RemixXiaohongshu", systemFallback: "book", tint: .red)
                 )
                 aboutDivider()
                 linkRow(
-                    title: "哔哩哔哩",
+                    title: L10n.tr("about.bilibili"),
                     subtitle: Self.bilibiliURL,
                     url: Self.bilibiliURL,
                     icon: templateIcon("RemixBilibili", systemFallback: "play.rectangle.fill", tint: .cyan)
@@ -1099,7 +1151,7 @@ private struct AboutSettingsView: View {
             }
             .buttonStyle(.plain)
             .frame(width: 28, height: 28)
-            .help("打开链接: \(url)")
+            .help(L10n.tr("about.openLink", url))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)

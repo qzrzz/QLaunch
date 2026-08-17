@@ -171,6 +171,15 @@ enum AppScanner {
         ]
     }
 
+    /// Real bundles for system apps whose `/Applications` entries are only
+    /// cryptex symlinks. Kept as a fallback when that front-door link is missing.
+    private static var implicitRoots: [URL] {
+        [
+            URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications"),
+            URL(fileURLWithPath: "/System/Volumes/Preboot/Cryptexes/App/System/Applications")
+        ]
+    }
+
     static func scan(additionalRoots: [URL] = []) -> [AppInfo] {
         struct Candidate {
             let url: URL
@@ -179,52 +188,29 @@ enum AppScanner {
             let fileName: String
         }
 
-        let fileManager = FileManager.default
-        let roots = defaultRoots + additionalRoots
+        let appURLs = collectApplicationURLs(
+            from: defaultRoots + implicitRoots + additionalRoots
+        )
 
         var candidates: [Candidate] = []
         var seenPaths = Set<String>()
-        let keys: [URLResourceKey] = [
-            .isDirectoryKey,
-            .isPackageKey,
-            .localizedNameKey,
-            .addedToDirectoryDateKey,
-            .creationDateKey
-        ]
 
-        for root in roots where fileManager.fileExists(atPath: root.path) {
-            guard let enumerator = fileManager.enumerator(
-                at: root,
-                includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) else { continue }
-
-            for case let url as URL in enumerator {
-                guard url.pathExtension == "app" else { continue }
-                let standardizedPath = url.standardizedFileURL.path
-                guard seenPaths.insert(standardizedPath).inserted else { continue }
-                guard let bundle = Bundle(url: url),
-                      let identifier = bundle.bundleIdentifier else { continue }
-                // Skip background-only / agent helpers without a UI when possible.
-                if let bgOnly = bundle.object(forInfoDictionaryKey: "LSBackgroundOnly") as? Bool, bgOnly {
-                    continue
-                }
-                if let uiElement = bundle.object(forInfoDictionaryKey: "LSUIElement") as? Bool, uiElement {
-                    // Still allow menu-bar apps that users expect to launch.
-                }
-                let fileName = url.deletingPathExtension().lastPathComponent
-                let displayName = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                    ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
-                    ?? fileName
-                candidates.append(
-                    Candidate(
-                        url: url,
-                        bundleIdentifier: identifier,
-                        displayName: displayName,
-                        fileName: fileName
-                    )
-                )
+        for url in appURLs {
+            let standardizedPath = url.standardizedFileURL.path
+            guard seenPaths.insert(standardizedPath).inserted else { continue }
+            guard let identity = bundleIdentity(at: url) else { continue }
+            // Skip background-only / agent helpers without a UI when possible.
+            if identity.isBackgroundOnly {
+                continue
             }
+            candidates.append(
+                Candidate(
+                    url: url,
+                    bundleIdentifier: identity.identifier,
+                    displayName: identity.displayName,
+                    fileName: url.deletingPathExtension().lastPathComponent
+                )
+            )
         }
 
         let candidatesByIdentifier = Dictionary(grouping: candidates, by: \.bundleIdentifier)
@@ -266,6 +252,101 @@ enum AppScanner {
             return $0.url.path < $1.url.path
         }
     }
+
+    /// `FileManager.enumerator` does not yield symbolic-link packages, so
+    /// `/Applications/Safari.app` (a cryptex symlink) is invisible to it.
+    /// Walk with `contentsOfDirectory` and resolve `.app` links ourselves.
+    private static func collectApplicationURLs(from roots: [URL]) -> [URL] {
+        let fileManager = FileManager.default
+        var urls: [URL] = []
+        var seenDirectories = Set<String>()
+        var seenApps = Set<String>()
+        var stack: [URL] = []
+
+        for root in roots {
+            let resolved = root.resolvingSymlinksInPath().standardizedFileURL
+            guard fileManager.fileExists(atPath: resolved.path) else { continue }
+            if resolved.pathExtension == "app" {
+                if seenApps.insert(resolved.path).inserted {
+                    urls.append(resolved)
+                }
+            } else {
+                stack.append(resolved)
+            }
+        }
+
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .isHiddenKey
+        ]
+        while let directory = stack.popLast() {
+            let directoryPath = directory.standardizedFileURL.path
+            guard seenDirectories.insert(directoryPath).inserted else { continue }
+            // Do not pass `.skipsHiddenFiles`: `/Applications/Safari.app` is a
+            // cryptex symlink that reports `isHidden == true` and would be dropped.
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: Array(keys),
+                options: []
+            ) else { continue }
+
+            for entry in entries {
+                let values = try? entry.resourceValues(forKeys: keys)
+                let isSymlink = values?.isSymbolicLink == true
+                let resolved = (isSymlink ? entry.resolvingSymlinksInPath() : entry)
+                    .standardizedFileURL
+                // Preserve the previous hidden-file behavior for ordinary
+                // bundles. Hidden symbolic-link apps are inspected because
+                // cryptex front doors such as Safari report themselves hidden.
+                if values?.isHidden == true, !isSymlink { continue }
+                if entry.pathExtension == "app" || resolved.pathExtension == "app" {
+                    if seenApps.insert(resolved.path).inserted {
+                        urls.append(resolved)
+                    }
+                    continue
+                }
+                if values?.isHidden == true { continue }
+                if isSymlink { continue }
+                if values?.isPackage == true { continue }
+                if values?.isDirectory == true {
+                    stack.append(resolved)
+                }
+            }
+        }
+        return urls
+    }
+
+    private static func bundleIdentity(at url: URL) -> (
+        identifier: String,
+        displayName: String,
+        isBackgroundOnly: Bool
+    )? {
+        let fileName = url.deletingPathExtension().lastPathComponent
+        if let bundle = Bundle(url: url), let identifier = bundle.bundleIdentifier {
+            let displayName = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                ?? fileName
+            let backgroundOnly = bundle.object(forInfoDictionaryKey: "LSBackgroundOnly") as? Bool ?? false
+            return (identifier, displayName, backgroundOnly)
+        }
+
+        // Cryptex / stub bundles sometimes fail `Bundle(url:)` even though
+        // Info.plist is readable after resolving the symlink.
+        let info = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist"))
+        guard let identifier = info?["CFBundleIdentifier"] as? String,
+              !identifier.isEmpty else { return nil }
+        let displayName = (info?["CFBundleDisplayName"] as? String)
+            ?? (info?["CFBundleName"] as? String)
+            ?? fileName
+        let backgroundOnly: Bool
+        if let flag = info?["LSBackgroundOnly"] as? Bool {
+            backgroundOnly = flag
+        } else if let flag = info?["LSBackgroundOnly"] as? NSNumber {
+            backgroundOnly = flag.boolValue
+        } else {
+            backgroundOnly = false
+        }
+        return (identifier, displayName, backgroundOnly)
+    }
 }
 
 enum AppUsageMetadata {
@@ -305,22 +386,11 @@ enum IconRenderQuality: String, CaseIterable, Identifiable {
     var id: Self { self }
 
     var title: String {
-        switch self {
-        case .quality: "画质优先"
-        case .performance: "性能优先"
-        case .lowMemory: "低内存占用"
-        }
+        L10n.tr("renderQuality.\(rawValue).title")
     }
 
     var detail: String {
-        switch self {
-        case .quality:
-            "最高画质，设计师必备，内存消耗更高"
-        case .performance:
-            "常规画质，与系统显示效果相当"
-        case .lowMemory:
-            "常规画质，为减小内存消耗，滚动页面时图标加载会更慢"
-        }
+        L10n.tr("renderQuality.\(rawValue).detail")
     }
 
     /// Source pixels per layout point when baking icon textures.
@@ -386,12 +456,7 @@ enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
     var id: Self { self }
 
     var title: String {
-        switch self {
-        case .fly: "飞入（iOS 桌面）"
-        case .zoom: "放大"
-        case .fade: "渐入"
-        case .none: "无"
-        }
+        L10n.tr("animation.\(rawValue)")
     }
 
     var duration: CFTimeInterval {
@@ -486,7 +551,10 @@ final class AppStore: ObservableObject {
     /// `true` while the user is actively scrolling (finger / wheel phase).
     @Published private(set) var isPageGestureActive = false
 
-    var pageCapacity: Int { GridMetrics.pageCapacity }
+    var pageCapacity: Int {
+        let preset = GridLayoutPreset.current
+        return preset.columns * preset.exportedRows(itemCount: activeDisplayItems.count)
+    }
 
     func setApplyingRenderQuality(_ applying: Bool) {
         if isApplyingRenderQuality != applying {
@@ -503,6 +571,9 @@ final class AppStore: ObservableObject {
     private var ignoreScrollMomentum = false
     /// Un-rubber-banded page at mouse-down. Pointer X maps 1:1 onto this origin.
     private var pagePanOrigin: Double = 0
+    /// The renderer owns adaptive infinite-canvas geometry because it depends
+    /// on the live viewport. Keyboard navigation reads the same column count.
+    private var infiniteCanvasNavigationColumns = InfiniteCanvasMetrics.columns
     /// Root-grid page captured when a folder opens, restored when it closes.
     private var pageBeforeFolder: Double?
     /// Root-grid page captured when search starts, restored when search clears.
@@ -777,14 +848,15 @@ final class AppStore: ObservableObject {
             }
             : nil
         let preset = GridLayoutPreset.current
+        let exportedRows = preset.exportedRows(itemCount: items.count)
         return LaunchpadLayoutDocument(
             exportedAt: Date(),
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             grid: LaunchpadLayoutGrid(
                 preset: preset.rawValue,
                 columns: preset.columns,
-                rows: preset.rows,
-                pageCapacity: preset.columns * preset.rows
+                rows: exportedRows,
+                pageCapacity: preset.columns * exportedRows
             ),
             items: items,
             hidden: hiddenAppIDs.sorted(),
@@ -877,6 +949,28 @@ final class AppStore: ObservableObject {
 
     func setLayoutMode(_ mode: LaunchpadLayoutMode) {
         guard mode != layoutMode else { return }
+        if case .auto(let kind) = mode,
+           autoLayoutItemsByKind[kind] == nil {
+            // Switching between automatic orders must keep the last complete
+            // flat list on screen until the detached sort publishes its result.
+            // Falling back to scanner order here caused a visible intermediate
+            // reorder (and could expose icons whose lazy textures were not ready).
+            let currentItems = displayItems
+            let currentAppIDs = currentItems.compactMap { item -> String? in
+                guard case .app(let app) = item else { return nil }
+                return app.id
+            }
+            let visibleAppIDs = Set(
+                apps.lazy
+                    .filter { !self.hiddenAppIDs.contains($0.id) }
+                    .map(\.id)
+            )
+            if currentAppIDs.count == currentItems.count,
+               currentAppIDs.count == visibleAppIDs.count,
+               Set(currentAppIDs) == visibleAppIDs {
+                autoLayoutFallbackItems = currentItems
+            }
+        }
         if !mode.isUser {
             leaveOpenedFolder()
         }
@@ -900,7 +994,7 @@ final class AppStore: ObservableObject {
         guard case .auto(let kind) = layoutMode, !isSearching else { return nil }
         autoLayoutReorderHintAttempts += 1
         guard autoLayoutReorderHintAttempts == 2 else { return nil }
-        return kind.dragHintMessage
+        return kind.localizedDragHintMessage
     }
 
     func recordAppLaunch(_ app: AppInfo) {
@@ -1027,7 +1121,7 @@ final class AppStore: ObservableObject {
     func renameFolder(_ folderID: String, to name: String) {
         guard let index = folders.firstIndex(where: { $0.id == folderID }) else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedName = trimmedName.isEmpty ? "文件夹" : trimmedName
+        let normalizedName = trimmedName.isEmpty ? L10n.tr("launchpad.folder") : trimmedName
         guard folders[index].name != normalizedName else { return }
 
         folders[index].name = normalizedName
@@ -1113,6 +1207,13 @@ final class AppStore: ObservableObject {
 
     // MARK: Keyboard focus
 
+    func setInfiniteCanvasNavigationColumns(_ columns: Int) {
+        infiniteCanvasNavigationColumns = min(
+            max(columns, 1),
+            InfiniteCanvasMetrics.columns
+        )
+    }
+
     func focusApp(id: String) {
         guard activeDisplayItems.contains(where: { $0.id == id }) else { return }
         keyboardFocusID = id
@@ -1178,8 +1279,11 @@ final class AppStore: ObservableObject {
         } ?? fallback
         let pageEnd = min(pageStart + pageCapacity, items.count)
         let local = current - pageStart
-        let row = local / GridMetrics.columns
-        let column = local % GridMetrics.columns
+        let navigationColumns = GridLayoutPreset.current.isInfiniteCanvas
+            ? infiniteCanvasNavigationColumns
+            : GridMetrics.columns
+        let row = local / navigationColumns
+        let column = local % navigationColumns
         var destination = current
 
         switch direction {
@@ -1189,23 +1293,23 @@ final class AppStore: ObservableObject {
             } else if page > 0 {
                 let previousStart = (page - 1) * pageCapacity
                 let previousEnd = min(previousStart + pageCapacity, items.count)
-                destination = min(previousStart + row * GridMetrics.columns + GridMetrics.columns - 1,
+                destination = min(previousStart + row * navigationColumns + navigationColumns - 1,
                                   previousEnd - 1)
             }
         case .right:
-            if column + 1 < GridMetrics.columns, current + 1 < pageEnd {
+            if column + 1 < navigationColumns, current + 1 < pageEnd {
                 destination = current + 1
             } else if page + 1 < pageCount {
                 let nextStart = (page + 1) * pageCapacity
-                destination = min(nextStart + row * GridMetrics.columns, items.count - 1)
+                destination = min(nextStart + row * navigationColumns, items.count - 1)
             }
         case .up:
             if row > 0 {
-                destination = current - GridMetrics.columns
+                destination = current - navigationColumns
             }
         case .down:
-            if current + GridMetrics.columns < pageEnd {
-                destination = current + GridMetrics.columns
+            if current + navigationColumns < pageEnd {
+                destination = current + navigationColumns
             }
         }
 
@@ -1670,7 +1774,7 @@ final class AppStore: ObservableObject {
             return nil
         }
 
-        let folder = AppFolder(appIDs: [targetAppID, draggedAppID])
+        let folder = AppFolder(name: L10n.tr("launchpad.folder"), appIDs: [targetAppID, draggedAppID])
         folders.append(folder)
         let targetIndex = itemOrderIDs.firstIndex(of: targetAppID)
             ?? launchpadItems.firstIndex(where: { $0.id == targetAppID })
@@ -1940,6 +2044,10 @@ final class AppStore: ObservableObject {
                 // The cache itself is intentionally not @Published: send one
                 // invalidation only when the complete replacement is ready.
                 self.objectWillChange.send()
+                // The grid is rendered by MTKView rather than SwiftUI. Wake it
+                // at the same time so the newly sorted order is visible now,
+                // without waiting for an unrelated input or display event.
+                NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
             }
         }
     }

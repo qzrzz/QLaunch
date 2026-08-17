@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "QLaunchpad",
+    defaultLocalization: "zh-Hans",
     platforms: [
         .macOS(.v14)
     ],

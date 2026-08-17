@@ -89,7 +89,7 @@ bun run layout:validate -- --in "$HOME/Library/Application Support/QLaunch/qlaun
 }
 ```
 
-第一页 = `items[0 ..< grid.pageCapacity]`。不要假设 24：`4x2-256` → 8，`5x4-128` → 20，默认 `6x4-128` → 24，`7x5-128` → 35。
+第一页 = `items[0 ..< grid.pageCapacity]`。不要假设 24：`4x2-256` → 8，`5x4-128` → 20，默认 `6x4-128` → 24，`7x5-128` / `7x5-64` → 35，`8x7-64` → 56。`infinite-canvas-128` / `infinite-canvas-256` 均使用 `16 × N` 且只有一个逻辑页面，`N` 按导出项数量向上取整；两者只改变图标的最大缩放尺寸。
 
 ## 导出语义
 

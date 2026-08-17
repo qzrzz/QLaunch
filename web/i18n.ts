@@ -49,6 +49,12 @@ const i18n: II18nConfig = {
             "Chinese language users no longer need to switch input methods. Type effortlessly — find target apps instantly whether your input method is set to English or Pinyin.",
         },
         {
+          id: "infcolors",
+          title: "Infinite Canvas + Color Sorting",
+          description:
+            "Arrange all your app icons on an infinite canvas, zoom and pan freely, and sort them by icon color.",
+        },
+        {
           id: "ai",
           title: "AI-Powered App Organization, Open & Free",
           description:
@@ -107,6 +113,12 @@ const i18n: II18nConfig = {
           title: "ピンイン検索",
           description:
             "中国語ユーザーも入力法を切り替える必要はありません。現在の入力モードが英語でもピンインでも、思考を妨げずに直接入力して目的のアプリを検索できます。",
+        },
+        {
+          id: "infcolors",
+          title: "無限キャンバス + 色順ソート",
+          description:
+            "すべてのアプリアイコンを無限キャンバスに並べ、自由にズームやパンをしながら、アイコンの色で並べ替えることができます。",
         },
         {
           id: "ai",
@@ -169,6 +181,12 @@ const i18n: II18nConfig = {
             "중국어 사용자는 더 이상 입력기를 전환할 필요가 없습니다. 현재 입력 모드가 영문이든 병음이든 상관없이 원하는 앱을 즉시 검색할 수 있습니다.",
         },
         {
+          id: "infcolors",
+          title: "무한 캔버스 + 색상 정렬",
+          description:
+            "모든 앱 아이콘을 무한 캔버스에 배치하고 자유롭게 확대·축소하거나 이동하며 아이콘 색상별로 정렬할 수 있습니다.",
+        },
+        {
           id: "ai",
           title: "AI를 통한 앱 정렬, 개방형 & 무료",
           description:
@@ -227,6 +245,12 @@ const i18n: II18nConfig = {
           title: "Tìm kiếm Pinyin",
           description:
             "Người dùng tiếng Trung không cần phải chuyển đổi bộ gõ. Nhập liệu tự nhiên — tìm thấy ứng dụng tức thì bất kể bộ gõ đang ở chế độ Tiếng Anh hay Pinyin.",
+        },
+        {
+          id: "infcolors",
+          title: "Canvas vô hạn + Sắp xếp theo màu",
+          description:
+            "Sắp xếp mọi biểu tượng ứng dụng trên canvas vô hạn, tự do thu phóng và di chuyển, đồng thời sắp xếp theo màu biểu tượng.",
         },
         {
           id: "ai",
@@ -289,6 +313,12 @@ const i18n: II18nConfig = {
             "Usuários de idioma chinês não precisam trocar de método de entrada. Digitação direta — encontre os aplicativos instantaneamente, esteja o teclado em inglês ou Pinyin.",
         },
         {
+          id: "infcolors",
+          title: "Canvas infinito + Ordenação por cores",
+          description:
+            "Organize todos os ícones de aplicativos em um canvas infinito, navegue e aplique zoom livremente e ordene-os pela cor do ícone.",
+        },
+        {
           id: "ai",
           title: "IA para organizar seus apps, aberto e gratuito",
           description:
@@ -347,6 +377,12 @@ const i18n: II18nConfig = {
           title: "Búsqueda Pinyin",
           description:
             "Los usuarios de idioma chino ya no necesitan cambiar el método de entrada. Escribe de forma directa y encuentra aplicaciones al instante, ya esté tu teclado en inglés o en Pinyin.",
+        },
+        {
+          id: "infcolors",
+          title: "Lienzo infinito + Ordenación por color",
+          description:
+            "Organiza todos los iconos de aplicaciones en un lienzo infinito, desplázate y amplía libremente, y ordénalos por el color del icono.",
         },
         {
           id: "ai",
@@ -409,6 +445,12 @@ const i18n: II18nConfig = {
             "Chinesischsprachige Nutzer müssen die Eingabemethode nicht mehr wechseln. Tippen Sie einfach los — Ziel-Apps werden sofort gefunden, egal ob die Tastatur auf Englisch oder Pinyin steht.",
         },
         {
+          id: "infcolors",
+          title: "Unendliche Arbeitsfläche + Farbsortierung",
+          description:
+            "Ordnen Sie alle App-Symbole auf einer unendlichen Arbeitsfläche an, zoomen und verschieben Sie frei und sortieren Sie sie nach Symbolfarbe.",
+        },
+        {
           id: "ai",
           title: "KI-gestützte App-Organisation, offen & kostenlos",
           description:
@@ -469,6 +511,12 @@ const i18n: II18nConfig = {
             "Les utilisateurs sinophones n'ont plus besoin de changer de méthode de saisie. Tapez directement — vos applications cibles sont trouvées instantanément, que vous soyez en anglais ou en Pinyin.",
         },
         {
+          id: "infcolors",
+          title: "Canvas infini + Tri par couleur",
+          description:
+            "Disposez toutes les icônes d'applications sur un canvas infini, zoomez et déplacez-vous librement, puis triez-les selon leur couleur.",
+        },
+        {
           id: "ai",
           title: "Organisation des apps par IA, ouvert et gratuit",
           description:
@@ -527,6 +575,12 @@ const i18n: II18nConfig = {
           title: "Поиск по пиньин (Pinyin)",
           description:
             "Китайскоязычным пользователям больше не нужно переключать раскладку ввода. Вводите текст прямо так — нужные приложения находятся мгновенно, независимо от того, активен ли английский язык или пиньин.",
+        },
+        {
+          id: "infcolors",
+          title: "Бесконечный холст + Сортировка по цвету",
+          description:
+            "Разместите все значки приложений на бесконечном холсте, свободно масштабируйте и перемещайте его, а также сортируйте значки по цвету.",
         },
         {
           id: "ai",

@@ -441,6 +441,7 @@ final class LaunchpadContainerView: NSView {
 
 struct LaunchpadOverlayView: View {
     @ObservedObject var store: AppStore
+    @ObservedObject private var language = LocalizationManager.shared
 
     var body: some View {
         GeometryReader { _ in
@@ -491,6 +492,7 @@ struct LaunchpadOverlayView: View {
             .animation(.easeOut(duration: 0.14), value: store.isFolderRemovalTargeted)
         }
         .ignoresSafeArea()
+        .environment(\.locale, language.locale)
     }
 }
 
@@ -501,7 +503,7 @@ private struct FolderRemovalDropZone: View {
         HStack(spacing: 9) {
             Image(systemName: "arrow.up.forward.app")
                 .font(.system(size: 16, weight: .semibold))
-            Text("移出文件夹")
+            Text(L10n.tr("launchpad.removeFromFolder"))
                 .font(.system(size: 15, weight: .semibold))
         }
         .foregroundStyle(.white.opacity(isTargeted ? 1 : 0.82))
@@ -534,7 +536,7 @@ private struct FolderTitleField: View {
     }
 
     var body: some View {
-        TextField("文件夹", text: $draftName) {
+        TextField(L10n.tr("launchpad.folder"), text: $draftName) {
             commitName()
         }
         .textFieldStyle(.plain)
@@ -554,7 +556,7 @@ private struct FolderTitleField: View {
                 .fill(Color.white.opacity(isFocused ? 0.12 : 0))
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("文件夹名称")
+        .accessibilityLabel(L10n.tr("launchpad.folderName"))
         .onAppear {
             draftName = folder.name
         }
@@ -600,7 +602,7 @@ private struct SearchField: View {
                 ),
                 isFocused: $isFocused,
                 focusRequestID: focusRequestID,
-                placeholder: "搜索"
+                placeholder: L10n.tr("launchpad.search")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
@@ -630,7 +632,7 @@ private struct SearchField: View {
             .opacity(store.searchText.isEmpty ? 0 : 1)
             .allowsHitTesting(!store.searchText.isEmpty)
             .accessibilityHidden(store.searchText.isEmpty)
-            .help("Clear search")
+            .help(L10n.tr("launchpad.clearSearch"))
 
             Button {
                 NotificationCenter.default.post(name: .qlaunchpadOpenSettings, object: nil)
@@ -645,12 +647,12 @@ private struct SearchField: View {
             .padding(14)
             .contentShape(Rectangle())
             .padding(-14)
-            .help("Open Settings")
-            .accessibilityLabel("Open Settings")
+            .help(L10n.tr("launchpad.openSettings"))
+            .accessibilityLabel(L10n.tr("launchpad.openSettings"))
         }
         .launchpadGlassField(isEmphasized: !store.searchText.isEmpty)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("搜索应用")
+        .accessibilityLabel(L10n.tr("launchpad.searchApps"))
     }
 }
 
@@ -977,7 +979,7 @@ private struct PageIndicator: View {
                                 : LaunchpadPageIndicatorHitArea.dotWidth,
                             height: LaunchpadPageIndicatorHitArea.dotHeight
                         )
-                        .accessibilityLabel("第 \(page + 1) 页")
+                        .accessibilityLabel(L10n.tr("launchpad.page", page + 1))
                         .accessibilityAddTraits(page == currentPage ? .isSelected : [])
                         .accessibilityAction {
                             store.goToPage(page)

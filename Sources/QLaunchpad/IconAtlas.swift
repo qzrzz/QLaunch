@@ -3,15 +3,12 @@ import CoreGraphics
 import ImageIO
 import Metal
 
-private var iconTextureRasterScale: CGFloat {
-    IconRenderQuality.current.rasterScale
-}
-
 /// One linear Display P3 texture per app.
 ///
-/// - **Quality:** `RGBA16Float`, 4× raster.
-/// - **Performance:** same linear bake, packed as `RGBA8Unorm_srgb`, 2× raster.
+/// - **Quality:** `RGBA16Float`, normally 4× raster.
+/// - **Performance:** same linear bake, packed as `RGBA8Unorm_srgb`, normally 2× raster.
 /// - **Low memory:** same 2× sRGB8 bake as performance (residency is page-windowed).
+/// - **64pt layouts:** fixed 128px textures in every quality mode.
 ///
 /// 8-bit modes store `sRGB(premul)` in `RGBA8Unorm_srgb` so sampling returns
 /// linear light (no dark posterization). The shader then converts to
@@ -44,8 +41,8 @@ final class IconTextureStore: @unchecked Sendable {
     private let bakeNotifyQueue = DispatchQueue(label: "com.qzrzz.qlaunchpad.icon-bake.notify")
     private var bakeNotifyScheduled = false
 
-    private var pixelSize = Int(
-        GridLayoutPreset.current.iconPointSize * IconRenderQuality.current.rasterScale
+    private var pixelSize = GridLayoutPreset.current.iconPixelSize(
+        for: IconRenderQuality.current
     )
     private var cachedQualityRaw = IconRenderQuality.current.rawValue
 
@@ -60,7 +57,7 @@ final class IconTextureStore: @unchecked Sendable {
     /// Switch texture resolution when the grid preset or render quality changes.
     func configure(for preset: GridLayoutPreset) {
         let quality = IconRenderQuality.current
-        let requestedPixelSize = Int(preset.iconPointSize * quality.rasterScale)
+        let requestedPixelSize = preset.iconPixelSize(for: quality)
         cacheLock.lock()
         defer { cacheLock.unlock() }
         guard pixelSize != requestedPixelSize || cachedQualityRaw != quality.rawValue else {
@@ -74,9 +71,7 @@ final class IconTextureStore: @unchecked Sendable {
     /// Drop all cached textures and sync pixel size to the active quality/layout.
     func resetForRenderQualityChange() {
         let quality = IconRenderQuality.current
-        let requestedPixelSize = Int(
-            GridLayoutPreset.current.iconPointSize * quality.rasterScale
-        )
+        let requestedPixelSize = GridLayoutPreset.current.iconPixelSize(for: quality)
         cacheLock.lock()
         pixelSize = requestedPixelSize
         cachedQualityRaw = quality.rawValue
@@ -143,9 +138,7 @@ final class IconTextureStore: @unchecked Sendable {
     /// production so rendering never starts a second CoreGraphics worker.
     func cachedTexture(for app: AppInfo) -> MTLTexture? {
         let quality = IconRenderQuality.current
-        let requestedPixelSize = Int(
-            GridLayoutPreset.current.iconPointSize * quality.rasterScale
-        )
+        let requestedPixelSize = GridLayoutPreset.current.iconPixelSize(for: quality)
         let key = cacheKey(for: app, pixelSize: requestedPixelSize, quality: quality.rawValue)
         cacheLock.lock()
         defer { cacheLock.unlock() }
@@ -163,9 +156,7 @@ final class IconTextureStore: @unchecked Sendable {
     func ensureTexture(for app: AppInfo) -> MTLTexture? {
         if let cached = cachedTexture(for: app) { return cached }
         let quality = IconRenderQuality.current
-        let requestedPixelSize = Int(
-            GridLayoutPreset.current.iconPointSize * quality.rasterScale
-        )
+        let requestedPixelSize = GridLayoutPreset.current.iconPixelSize(for: quality)
         let key = cacheKey(for: app, pixelSize: requestedPixelSize, quality: quality.rawValue)
         for _ in 0..<750 {
             cacheLock.lock()
@@ -187,9 +178,7 @@ final class IconTextureStore: @unchecked Sendable {
 
     func texture(for app: AppInfo, allowCreate: Bool = true) -> MTLTexture? {
         let quality = IconRenderQuality.current
-        let requestedPixelSize = Int(
-            GridLayoutPreset.current.iconPointSize * quality.rasterScale
-        )
+        let requestedPixelSize = GridLayoutPreset.current.iconPixelSize(for: quality)
         cacheLock.lock()
         if pixelSize != requestedPixelSize || cachedQualityRaw != quality.rawValue {
             pixelSize = requestedPixelSize
@@ -488,7 +477,7 @@ final class FolderIconTextureStore: @unchecked Sendable {
 
     func backgroundTexture(for preset: GridLayoutPreset) -> MTLTexture? {
         let quality = IconRenderQuality.current
-        let pixelSize = Int(preset.iconPointSize * quality.rasterScale)
+        let pixelSize = preset.iconPixelSize(for: quality)
         let key = "\(quality.rawValue)|\(pixelSize)"
         cacheLock.lock()
         if let texture = backgroundCache[key] {
@@ -504,7 +493,6 @@ final class FolderIconTextureStore: @unchecked Sendable {
                 padImage: padImage,
                 members: [],
                 pixelSize: pixelSize,
-                iconPointSize: preset.iconPointSize,
                 quality: quality
             )
         } else {
@@ -536,7 +524,7 @@ final class FolderIconTextureStore: @unchecked Sendable {
         let quality = IconRenderQuality.current
         let previewMembers = Array(members.prefix(9))
         guard !previewMembers.isEmpty else { return nil }
-        let pixelSize = Int(preset.iconPointSize * quality.rasterScale)
+        let pixelSize = preset.iconPixelSize(for: quality)
         let key = CacheKey(
             folderID: folder.id,
             appIDs: previewMembers.map(\.id),
@@ -573,7 +561,7 @@ final class FolderIconTextureStore: @unchecked Sendable {
         let quality = IconRenderQuality.current
         let previewMembers = Array(members.prefix(9))
         guard !previewMembers.isEmpty else { return nil }
-        let pixelSize = Int(preset.iconPointSize * quality.rasterScale)
+        let pixelSize = preset.iconPixelSize(for: quality)
         let key = CacheKey(
             folderID: folder.id,
             appIDs: previewMembers.map(\.id),
@@ -606,7 +594,6 @@ final class FolderIconTextureStore: @unchecked Sendable {
                 padImage: padImage,
                 members: previewMembers,
                 pixelSize: pixelSize,
-                iconPointSize: preset.iconPointSize,
                 quality: quality
             )
         } else {
@@ -632,7 +619,7 @@ final class FolderIconTextureStore: @unchecked Sendable {
     }
 
     private func padImage(for preset: GridLayoutPreset) -> CGImage? {
-        let pixelSize = Int(preset.iconPointSize * iconTextureRasterScale)
+        let pixelSize = preset.iconPixelSize(for: IconRenderQuality.current)
         let resourceName = pixelSize > 512 ? "glass-pad-1024" : "glass-pad-512"
         guard let url = QLaunchpadResources.bundle?.url(
                   forResource: resourceName,
@@ -647,7 +634,6 @@ final class FolderIconTextureStore: @unchecked Sendable {
         padImage: CGImage,
         members: [AppInfo],
         pixelSize px: Int,
-        iconPointSize: CGFloat,
         quality: IconRenderQuality
     ) -> MTLTexture? {
         switch quality {
@@ -655,15 +641,13 @@ final class FolderIconTextureStore: @unchecked Sendable {
             return makeLinearFloat16Texture(
                 padImage: padImage,
                 members: members,
-                pixelSize: px,
-                iconPointSize: iconPointSize
+                pixelSize: px
             )
         case .performance, .lowMemory:
             return makeLinearUNorm8Texture(
                 padImage: padImage,
                 members: members,
-                pixelSize: px,
-                iconPointSize: iconPointSize
+                pixelSize: px
             )
         }
     }
@@ -691,16 +675,14 @@ final class FolderIconTextureStore: @unchecked Sendable {
     private func makeLinearFloat16Texture(
         padImage: CGImage,
         members: [AppInfo],
-        pixelSize px: Int,
-        iconPointSize: CGFloat
+        pixelSize px: Int
     ) -> MTLTexture? {
         guard let raster = makeLinearFloat16Context(pixelSize: px) else { return nil }
         composeFolder(
             padImage: padImage,
             members: members,
             into: raster.context,
-            pixelSize: px,
-            iconPointSize: iconPointSize
+            pixelSize: px
         )
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -727,16 +709,14 @@ final class FolderIconTextureStore: @unchecked Sendable {
     private func makeLinearUNorm8Texture(
         padImage: CGImage,
         members: [AppInfo],
-        pixelSize px: Int,
-        iconPointSize: CGFloat
+        pixelSize px: Int
     ) -> MTLTexture? {
         guard let raster = makeLinearFloat16Context(pixelSize: px) else { return nil }
         composeFolder(
             padImage: padImage,
             members: members,
             into: raster.context,
-            pixelSize: px,
-            iconPointSize: iconPointSize
+            pixelSize: px
         )
         return makeSRGBUNorm8Texture(
             device: device,
@@ -750,16 +730,17 @@ final class FolderIconTextureStore: @unchecked Sendable {
         padImage: CGImage,
         members: [AppInfo],
         into context: CGContext,
-        pixelSize px: Int,
-        iconPointSize: CGFloat
+        pixelSize px: Int
     ) {
         context.clear(CGRect(x: 0, y: 0, width: px, height: px))
         context.interpolationQuality = .high
         context.draw(padImage, in: CGRect(x: 0, y: 0, width: px, height: px))
 
-        let pointsToPixels = CGFloat(px) / iconPointSize
-        let miniSize = 22 * pointsToPixels
-        let gap = 4 * pointsToPixels
+        // Keep the 3 × 3 preview proportional to its parent icon. The old
+        // point-based constants made previews too large at 64pt and too small
+        // at 256pt even though the outer folder icon scaled correctly.
+        let miniSize = CGFloat(px) * (22.0 / 128.0)
+        let gap = CGFloat(px) * (4.0 / 128.0)
         let contentSize = miniSize * 3 + gap * 2
         let left = (CGFloat(px) - contentSize) * 0.5
         let bottom = (CGFloat(px) - contentSize) * 0.5

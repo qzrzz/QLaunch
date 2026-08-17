@@ -96,6 +96,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(languageChanged),
+            name: .qlaunchpadLanguageChanged,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(gridLayoutChanged),
             name: .qlaunchpadGridLayoutChanged,
             object: nil
@@ -350,7 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let menu = NSMenu()
         let showItem = NSMenuItem(
-            title: "Show QLaunch",
+            title: L10n.tr("menu.show"),
             action: #selector(toggleLaunchpad),
             keyEquivalent: ""
         )
@@ -359,7 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(showItem)
 
         let settingsItem = NSMenuItem(
-            title: "Settings…",
+            title: L10n.tr("menu.settings"),
             action: #selector(openSettings),
             keyEquivalent: ","
         )
@@ -370,7 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
-            title: "Quit QLaunch",
+            title: L10n.tr("menu.quit"),
             action: #selector(quitApplication),
             keyEquivalent: "q"
         )
@@ -425,6 +431,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             removeStatusItem()
         }
         applyDockIconPreference()
+        updateStatusMenu()
+    }
+
+    @objc private func languageChanged() {
+        if showMenuBarIconPreference {
+            removeStatusItem()
+            installStatusItem()
+        }
+        settingsWindow?.title = L10n.tr("settings.window.title")
         updateStatusMenu()
     }
 
@@ -615,7 +630,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func updateStatusMenu() {
         let visible = launchpadPanel?.isVisible == true && store.presentation != .hidden
-        showMenuItem?.title = visible ? "Hide QLaunch" : "Show QLaunch"
+        showMenuItem?.title = L10n.tr(visible ? "menu.hide" : "menu.show")
     }
 
     @objc private func openSettings() {
@@ -635,7 +650,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "QLaunch 设置"
+        window.title = L10n.tr("settings.window.title")
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none

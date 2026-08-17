@@ -145,6 +145,10 @@ private struct IconPrewarmSignature: Equatable, Sendable {
     let display: AppListSignature
     let page: Int
     let quality: String
+    /// Capacity changes alter the low-memory page window even at the same pixel size.
+    let layout: String
+    /// Point-size changes can invalidate every texture without changing quality.
+    let pixelSize: Int
 }
 
 /// Reusable GPU storage for one in-flight frame. A slot is not written again
@@ -236,6 +240,45 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private let groupingMaximumIntentSpeed: CGFloat = 320
     private var didDrag = false
     private var isPanningPage = false
+    private var canvasScale: CGFloat = 1
+    private var canvasPan: CGPoint = .zero
+    private var canvasPanStart: CGPoint = .zero
+    private var canvasStatePreset: GridLayoutPreset?
+    private var canvasStateItemCount = 0
+    private var canvasStateSignature: AppListSignature?
+    private var canvasStateUsesAdaptiveLayout = false
+    private var canvasZoomVelocity: CGFloat = 0
+    private var canvasPanVelocity: CGPoint = .zero
+    private var canvasEdgePanVelocity: CGPoint = .zero
+    /// Current pointer position in the canvas' top-left coordinate system.
+    private var canvasEdgePointer: CGPoint?
+    private var canvasEdgeTrackingArea: NSTrackingArea?
+    private var canvasZoomAnchor: CGPoint = .zero
+    private var canvasRippleCenter: CGPoint = .zero
+    private var canvasRippleReferenceScale: CGFloat = 1
+    private var canvasRippleReferencePan: CGPoint = .zero
+    private var canvasRippleActiveUntil: CFTimeInterval = 0
+    private var canvasLastZoomInputTime: CFTimeInterval = 0
+    private var canvasPinchNeedsRipple = false
+    private var canvasPanSampleTime: CFTimeInterval = 0
+    private struct CanvasTransformSample {
+        let time: CFTimeInterval
+        let scale: CGFloat
+        let pan: CGPoint
+    }
+    private var canvasTransformHistory: [CanvasTransformSample] = []
+    private let canvasZoomDamping: CGFloat = 5.2
+    private let canvasPanDamping: CGFloat = 4.6
+    private let canvasEdgePanInset: CGFloat = 88
+    private let canvasEdgePanMaximumSpeed: CGFloat = 760
+    /// 100% is the shared 128pt world grid; larger canvas presets extend its ceiling.
+    private var canvasMaximumScale: CGFloat {
+        GridLayoutPreset.current.infiniteCanvasMaximumScale
+    }
+    private let canvasRippleMaximumDelay: CFTimeInterval = 0.42
+    private let canvasRippleMaximumStrength: CGFloat = 0.28
+    private let canvasRippleBurstGap: CFTimeInterval = 0.28
+    private let canvasRippleFadeDuration: CFTimeInterval = 0.24
     private var pageIndicatorClick = false
     /// True when this gesture started on an icon in automatic layout and was
     /// converted to a page pan because reorder is disabled.
@@ -653,6 +696,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             && dragReleaseAnimation == nil
             && dragHoverProgress < 0.001
             && iconRevealStartedAt.isEmpty
+            && !canvasMotionIsActive
         {
             displayLink?.invalidate()
             displayLink = nil
@@ -739,7 +783,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard let message = store.noteBlockedAutoLayoutReorder() else { return }
         let alert = NSAlert()
         alert.messageText = message
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: L10n.tr("common.ok"))
         if let window {
             alert.beginSheetModal(for: window)
         } else {
@@ -750,7 +794,21 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private func beginEmptyAreaPagePan(from point: CGPoint) {
         isPanningPage = true
         panStartPoint = point
-        store.beginPagePan()
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            synchronizeCanvasStateIfNeeded(itemCount: displayedItems.count)
+            canvasZoomVelocity = 0
+            canvasPanVelocity = .zero
+            canvasPanStart = canvasPan
+            canvasPanSampleTime = CACurrentMediaTime()
+            canvasRippleActiveUntil = 0
+            canvasTransformHistory = [CanvasTransformSample(
+                time: canvasPanSampleTime,
+                scale: canvasScale,
+                pan: canvasPan
+            )]
+        } else {
+            store.beginPagePan()
+        }
         startDisplayLink()
         needsDisplay = true
     }
@@ -766,6 +824,39 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     private func applyPagePan(at point: CGPoint) {
         if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            let metrics = infiniteCanvasMetrics(itemCount: displayedItems.count)
+            let proposed = CGPoint(
+                x: canvasPanStart.x + point.x - panStartPoint.x,
+                y: canvasPanStart.y + panStartPoint.y - point.y
+            )
+            let oldPan = canvasPan
+            let newPan = metrics.clampedPan(proposed, scale: canvasScale)
+            let now = CACurrentMediaTime()
+            let elapsed = now - canvasPanSampleTime
+            canvasPan = newPan
+            if elapsed >= 1.0 / 240.0 {
+                let inverseElapsed = CGFloat(1 / elapsed)
+                let instant = CGPoint(
+                    x: (newPan.x - oldPan.x) * inverseElapsed,
+                    y: (newPan.y - oldPan.y) * inverseElapsed
+                )
+                canvasPanVelocity = CGPoint(
+                    x: canvasPanVelocity.x * 0.3 + instant.x * 0.7,
+                    y: canvasPanVelocity.y * 0.3 + instant.y * 0.7
+                )
+                let speed = hypot(canvasPanVelocity.x, canvasPanVelocity.y)
+                if speed > 4_000 {
+                    let scale = 4_000 / speed
+                    canvasPanVelocity.x *= scale
+                    canvasPanVelocity.y *= scale
+                }
+                canvasPanSampleTime = now
+            }
+            startDisplayLink()
+            needsDisplay = true
+            return
+        }
         let translationPages = Double(panStartPoint.x - point.x) / Double(max(bounds.width, 1))
         store.updatePagePan(translationPages: translationPages)
         startDisplayLink()
@@ -780,11 +871,16 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
         let point = convert(windowPoint, from: nil)
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
+        canvasEdgePointer = dragPoint
         updateEdgePageDirection(for: point)
         return point
     }
 
     private func updateEdgePageDirection(for point: CGPoint) {
+        guard !GridLayoutPreset.current.isInfiniteCanvas else {
+            edgePageDirection = 0
+            return
+        }
         guard didDrag, draggedAppID != nil, !isPanningPage else {
             edgePageDirection = 0
             return
@@ -809,7 +905,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     private func tickEdgePageTurn(now: CFTimeInterval) {
-        guard edgePageDirection != 0,
+        guard !GridLayoutPreset.current.isInfiniteCanvas,
+              edgePageDirection != 0,
               didDrag,
               draggedAppID != nil,
               !isPanningPage,
@@ -854,10 +951,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if let activeTargetID = dragHoverTargetID,
            let activeIndex = displayedItems.firstIndex(where: { $0.id == activeTargetID }) {
             let visualIndex = reorderVisualSlots[activeTargetID] ?? Double(activeIndex)
-            let center = metrics.iconCenter(
-                globalIndex: visualIndex,
-                pageOffset: interactionPageOffset
-            )
+            let center = interactionIconCenter(globalIndex: visualIndex, metrics: metrics)
             if groupingMotionSpeed <= groupingMaximumIntentSpeed * 1.5,
                hypot(draggedCenter.x - center.x, draggedCenter.y - center.y)
                 <= metrics.iconSize * groupingReleaseRadiusScale {
@@ -867,71 +961,65 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             groupingCandidateID = nil
         }
 
-        // Acquire grouping from the actual dragged icon center rather than the
-        // pointer. Grabbing an icon near an edge therefore remains just as easy
-        // as grabbing it in the middle.
-        let groupingRadius = metrics.iconSize * groupingAcquireRadiusScale
-        var groupingCandidate: (id: String, distance: CGFloat)?
-        for (index, item) in displayedItems.enumerated() where item.id != draggedAppID {
-            let visualIndex = reorderVisualSlots[item.id] ?? Double(index)
-            let center = metrics.iconCenter(
-                globalIndex: visualIndex,
-                pageOffset: interactionPageOffset
-            )
-            let distance = hypot(draggedCenter.x - center.x, draggedCenter.y - center.y)
-            guard distance <= groupingRadius else { continue }
-            if groupingCandidate == nil || distance < groupingCandidate!.distance {
-                groupingCandidate = (item.id, distance)
-            }
+        // Folders only reorder on the root grid. Dwelling on another folder
+        // used to lock grouping (merge) and skip `moveItem`, so a folder
+        // dropped between two folders could not push the later ones aside.
+        let draggedIsFolder: Bool
+        if let draggedAppID, case .folder = displayedItems.first(where: { $0.id == draggedAppID }) {
+            draggedIsFolder = true
+        } else {
+            draggedIsFolder = false
         }
-        if let groupingCandidate,
-           groupingMotionSpeed <= groupingMaximumIntentSpeed {
-            if groupingCandidateID != groupingCandidate.id {
-                groupingCandidateID = groupingCandidate.id
-                groupingCandidateSince = now
-                if dragHoverVisualTargetID != groupingCandidate.id {
-                    dragHoverVisualTargetID = groupingCandidate.id
-                    dragHoverProgress = 0
+
+        if !draggedIsFolder {
+            // Acquire grouping from the actual dragged icon center rather than the
+            // pointer. Grabbing an icon near an edge therefore remains just as easy
+            // as grabbing it in the middle.
+            let groupingRadius = metrics.iconSize * groupingAcquireRadiusScale
+            var groupingCandidate: (id: String, distance: CGFloat)?
+            for (index, item) in displayedItems.enumerated() where item.id != draggedAppID {
+                let visualIndex = reorderVisualSlots[item.id] ?? Double(index)
+                let center = interactionIconCenter(globalIndex: visualIndex, metrics: metrics)
+                let distance = hypot(draggedCenter.x - center.x, draggedCenter.y - center.y)
+                guard distance <= groupingRadius else { continue }
+                if groupingCandidate == nil || distance < groupingCandidate!.distance {
+                    groupingCandidate = (item.id, distance)
                 }
-            } else if now - groupingCandidateSince >= groupingDwellDuration {
-                setDragHoverTarget(groupingCandidate.id)
+            }
+            if let groupingCandidate,
+               groupingMotionSpeed <= groupingMaximumIntentSpeed {
+                if groupingCandidateID != groupingCandidate.id {
+                    groupingCandidateID = groupingCandidate.id
+                    groupingCandidateSince = now
+                    if dragHoverVisualTargetID != groupingCandidate.id {
+                        dragHoverVisualTargetID = groupingCandidate.id
+                        dragHoverProgress = 0
+                    }
+                } else if now - groupingCandidateSince >= groupingDwellDuration {
+                    setDragHoverTarget(groupingCandidate.id)
+                    return
+                }
+                // While the pointer is deliberately slow over the icon center,
+                // freeze its slot. The progressive folder preview communicates
+                // that continuing to hold will switch from reorder to grouping.
+                startDisplayLink()
                 return
             }
-            // While the pointer is deliberately slow over the icon center,
-            // freeze its slot. The progressive folder preview communicates
-            // that continuing to hold will switch from reorder to grouping.
-            startDisplayLink()
-            return
-        } else {
-            groupingCandidateID = nil
-            setDragHoverTarget(nil)
         }
+        groupingCandidateID = nil
+        setDragHoverTarget(nil)
 
         // Fast movement and the outer portion of a cell remain available for
         // sorting even while the path crosses another icon.
-        guard let hit = metrics.hitTest(
-            point: point,
-            pageOffset: interactionPageOffset,
-            hitRadiusScale: 1.05
-        ) else {
-            setDragHoverTarget(nil)
+        guard let destination = layoutItemIndex(at: point, hitRadiusScale: 1.05) else {
             return
         }
-
-        let destination = hit.page * store.pageCapacity + hit.localIndex
         guard displayedItems.indices.contains(destination) else {
-            setDragHoverTarget(nil)
             return
         }
         if destination == source {
-            setDragHoverTarget(nil)
             return
         }
-
-        let target = displayedItems[destination]
-        setDragHoverTarget(nil)
-
-        if case .folder = target { return }
 
         store.moveItem(from: source, to: destination)
         displayedItems = store.displayItems
@@ -966,13 +1054,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
               didDrag,
               contentTransitionPhase == .idle else { return }
 
-        let metrics = GridMetrics(size: bounds.size)
-        guard let hit = metrics.hitTest(
-            point: point,
-            pageOffset: interactionPageOffset,
-            hitRadiusScale: 1.05
-        ) else { return }
-        let destination = hit.page * store.pageCapacity + hit.localIndex
+        guard let destination = layoutItemIndex(at: point, hitRadiusScale: 1.05) else { return }
         guard displayedItems.indices.contains(destination), destination != source else { return }
 
         store.moveAppInsideFolder(folderID: folderID, from: source, to: destination)
@@ -1382,13 +1464,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private func scheduleResidentResourcePrewarming() {
         let catalog = store.apps
         guard !catalog.isEmpty else { return }
+        let quality = IconRenderQuality.current
+        let preset = GridLayoutPreset.current
 
         let signature = IconPrewarmSignature(
             catalog: AppResourceSignature(apps: catalog),
             folders: store.folders,
             display: AppListSignature(apps: catalog),
             page: -1,
-            quality: IconRenderQuality.current.rawValue
+            quality: quality.rawValue,
+            layout: preset.rawValue,
+            pixelSize: preset.iconPixelSize(for: quality)
         )
         // Unrestricted baking — always clear the allow-list first so a previous
         // low-memory session cannot block resident uploads.
@@ -1434,7 +1520,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         let textureStore = iconTextures
         let folderStore = folderIconTextures
-        let preset = GridLayoutPreset.current
         let firstPageApps = pageWork.apps
         let firstPageFolders = pageWork.folders
 
@@ -1487,6 +1572,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// result icons stay blank because they were never allowed into the cache.
     private func scheduleLazyResourcePrewarming(around page: Int?, prune: Bool) {
         let catalog = store.apps
+        let quality = IconRenderQuality.current
         // Prefer the list about to appear during a content transition.
         let items: [LaunchpadItem]
         if contentTransitionPhase == .fadingOut, let pending = pendingDisplayItems {
@@ -1498,12 +1584,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // Empty search results still need a signature update so allow-lists reset.
         let targetPage = max(0, page ?? Int(currentPageOffset.rounded()))
         let displaySignature = AppListSignature(items: items)
+        let preset = GridLayoutPreset.current
         let signature = IconPrewarmSignature(
             catalog: AppResourceSignature(apps: catalog),
             folders: store.folders,
             display: displaySignature,
             page: store.isSearching ? -2 : targetPage,
-            quality: IconRenderQuality.current.rawValue
+            quality: quality.rawValue,
+            layout: preset.rawValue,
+            pixelSize: preset.iconPixelSize(for: quality)
         )
 
         // Search: keep the whole result set (capped). Root/folder: page ± 1.
@@ -1562,7 +1651,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let priorityFolders = window.folders
         let textureStore = iconTextures
         let folderStore = folderIconTextures
-        let preset = GridLayoutPreset.current
 
         resourcePrewarmTask = Task.detached(priority: .utility) { [self] in
             for app in priorityApps {
@@ -1930,6 +2018,23 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return
         }
 
+        // An automatic-sort change on the infinite canvas contains the same
+        // icons in a different order. Reuse their existing textures and move
+        // their visual slots directly. Running this through the generic
+        // fade/prewarm/prune transition delayed the reorder and could reveal
+        // transient blank icons in lazy-texture mode.
+        if GridLayoutPreset.current.isInfiniteCanvas,
+           contentTransitionPhase == .idle,
+           displayedItems.count == target.count,
+           Set(displayedItems.map(\.id)) == Set(target.map(\.id)) {
+            if reorderVisualSlots.isEmpty {
+                resetReorderVisualSlots(to: displayedItems)
+            }
+            pendingDisplayItems = nil
+            applyAnimatedLayout(target)
+            return
+        }
+
         pendingDisplayItems = target
         switch contentTransitionPhase {
         case .idle:
@@ -2027,6 +2132,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         noteDisplayChangeIfNeeded()
+        synchronizeCanvasStateIfNeeded(itemCount: displayedItems.count)
 
         let quality = IconRenderQuality.current
         if quality.usesLazyTextureLoading {
@@ -2088,8 +2194,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         tickDragVisualAnimations(now: now, dt: dt)
         synchronizeReorderVisualSlots(with: displayedItems)
         tickReorderAnimation(dt: dt)
+        tickCanvasMotion(now: now, dt: CGFloat(dt))
 
-        if contentTransitionPhase != .fadingOut {
+        if contentTransitionPhase != .fadingOut,
+           !GridLayoutPreset.current.isInfiniteCanvas {
             let pageTarget = store.isPageGestureActive ? store.pageOffset : store.targetPage
             if store.isPageGestureActive {
                 // Trackpad/pan must follow 1:1. A spring here lags noisy deltas
@@ -2179,10 +2287,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         iconDrawTextures.removeAll(keepingCapacity: true)
         iconSprites.removeAll(keepingCapacity: true)
         if iconSprites.capacity == 0 {
-            let maximumVisibleSprites = GridMetrics.pageCapacity * 3 + 1
+            let maximumVisibleSprites = GridLayoutPreset.current.isInfiniteCanvas
+                ? displayedItems.count * 2 + 1
+                : GridMetrics.pageCapacity * 3 + 1
             iconDrawTextures.reserveCapacity(maximumVisibleSprites)
             iconSprites.reserveCapacity(maximumVisibleSprites)
-            textSprites.reserveCapacity(GridMetrics.pageCapacity * 3)
+            textSprites.reserveCapacity(maximumVisibleSprites)
         }
         while labelsBySheet.count < textAtlas.sheets.count {
             var sheet: [SpriteInstance] = []
@@ -2570,8 +2680,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         labelsBySheet: inout [[SpriteInstance]]
     ) {
         guard !items.isEmpty, alphaScale > 0.001 else { return }
-        let cap = store.pageCapacity
-        let pages = max(1, Int(ceil(Double(items.count) / Double(cap))))
+        let infiniteCanvas = GridLayoutPreset.current.isInfiniteCanvas
+        let cap = infiniteCanvas ? max(items.count, 1) : store.pageCapacity
+        let pages = infiniteCanvas
+            ? 1
+            : max(1, Int(ceil(Double(items.count) / Double(cap))))
+        let canvasMetrics = infiniteCanvas
+            ? infiniteCanvasMetrics(itemCount: items.count)
+            : nil
         // During a root/folder or search view swap, the only animated property
         // is the shared view opacity. Do not let page-edge fading, icon entrance,
         // zoom, or content scaling modulate individual sprites at the same time.
@@ -2580,8 +2696,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // Avoid lazy-loading adjacent pages while the entrance animation is live.
         // The background prewarmer resumes as soon as presentation completes.
         let entranceActive = iconEntranceProgress < 0.999 && !viewTransitionActive
-        var first = entranceActive ? center : max(0, center - 1)
-        var last = entranceActive ? center : min(pages - 1, center + 1)
+        var first = infiniteCanvas ? 0 : (entranceActive ? center : max(0, center - 1))
+        var last = infiniteCanvas ? 0 : (entranceActive ? center : min(pages - 1, center + 1))
         // Keep the dragged item alive even if the pointer has auto-paged more
         // than one page away from its current catalog slot.
         if let draggedAppID,
@@ -2614,7 +2730,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 let isOpeningAppTarget = !isShowingPresentation
                     && stationaryDismissedAppID == app?.id
                 let visualIndex = reorderVisualSlots[itemID] ?? Double(index)
-                var c = metrics.iconCenter(globalIndex: visualIndex, pageOffset: pageOffset)
+                let canvasTransform = canvasMetrics.map {
+                    canvasVisualTransform(globalIndex: visualIndex, now: now, metrics: $0)
+                }
+                var c = canvasTransform?.center
+                    ?? metrics.iconCenter(globalIndex: visualIndex, pageOffset: pageOffset)
+                let canvasItemScale = canvasTransform?.scale ?? 1
                 if didDrag,
                    contentTransitionPhase == .idle,
                    draggedAppID == itemID {
@@ -2640,7 +2761,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                             layoutScale: CGFloat(1),
                             iconScale: CGFloat(1)
                         )
-                        : iconZoom(localIndex: local))
+                        : iconZoom(localIndex: infiniteCanvas ? local % 16 : local))
                 if !viewTransitionActive,
                    presentationStyle == .zoom,
                    presentationPhase < 0.999 {
@@ -2671,7 +2792,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                             horizontalOffset: CGFloat(0),
                             verticalOffset: CGFloat(0)
                         )
-                        : iconEntrance(localIndex: local))
+                        : iconEntrance(localIndex: infiniteCanvas ? local % 16 : local))
                 let finalCenter = c
                 let landingCenter = CGPoint(
                     x: finalCenter.x + entrance.horizontalOffset,
@@ -2681,7 +2802,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     let start = offscreenStart(
                         for: finalCenter,
                         screenCenter: CGPoint(x: midX, y: midY),
-                        margin: metrics.iconSize * 0.65
+                        margin: metrics.iconSize * canvasItemScale * 0.65
                     )
                     c.x = start.x + (landingCenter.x - start.x) * entrance.position
                     c.y = start.y + (landingCenter.y - start.y) * entrance.position
@@ -2696,10 +2817,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     c.x = release.from.x + (finalCenter.x - release.from.x) * progress
                     c.y = release.from.y + (finalCenter.y - release.from.y) * progress
                 }
-                let pageFade: Float = viewTransitionActive ? 1 : Float(max(
-                    0,
-                    min(1, 1.15 - abs(finalCenter.x - midX) / max(bounds.width, 1))
-                ))
+                let pageFade: Float = infiniteCanvas || viewTransitionActive
+                    ? 1
+                    : Float(max(
+                        0,
+                        min(1, 1.15 - abs(finalCenter.x - midX) / max(bounds.width, 1))
+                    ))
                 let alpha = pageFade * alphaScale * entrance.opacity * zoom.opacity
 
                 // Resolve the transparent presentation frame too, but never
@@ -2722,7 +2845,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 let pressed = !isDragged
                     && contentTransitionPhase == .idle
                     && (dragSource == index || isOpeningAppTarget)
-                let itemScale = (viewTransitionActive ? 1 : contentScale)
+                let itemScale = canvasItemScale
+                    * (viewTransitionActive ? 1 : contentScale)
                     * entrance.scale * zoom.iconScale
                 let hoverProgress = smoothstep(dragHoverProgress)
                 let isHoverVisualTarget = dragHoverVisualTargetID == itemID
@@ -2780,11 +2904,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 if showLabels,
                    let label = textAtlas.layouts[itemID],
                    labelsBySheet.indices.contains(label.sheet) {
-                    let snapToPixels = abs(itemScale - 1) < 0.001
+                    // Larger canvas presets only increase icon size. Keep labels
+                    // at their normal readable size once the canvas exceeds 100%.
+                    let labelScale = infiniteCanvas ? min(itemScale, 1) : itemScale
+                    let snapToPixels = abs(labelScale - 1) < 0.001
                     let lc = CGPoint(
                         x: c.x,
                         y: c.y + metrics.iconSize * itemScale * 0.5
-                            + 6 + label.heightPoints * 0.5 * itemScale
+                            + 6 + label.heightPoints * 0.5 * labelScale
                     )
                     // Resting: size is an integer framebuffer pixel count so the
                     // vertex shader can snap the origin without stretching UVs.
@@ -2792,8 +2919,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     let size = snapToPixels
                         ? pixelAlignedLabelSize(label)
                         : CGSize(
-                            width: label.widthPoints * itemScale,
-                            height: label.heightPoints * itemScale
+                            width: label.widthPoints * labelScale,
+                            height: label.heightPoints * labelScale
                         )
                     labelsBySheet[label.sheet].append(
                         .label(
@@ -2814,7 +2941,446 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            canvasStatePreset = nil
+        }
         needsDisplay = true
+    }
+
+    private func infiniteCanvasMetrics(itemCount: Int) -> InfiniteCanvasMetrics {
+        InfiniteCanvasMetrics(
+            size: bounds.size,
+            itemCount: itemCount,
+            adaptsToItemCount: canvasStateUsesAdaptiveLayout,
+            maximumScale: canvasMaximumScale
+        )
+    }
+
+    private func synchronizeCanvasStateIfNeeded(itemCount: Int) {
+        let preset = GridLayoutPreset.current
+        guard preset.isInfiniteCanvas else {
+            if canvasStatePreset?.isInfiniteCanvas == true {
+                currentPageOffset = store.pageOffset
+                frozenPageOffset = store.pageOffset
+            }
+            canvasStatePreset = preset
+            canvasStateItemCount = 0
+            canvasStateSignature = nil
+            canvasStateUsesAdaptiveLayout = false
+            store.setInfiniteCanvasNavigationColumns(InfiniteCanvasMetrics.columns)
+            resetCanvasMotion()
+            return
+        }
+        // Freeze the outgoing geometry while it fades away. Incoming search
+        // results and folder contents adopt their fitted layout on fade-in.
+        let usesAdaptiveLayout = contentTransitionPhase == .fadingOut
+            ? canvasStateUsesAdaptiveLayout
+            : store.isSearching || store.openedFolderID != nil
+        let signature = AppListSignature(items: displayedItems)
+        guard canvasStatePreset != preset
+                || canvasStateItemCount != itemCount
+                || (store.isSearching && canvasStateSignature != signature)
+                || canvasStateUsesAdaptiveLayout != usesAdaptiveLayout else { return }
+        let metrics = InfiniteCanvasMetrics(
+            size: bounds.size,
+            itemCount: itemCount,
+            adaptsToItemCount: usesAdaptiveLayout,
+            maximumScale: preset.infiniteCanvasMaximumScale
+        )
+        store.setInfiniteCanvasNavigationColumns(metrics.columnCount)
+        let initialScale = usesAdaptiveLayout
+            ? metrics.fittedScale
+            : metrics.viewportFillingScale
+        canvasScale = max(initialScale, 0.12)
+        canvasPan = .zero
+        canvasPanStart = .zero
+        resetCanvasMotion()
+        canvasZoomAnchor = metrics.viewportCenter
+        canvasRippleCenter = metrics.viewportCenter
+        canvasRippleReferenceScale = canvasScale
+        canvasRippleReferencePan = canvasPan
+        canvasTransformHistory = [CanvasTransformSample(
+            time: CACurrentMediaTime(),
+            scale: canvasScale,
+            pan: canvasPan
+        )]
+        currentPageOffset = 0
+        frozenPageOffset = 0
+        canvasStatePreset = preset
+        canvasStateItemCount = itemCount
+        canvasStateSignature = signature
+        canvasStateUsesAdaptiveLayout = usesAdaptiveLayout
+    }
+
+    private func canvasVisualTransform(
+        globalIndex: Double,
+        now: CFTimeInterval,
+        metrics: InfiniteCanvasMetrics
+    ) -> (center: CGPoint, scale: CGFloat) {
+        guard now < canvasRippleActiveUntil,
+              canvasTransformHistory.count > 1 else {
+            return (
+                metrics.screenCenter(globalIndex: globalIndex, scale: canvasScale, pan: canvasPan),
+                canvasScale
+            )
+        }
+
+        // The reference transform is frozen when the wheel impulse arrives.
+        // Recomputing distance from each animated center made the selected
+        // history timestamp move backwards and forwards, which looked like jitter.
+        let referenceCenter = metrics.screenCenter(
+            globalIndex: globalIndex,
+            scale: canvasRippleReferenceScale,
+            pan: canvasRippleReferencePan
+        )
+        let distance = hypot(
+            referenceCenter.x - canvasRippleCenter.x,
+            referenceCenter.y - canvasRippleCenter.y
+        )
+        let maximumDistance = max(hypot(bounds.width, bounds.height) * 0.8, 1)
+        let distancePhase = min(max(distance / maximumDistance, 0), 1)
+        // Keep most of the canvas attached to the cursor; only the outer rings
+        // accumulate meaningful delay. This reads as depth without a hard wave.
+        let delay = canvasRippleMaximumDelay
+            * CFTimeInterval(pow(distancePhase, 1.45))
+        let sample = canvasTransformSample(at: now - delay)
+        // A fixed end time makes one wheel burst produce one ripple. Taper the
+        // delayed transform to zero before that deadline so it never snaps back.
+        let fadeProgress = CGFloat(min(
+            max((canvasRippleActiveUntil - now) / canvasRippleFadeDuration, 0),
+            1
+        ))
+        let strength = canvasRippleMaximumStrength
+            * smoothstep(distancePhase)
+            * smoothstep(fadeProgress)
+        let visualScale = canvasScale + (sample.scale - canvasScale) * strength
+        let visualPan = CGPoint(
+            x: canvasPan.x + (sample.pan.x - canvasPan.x) * strength,
+            y: canvasPan.y + (sample.pan.y - canvasPan.y) * strength
+        )
+        return (
+            metrics.screenCenter(
+                globalIndex: globalIndex,
+                scale: visualScale,
+                pan: visualPan
+            ),
+            visualScale
+        )
+    }
+
+    private var canvasMotionIsActive: Bool {
+        abs(canvasZoomVelocity) > 0.002
+            || hypot(canvasPanVelocity.x, canvasPanVelocity.y) > 0.5
+            || canvasEdgePanCanContinue
+            || CACurrentMediaTime() < canvasRippleActiveUntil
+    }
+
+    private var canvasEdgePanCanContinue: Bool {
+        guard GridLayoutPreset.current.isInfiniteCanvas else {
+            return false
+        }
+        if hypot(canvasEdgePanVelocity.x, canvasEdgePanVelocity.y) > 0.5 {
+            return true
+        }
+        let target = canvasEdgePanTargetVelocity
+        guard hypot(target.x, target.y) > 0.5 else { return false }
+        let metrics = infiniteCanvasMetrics(itemCount: displayedItems.count)
+        let proposed = CGPoint(
+            x: canvasPan.x + target.x / 60,
+            y: canvasPan.y + target.y / 60
+        )
+        let clamped = metrics.clampedPan(proposed, scale: canvasScale)
+        return hypot(clamped.x - canvasPan.x, clamped.y - canvasPan.y) > 0.01
+    }
+
+    private var canvasEdgePanTargetVelocity: CGPoint {
+        guard GridLayoutPreset.current.isInfiniteCanvas,
+              contentTransitionPhase == .idle,
+              !isPanningPage,
+              let pointer = canvasEdgePointer else {
+            return .zero
+        }
+
+        let horizontalInset = min(canvasEdgePanInset, bounds.width * 0.25)
+        let verticalInset = min(canvasEdgePanInset, bounds.height * 0.25)
+        func edgeStrength(_ distance: CGFloat, inset: CGFloat) -> CGFloat {
+            guard inset > 0 else { return 0 }
+            return smoothstep(min(max((inset - distance) / inset, 0), 1))
+        }
+
+        let left = edgeStrength(pointer.x, inset: horizontalInset)
+        let right = edgeStrength(bounds.width - pointer.x, inset: horizontalInset)
+        let top = edgeStrength(pointer.y, inset: verticalInset)
+        let bottom = edgeStrength(bounds.height - pointer.y, inset: verticalInset)
+        var direction = CGPoint(x: left - right, y: top - bottom)
+        let magnitude = hypot(direction.x, direction.y)
+        if magnitude > 1 {
+            direction.x /= magnitude
+            direction.y /= magnitude
+        }
+        return CGPoint(
+            x: direction.x * canvasEdgePanMaximumSpeed,
+            y: direction.y * canvasEdgePanMaximumSpeed
+        )
+    }
+
+    private func resetCanvasMotion() {
+        canvasZoomVelocity = 0
+        canvasPanVelocity = .zero
+        canvasEdgePanVelocity = .zero
+        canvasRippleActiveUntil = 0
+        canvasLastZoomInputTime = 0
+        canvasPinchNeedsRipple = false
+        canvasPanSampleTime = 0
+        canvasTransformHistory.removeAll(keepingCapacity: true)
+    }
+
+    private func tickCanvasMotion(now: CFTimeInterval, dt: CGFloat) {
+        guard GridLayoutPreset.current.isInfiniteCanvas else { return }
+        let metrics = infiniteCanvasMetrics(itemCount: displayedItems.count)
+
+        if abs(canvasZoomVelocity) > 0.002 {
+            let oldScale = canvasScale
+            let minimumScale = max(metrics.fittedScale, 0.12)
+            let proposedScale = oldScale * exp(canvasZoomVelocity * dt)
+            let newScale = min(max(proposedScale, minimumScale), canvasMaximumScale)
+            let relativeX = canvasZoomAnchor.x - metrics.viewportCenter.x
+            let relativeY = canvasZoomAnchor.y - metrics.viewportCenter.y
+            let worldOffsetX = (relativeX - canvasPan.x) / max(oldScale, 0.001)
+            let worldOffsetY = (relativeY - canvasPan.y) / max(oldScale, 0.001)
+            canvasScale = newScale
+            canvasPan = metrics.clampedPan(
+                CGPoint(
+                    x: relativeX - worldOffsetX * newScale,
+                    y: relativeY - worldOffsetY * newScale
+                ),
+                scale: newScale
+            )
+            if abs(newScale - proposedScale) > 0.0001 {
+                canvasZoomVelocity = 0
+            } else {
+                canvasZoomVelocity *= exp(-canvasZoomDamping * dt)
+            }
+        } else {
+            canvasZoomVelocity = 0
+        }
+
+        if !isPanningPage,
+           hypot(canvasPanVelocity.x, canvasPanVelocity.y) > 0.5 {
+            let proposed = CGPoint(
+                x: canvasPan.x + canvasPanVelocity.x * dt,
+                y: canvasPan.y + canvasPanVelocity.y * dt
+            )
+            let clamped = metrics.clampedPan(proposed, scale: canvasScale)
+            if abs(clamped.x - proposed.x) > 0.01 { canvasPanVelocity.x = 0 }
+            if abs(clamped.y - proposed.y) > 0.01 { canvasPanVelocity.y = 0 }
+            canvasPan = clamped
+            let damping = exp(-canvasPanDamping * dt)
+            canvasPanVelocity.x *= damping
+            canvasPanVelocity.y *= damping
+        } else if !isPanningPage {
+            canvasPanVelocity = .zero
+        }
+
+        tickCanvasEdgePan(metrics: metrics, dt: dt)
+
+        if now < canvasRippleActiveUntil {
+            canvasTransformHistory.append(CanvasTransformSample(
+                time: now,
+                scale: canvasScale,
+                pan: canvasPan
+            ))
+            let cutoff = now - canvasRippleMaximumDelay - 0.12
+            if let firstKept = canvasTransformHistory.firstIndex(where: { $0.time >= cutoff }),
+               firstKept > 0 {
+                canvasTransformHistory.removeFirst(firstKept)
+            }
+        } else if canvasTransformHistory.count > 1 {
+            canvasTransformHistory = [CanvasTransformSample(
+                time: now,
+                scale: canvasScale,
+                pan: canvasPan
+            )]
+        }
+    }
+
+    private func tickCanvasEdgePan(metrics: InfiniteCanvasMetrics, dt: CGFloat) {
+        guard !isPanningPage else {
+            canvasEdgePanVelocity = .zero
+            return
+        }
+
+        let target = canvasEdgePanTargetVelocity
+        let isAccelerating = hypot(target.x, target.y)
+            > hypot(canvasEdgePanVelocity.x, canvasEdgePanVelocity.y)
+        let response: CGFloat = isAccelerating ? 9 : 5.5
+        let blend = 1 - exp(-response * dt)
+        canvasEdgePanVelocity.x += (target.x - canvasEdgePanVelocity.x) * blend
+        canvasEdgePanVelocity.y += (target.y - canvasEdgePanVelocity.y) * blend
+
+        if hypot(canvasEdgePanVelocity.x, canvasEdgePanVelocity.y) <= 0.5,
+           target == .zero {
+            canvasEdgePanVelocity = .zero
+            return
+        }
+
+        let proposed = CGPoint(
+            x: canvasPan.x + canvasEdgePanVelocity.x * dt,
+            y: canvasPan.y + canvasEdgePanVelocity.y * dt
+        )
+        let clamped = metrics.clampedPan(proposed, scale: canvasScale)
+        if abs(clamped.x - proposed.x) > 0.01 { canvasEdgePanVelocity.x = 0 }
+        if abs(clamped.y - proposed.y) > 0.01 { canvasEdgePanVelocity.y = 0 }
+        canvasPan = clamped
+    }
+
+    private func canvasTransformSample(at time: CFTimeInterval) -> CanvasTransformSample {
+        guard let first = canvasTransformHistory.first else {
+            return CanvasTransformSample(time: time, scale: canvasScale, pan: canvasPan)
+        }
+        guard time > first.time else { return first }
+        guard let upperIndex = canvasTransformHistory.firstIndex(where: { $0.time >= time }) else {
+            return canvasTransformHistory.last ?? first
+        }
+        guard upperIndex > 0 else { return canvasTransformHistory[upperIndex] }
+        let lower = canvasTransformHistory[upperIndex - 1]
+        let upper = canvasTransformHistory[upperIndex]
+        let span = max(upper.time - lower.time, 0.0001)
+        let progress = CGFloat((time - lower.time) / span)
+        return CanvasTransformSample(
+            time: time,
+            scale: lower.scale + (upper.scale - lower.scale) * progress,
+            pan: CGPoint(
+                x: lower.pan.x + (upper.pan.x - lower.pan.x) * progress,
+                y: lower.pan.y + (upper.pan.y - lower.pan.y) * progress
+            )
+        )
+    }
+
+    private func zoomInfiniteCanvas(with event: NSEvent) {
+        synchronizeCanvasStateIfNeeded(itemCount: displayedItems.count)
+        let delta = abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX)
+            ? event.scrollingDeltaY
+            : event.scrollingDeltaX
+        guard abs(delta) > 0.001 else { return }
+
+        let now = CACurrentMediaTime()
+        let appKitPoint = convert(event.locationInWindow, from: nil)
+        let anchor = CGPoint(x: appKitPoint.x, y: bounds.height - appKitPoint.y)
+        applyInfiniteCanvasZoomImpulse(
+            delta * 0.7,
+            anchor: anchor,
+            now: now,
+            forceNewRipple: false
+        )
+    }
+
+    private func applyInfiniteCanvasZoomImpulse(
+        _ impulse: CGFloat,
+        anchor: CGPoint,
+        now: CFTimeInterval,
+        forceNewRipple: Bool
+    ) {
+        canvasZoomAnchor = anchor
+        let inputGap = now - canvasLastZoomInputTime
+        let startsNewRipple = forceNewRipple
+            || canvasLastZoomInputTime == 0
+            || (inputGap >= canvasRippleBurstGap && now >= canvasRippleActiveUntil)
+        canvasLastZoomInputTime = now
+        if startsNewRipple {
+            canvasRippleCenter = anchor
+            canvasRippleReferenceScale = canvasScale
+            canvasRippleReferencePan = canvasPan
+            canvasRippleActiveUntil = now
+                + canvasRippleMaximumDelay
+                + canvasRippleFadeDuration
+            canvasTransformHistory = [CanvasTransformSample(
+                time: now,
+                scale: canvasScale,
+                pan: canvasPan
+            )]
+        }
+        canvasZoomVelocity = min(max(canvasZoomVelocity + impulse, -3), 3)
+        startDisplayLink()
+        needsDisplay = true
+    }
+
+    private func panInfiniteCanvas(with event: NSEvent) {
+        synchronizeCanvasStateIfNeeded(itemCount: displayedItems.count)
+        let metrics = infiniteCanvasMetrics(itemCount: displayedItems.count)
+        let proposed = CGPoint(
+            x: canvasPan.x + event.scrollingDeltaX,
+            y: canvasPan.y + event.scrollingDeltaY
+        )
+        canvasPan = metrics.clampedPan(proposed, scale: canvasScale)
+        // Trackpad events already include native momentum samples. Do not layer
+        // the mouse-drag inertial velocity on top of the system's momentum.
+        canvasPanVelocity = .zero
+        startDisplayLink()
+        needsDisplay = true
+    }
+
+    private func interactionIconCenter(globalIndex: Double, metrics: GridMetrics) -> CGPoint {
+        guard GridLayoutPreset.current.isInfiniteCanvas else {
+            return metrics.iconCenter(globalIndex: globalIndex, pageOffset: interactionPageOffset)
+        }
+        let canvas = infiniteCanvasMetrics(itemCount: displayedItems.count)
+        return canvasVisualTransform(
+            globalIndex: globalIndex,
+            now: CACurrentMediaTime(),
+            metrics: canvas
+        ).center
+    }
+
+    private func layoutItemIndex(at point: CGPoint, hitRadiusScale: CGFloat = 0.62) -> Int? {
+        guard GridLayoutPreset.current.isInfiniteCanvas else {
+            let metrics = GridMetrics(size: bounds.size)
+            guard let hit = metrics.hitTest(
+                point: point,
+                pageOffset: interactionPageOffset,
+                hitRadiusScale: hitRadiusScale
+            ) else { return nil }
+            return hit.page * store.pageCapacity + hit.localIndex
+        }
+
+        let topLeftPoint = CGPoint(x: point.x, y: bounds.height - point.y)
+        let canvas = infiniteCanvasMetrics(itemCount: displayedItems.count)
+        let now = CACurrentMediaTime()
+        if now < canvasRippleActiveUntil {
+            var nearest: (index: Int, distance: CGFloat)?
+            for index in displayedItems.indices {
+                let transform = canvasVisualTransform(
+                    globalIndex: Double(index),
+                    now: now,
+                    metrics: canvas
+                )
+                let distance = hypot(
+                    topLeftPoint.x - transform.center.x,
+                    topLeftPoint.y - transform.center.y
+                )
+                let radius = 128 * transform.scale * hitRadiusScale
+                guard distance <= radius else { continue }
+                if nearest == nil || distance < nearest!.distance {
+                    nearest = (index, distance)
+                }
+            }
+            return nearest?.index
+        }
+        guard let index = canvas.itemIndex(
+            atTopLeftPoint: topLeftPoint,
+            scale: canvasScale,
+            pan: canvasPan
+        ) else { return nil }
+        let center = canvas.screenCenter(
+            globalIndex: Double(index),
+            scale: canvasScale,
+            pan: canvasPan
+        )
+        let radius = 128 * canvasScale * hitRadiusScale
+        guard hypot(topLeftPoint.x - center.x, topLeftPoint.y - center.y) <= radius else {
+            return nil
+        }
+        return index
     }
 
     private var windowScale: CGFloat {
@@ -2850,7 +3416,45 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         needsDisplay = true
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let canvasEdgeTrackingArea {
+            removeTrackingArea(canvasEdgeTrackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        canvasEdgeTrackingArea = area
+    }
+
     // MARK: - Input
+
+    private func updateCanvasEdgePointer(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        canvasEdgePointer = CGPoint(x: point.x, y: bounds.height - point.y)
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            startDisplayLink()
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        updateCanvasEdgePointer(with: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateCanvasEdgePointer(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        canvasEdgePointer = nil
+        if hypot(canvasEdgePanVelocity.x, canvasEdgePanVelocity.y) > 0.5 {
+            startDisplayLink()
+        }
+    }
 
     private var interactionPageOffset: Double {
         contentTransitionPhase == .fadingOut ? frozenPageOffset : currentPageOffset
@@ -2874,6 +3478,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        updateCanvasEdgePointer(with: event)
         dragStart = convert(event.locationInWindow, from: nil)
         draggedAppID = nil
         dragGeneration = store.dragGeneration
@@ -2916,8 +3521,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         let metrics = GridMetrics(size: bounds.size)
-        if let hit = metrics.hitTest(point: dragStart, pageOffset: interactionPageOffset) {
-            let index = hit.page * store.pageCapacity + hit.localIndex
+        if let index = layoutItemIndex(at: dragStart) {
             if displayedItems.indices.contains(index) {
                 let item = displayedItems[index]
                 if store.openedFolderID != nil, case .app(let app) = item {
@@ -2929,10 +3533,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 }
                 dragSource = index
                 draggedAppID = item.id
-                let iconCenter = metrics.iconCenter(
-                    globalIndex: Double(index),
-                    pageOffset: interactionPageOffset
-                )
+                let iconCenter = interactionIconCenter(globalIndex: Double(index), metrics: metrics)
                 dragGrabOffset = CGPoint(
                     x: dragPoint.x - iconCenter.x,
                     y: dragPoint.y - iconCenter.y
@@ -2974,9 +3575,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return nil
         }
 
-        let metrics = GridMetrics(size: bounds.size)
-        if let hit = metrics.hitTest(point: point, pageOffset: interactionPageOffset) {
-            let index = hit.page * store.pageCapacity + hit.localIndex
+        if let index = layoutItemIndex(at: point) {
             if displayedItems.indices.contains(index) {
                 if case .folder(let folder) = displayedItems[index] {
                     contextMenuApp = nil
@@ -3002,22 +3601,22 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         needsDisplay = true
 
         let menu = NSMenu(title: app.name)
-        menu.addItem(withTitle: "打开", action: #selector(openContextMenuApp), keyEquivalent: "")
-        menu.addItem(withTitle: "在访达中显示", action: #selector(revealContextMenuApp), keyEquivalent: "")
-        menu.addItem(withTitle: "显示简介", action: #selector(showContextMenuAppInfo), keyEquivalent: "")
+        menu.addItem(withTitle: L10n.tr("common.open"), action: #selector(openContextMenuApp), keyEquivalent: "")
+        menu.addItem(withTitle: L10n.tr("common.revealInFinder"), action: #selector(revealContextMenuApp), keyEquivalent: "")
+        menu.addItem(withTitle: L10n.tr("context.showInfo"), action: #selector(showContextMenuAppInfo), keyEquivalent: "")
         menu.addItem(.separator())
 
-        let iconImageItem = NSMenuItem(title: "图标图片", action: nil, keyEquivalent: "")
-        let iconImageMenu = NSMenu(title: "图标图片")
+        let iconImageItem = NSMenuItem(title: L10n.tr("context.iconImage"), action: nil, keyEquivalent: "")
+        let iconImageMenu = NSMenu(title: L10n.tr("context.iconImage"))
         let currentSizeItem = NSMenuItem(
-            title: "下载当前图标尺寸",
+            title: L10n.tr("context.downloadCurrentIcon"),
             action: #selector(downloadContextMenuAppIconAtCurrentSize),
             keyEquivalent: ""
         )
         currentSizeItem.target = self
         iconImageMenu.addItem(currentSizeItem)
         let maximumSizeItem = NSMenuItem(
-            title: "下载最大图标尺寸",
+            title: L10n.tr("context.downloadMaximumIcon"),
             action: #selector(downloadContextMenuAppIconAtMaximumSize),
             keyEquivalent: ""
         )
@@ -3028,8 +3627,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         menu.addItem(.separator())
 
         let currentFolderID = store.folderContaining(appID: app.id)?.id
-        let moveToFolderItem = NSMenuItem(title: "移入文件夹", action: nil, keyEquivalent: "")
-        let folderSubmenu = NSMenu(title: "移入文件夹")
+        let moveToFolderItem = NSMenuItem(title: L10n.tr("context.moveToFolder"), action: nil, keyEquivalent: "")
+        let folderSubmenu = NSMenu(title: L10n.tr("context.moveToFolder"))
         for folder in store.orderedFolders {
             let item = NSMenuItem(
                 title: folder.name,
@@ -3047,7 +3646,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         if currentFolderID != nil {
             let removeItem = menu.addItem(
-                withTitle: "从文件夹移出",
+                withTitle: L10n.tr("context.removeFromFolder"),
                 action: #selector(removeContextMenuAppFromFolder),
                 keyEquivalent: ""
             )
@@ -3055,7 +3654,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             removeItem.isEnabled = store.allowsUserLayoutEditing
         }
         menu.addItem(.separator())
-        let hideItem = menu.addItem(withTitle: "隐藏", action: #selector(hideContextMenuApp), keyEquivalent: "")
+        let hideItem = menu.addItem(withTitle: L10n.tr("common.hide"), action: #selector(hideContextMenuApp), keyEquivalent: "")
         hideItem.isEnabled = !store.hiddenAppIDs.contains(app.id)
         for item in menu.items where item.action != nil {
             item.target = self
@@ -3064,14 +3663,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     private func makeLayoutSelectorMenu() -> NSMenu {
-        let menu = NSMenu(title: "布局")
+        let menu = NSMenu(title: L10n.tr("settings.layout"))
 
-        let userHeader = NSMenuItem(title: "用户布局", action: nil, keyEquivalent: "")
+        let userHeader = NSMenuItem(title: L10n.tr("layout.user"), action: nil, keyEquivalent: "")
         userHeader.isEnabled = false
         menu.addItem(userHeader)
         for profile in store.layoutProfiles {
             let item = NSMenuItem(
-                title: profile.name,
+                title: profile.id == LaunchpadLayoutProfileStore.defaultProfileID
+                    ? L10n.tr("layout.profile.default") : profile.name,
                 action: #selector(selectLayoutFromMenu(_:)),
                 keyEquivalent: ""
             )
@@ -3083,12 +3683,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         menu.addItem(.separator())
 
-        let autoHeader = NSMenuItem(title: "自动布局", action: nil, keyEquivalent: "")
+        let autoHeader = NSMenuItem(title: L10n.tr("layout.auto"), action: nil, keyEquivalent: "")
         autoHeader.isEnabled = false
         menu.addItem(autoHeader)
         for kind in LaunchpadAutoLayoutKind.allCases {
             let item = NSMenuItem(
-                title: kind.title,
+                title: kind.localizedTitle,
                 action: #selector(selectLayoutFromMenu(_:)),
                 keyEquivalent: ""
             )
@@ -3102,7 +3702,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         menu.addItem(.separator())
         let settingsItem = menu.addItem(
-            withTitle: "设置",
+            withTitle: L10n.tr("settings.window.title.short"),
             action: #selector(openSettingsFromContextMenu),
             keyEquivalent: ""
         )
@@ -3120,9 +3720,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             try store.selectLayoutSelector(id)
         } catch {
             let alert = NSAlert()
-            alert.messageText = "无法切换布局"
-            alert.informativeText = error.localizedDescription
-            alert.addButton(withTitle: "好")
+            alert.messageText = L10n.tr("error.layout.switch")
+            alert.informativeText = (error as? LaunchpadLayoutProfileError)
+                .map(L10n.profileError) ?? error.localizedDescription
+            alert.addButton(withTitle: L10n.tr("common.ok"))
             if let window {
                 alert.beginSheetModal(for: window)
             } else {
@@ -3134,14 +3735,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private func makeFolderContextMenu(for folder: AppFolder) -> NSMenu {
         let menu = NSMenu(title: folder.name)
         let renameItem = menu.addItem(
-            withTitle: "重命名",
+            withTitle: L10n.tr("common.rename"),
             action: #selector(renameContextMenuFolder),
             keyEquivalent: ""
         )
         renameItem.target = self
 
-        let mergeItem = NSMenuItem(title: "合并入文件夹", action: nil, keyEquivalent: "")
-        let submenu = NSMenu(title: "合并入文件夹")
+        let mergeItem = NSMenuItem(title: L10n.tr("context.mergeIntoFolder"), action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: L10n.tr("context.mergeIntoFolder"))
         for target in store.orderedFolders where target.id != folder.id {
             let item = NSMenuItem(
                 title: target.name,
@@ -3157,7 +3758,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         menu.addItem(mergeItem)
         menu.addItem(.separator())
         let dissolveItem = menu.addItem(
-            withTitle: "解散文件夹",
+            withTitle: L10n.tr("context.dissolveFolder"),
             action: #selector(dissolveContextMenuFolder),
             keyEquivalent: ""
         )
@@ -3188,12 +3789,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let bundle = Bundle(url: app.url)
         let version = (bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
             ?? (bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
-            ?? "未知"
+            ?? L10n.tr("common.unknown")
         let alert = NSAlert()
         alert.messageText = app.name
-        alert.informativeText = "版本：\(version)\n标识符：\(app.bundleIdentifier)\n位置：\(app.url.path)"
+        alert.informativeText = L10n.tr("context.appInfo", version, app.bundleIdentifier, app.url.path)
         alert.icon = NSWorkspace.shared.icon(forFile: app.url.path)
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: L10n.tr("common.ok"))
         if let window {
             alert.beginSheetModal(for: window)
         } else {
@@ -3217,9 +3818,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             presentFirstIconDownloadHintIfNeeded()
         } catch {
             let alert = NSAlert()
-            alert.messageText = "无法下载图标"
+            alert.messageText = L10n.tr("error.icon.download")
             alert.informativeText = error.localizedDescription
-            alert.addButton(withTitle: "好")
+            alert.addButton(withTitle: L10n.tr("common.ok"))
             if let window {
                 alert.beginSheetModal(for: window)
             } else {
@@ -3232,8 +3833,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard !Self.didShowIconDownloadHint else { return }
         Self.didShowIconDownloadHint = true
         let alert = NSAlert()
-        alert.messageText = "已下载到下载文件夹中"
-        alert.addButton(withTitle: "好")
+        alert.messageText = L10n.tr("context.iconDownloaded")
+        alert.addButton(withTitle: L10n.tr("common.ok"))
         if let window {
             alert.beginSheetModal(for: window)
         } else {
@@ -3268,9 +3869,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     @objc private func renameContextMenuFolder() {
         guard let folder = contextMenuFolder else { return }
         let alert = NSAlert()
-        alert.messageText = "重命名文件夹"
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.tr("context.renameFolder")
+        alert.addButton(withTitle: L10n.tr("common.save"))
+        alert.addButton(withTitle: L10n.tr("common.cancel"))
         let field = NSTextField(string: folder.name)
         field.frame = NSRect(x: 0, y: 0, width: 280, height: 26)
         field.selectText(nil)
@@ -3319,6 +3920,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         let point = convert(event.locationInWindow, from: nil)
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
+        canvasEdgePointer = dragPoint
         if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
 
         if !store.allowsUserLayoutEditing,
@@ -3402,14 +4004,18 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         if isDragCancelledByLayout {
             if isPanningPage {
-                store.endPagePan()
+                if !GridLayoutPreset.current.isInfiniteCanvas {
+                    store.endPagePan()
+                }
             }
             discardCancelledDrag()
             return
         }
         if isPanningPage {
             let shouldHintAutoLayoutReorder = pendingAutoLayoutReorderHint && didDrag
-            store.endPagePan()
+            if !GridLayoutPreset.current.isInfiniteCanvas {
+                store.endPagePan()
+            }
             startDisplayLink()
             if store.openedFolderID != nil {
                 if !didDrag {
@@ -3523,7 +4129,42 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         axis == .horizontal
     }
 
+    override func magnify(with event: NSEvent) {
+        guard GridLayoutPreset.current.isInfiniteCanvas else {
+            super.magnify(with: event)
+            return
+        }
+
+        if event.phase.contains(.began) {
+            canvasPinchNeedsRipple = true
+        }
+        let magnification = event.magnification
+        if abs(magnification) > 0.0001 {
+            synchronizeCanvasStateIfNeeded(itemCount: displayedItems.count)
+            let appKitPoint = convert(event.locationInWindow, from: nil)
+            let anchor = CGPoint(x: appKitPoint.x, y: bounds.height - appKitPoint.y)
+            applyInfiniteCanvasZoomImpulse(
+                magnification * 4,
+                anchor: anchor,
+                now: CACurrentMediaTime(),
+                forceNewRipple: canvasPinchNeedsRipple
+            )
+            canvasPinchNeedsRipple = false
+        }
+        if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+            canvasPinchNeedsRipple = false
+        }
+    }
+
     override func scrollWheel(with event: NSEvent) {
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            if event.hasPreciseScrollingDeltas {
+                panInfiniteCanvas(with: event)
+            } else {
+                zoomInfiniteCanvas(with: event)
+            }
+            return
+        }
         store.handleScroll(
             deltaX: event.scrollingDeltaX,
             deltaY: event.scrollingDeltaY,
