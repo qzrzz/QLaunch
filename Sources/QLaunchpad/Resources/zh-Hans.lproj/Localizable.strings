@@ -30,6 +30,8 @@
 "settings.keyboard.arrows" = "方向键";
 "settings.keyboard.open" = "打开应用";
 "settings.keyboard.record" = "按下快捷键";
+"settings.keyboard.detail" = "已向 macOS 系统注册。若快捷键无效，请在“系统设置 → 键盘 → 键盘快捷键”中关闭占用同一组合的系统快捷键。";
+"settings.keyboard.registerFailed" = "macOS 无法注册此快捷键，请换一组。";
 "settings.section.cache" = "清除缓存";
 "settings.cache.clear" = "清除缓存";
 "settings.cache.detail" = "清除图标、文字和壁纸缓存并重新构建";

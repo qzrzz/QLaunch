@@ -21,6 +21,9 @@ enum LaunchpadHotKeyPreferences {
     static let modifiersKey = "launchpadHotKeyModifiers"
     static let defaultKeyCode = 49 // Space
     static let defaultModifiers = Int(NSEvent.ModifierFlags.command.rawValue)
+    static let shortcutModifierMask: NSEvent.ModifierFlags = [
+        .command, .option, .control, .shift
+    ]
 
     static var keyCode: UInt16 {
         UInt16(UserDefaults.standard.object(forKey: keyCodeKey) as? Int ?? defaultKeyCode)
@@ -30,13 +33,7 @@ enum LaunchpadHotKeyPreferences {
         let rawValue = UserDefaults.standard.object(forKey: modifiersKey) as? Int
             ?? defaultModifiers
         return NSEvent.ModifierFlags(rawValue: UInt(rawValue))
-    }
-
-    static func matches(_ event: NSEvent) -> Bool {
-        event.type == .keyDown
-            && event.keyCode == keyCode
-            && event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                == modifiers.intersection(.deviceIndependentFlagsMask)
+            .intersection(shortcutModifierMask)
     }
 
     static func displayName(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> String {

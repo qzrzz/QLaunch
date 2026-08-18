@@ -30,6 +30,8 @@
 "settings.keyboard.arrows" = "Arrow Keys";
 "settings.keyboard.open" = "Open App";
 "settings.keyboard.record" = "Press Shortcut";
+"settings.keyboard.detail" = "Registered with macOS. If it does not work, turn off the same shortcut in System Settings → Keyboard → Keyboard Shortcuts.";
+"settings.keyboard.registerFailed" = "macOS could not register this shortcut. Try a different combination.";
 "settings.section.cache" = "Clear Cache";
 "settings.cache.clear" = "Clear Cache";
 "settings.cache.detail" = "Clear and rebuild the icon, text, and wallpaper caches";

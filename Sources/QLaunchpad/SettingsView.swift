@@ -299,16 +299,30 @@ private struct HotKeyRecorderRow: View {
     private var keyCode = LaunchpadHotKeyPreferences.defaultKeyCode
     @AppStorage(LaunchpadHotKeyPreferences.modifiersKey)
     private var modifiers = LaunchpadHotKeyPreferences.defaultModifiers
+    @ObservedObject private var hotKeys = LaunchpadHotKeyCenter.shared
 
     var body: some View {
-        HStack {
-            Text(L10n.tr("settings.keyboard.toggle"))
-            Spacer()
-            HotKeyRecorder(
-                keyCode: $keyCode,
-                modifiers: $modifiers
-            )
-            .frame(width: 132, height: 26)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(L10n.tr("settings.keyboard.toggle"))
+                Spacer()
+                HotKeyRecorder(
+                    keyCode: $keyCode,
+                    modifiers: $modifiers
+                )
+                .frame(width: 132, height: 26)
+            }
+            if hotKeys.showsRegistrationError {
+                Text(L10n.tr("settings.keyboard.registerFailed"))
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(L10n.tr("settings.keyboard.detail"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -355,15 +369,32 @@ private final class HotKeyRecorderNSView: NSView {
         needsDisplay = true
     }
 
+    override func cancelOperation(_ sender: Any?) {
+        endRecording()
+    }
+
     override func keyDown(with event: NSEvent) {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let supportedModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
-        let shortcutModifiers = flags.intersection(supportedModifiers)
+        guard !event.isARepeat else { return }
+        if event.keyCode == 53 {
+            endRecording()
+            return
+        }
+
+        let shortcutModifiers = event.modifierFlags
+            .intersection(LaunchpadHotKeyPreferences.shortcutModifierMask)
         guard !shortcutModifiers.isEmpty else { return }
 
         keyCode = event.keyCode
         modifiers = shortcutModifiers
         onChange?(keyCode, modifiers)
+        endRecording()
+    }
+
+    private func endRecording() {
+        guard isRecording else {
+            window?.makeFirstResponder(nil)
+            return
+        }
         isRecording = false
         NotificationCenter.default.post(
             name: .qlaunchpadHotKeyRecordingChanged,
@@ -382,6 +413,7 @@ private final class HotKeyRecorderNSView: NSView {
                 object: nil,
                 userInfo: ["recording": false]
             )
+            needsDisplay = true
         }
         return super.resignFirstResponder()
     }

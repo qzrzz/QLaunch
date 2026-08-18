@@ -39,12 +39,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var showMenuItem: NSMenuItem?
     private var statusMenu: NSMenu?
-    private var globalHotKeyMonitor: Any?
     private var localHotKeyMonitor: Any?
     private var isAnimating = false
     private var presentationGeneration: UInt = 0
     private var activeAnimationStyle: LaunchpadAnimationStyle = .fly
-    private var isRecordingHotKey = false
     private var launchReason: LaunchpadLaunchReason = .user
     private var ignoreReopenUntil: Date?
     /// Ignore Dock reopen until the first homepage icons are on screen.
@@ -137,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let globalHotKeyMonitor { NSEvent.removeMonitor(globalHotKeyMonitor) }
+        LaunchpadHotKeyCenter.shared.uninstall()
         if let localHotKeyMonitor { NSEvent.removeMonitor(localHotKeyMonitor) }
         DistributedNotificationCenter.default().removeObserver(
             self,
@@ -243,19 +241,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func installHotKey() {
-        let handler: (NSEvent) -> Void = { [weak self] event in
-            guard let self, !self.isRecordingHotKey,
-                  LaunchpadHotKeyPreferences.matches(event) else { return }
-            self.toggleLaunchpad()
+        let center = LaunchpadHotKeyCenter.shared
+        center.onPressed = { [weak self] in
+            self?.toggleLaunchpad()
         }
-        globalHotKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
+        center.install()
+        installLaunchpadKeyMonitor()
+    }
+
+    /// In-panel navigation only. The toggle shortcut is a Carbon system hotkey.
+    private func installLaunchpadKeyMonitor() {
         localHotKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if !self.isRecordingHotKey, LaunchpadHotKeyPreferences.matches(event) {
-                self.toggleLaunchpad()
-                return nil
-            }
             guard self.launchpadPanel.isVisible else { return event }
             // A sheet or Settings window may be key while Launchpad remains
             // visible. Let that window handle Return/arrows normally.
@@ -448,7 +446,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func hotKeyRecordingChanged(_ note: Notification) {
-        isRecordingHotKey = note.userInfo?["recording"] as? Bool ?? false
+        let recording = note.userInfo?["recording"] as? Bool ?? false
+        LaunchpadHotKeyCenter.shared.setSuspended(recording)
     }
 
     @objc private func gridLayoutChanged() {

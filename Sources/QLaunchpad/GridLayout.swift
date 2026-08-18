@@ -336,21 +336,98 @@ struct GridMetrics {
         cellWidth = iconSize
             + (unscaledCellWidth - iconSize) * Self.current.spacingScale
 
-        // Vertical: icon + label (~22) + gap.
-        let vInsetTop: CGFloat = 120
-        let vInsetBottom: CGFloat = 96
-        let availableHeight = max(size.height - vInsetTop - vInsetBottom, 1)
+        let vertical = Self.verticalPlacement(screenHeight: size.height, iconSize: iconSize)
+        let availableHeight = max(size.height - vertical.insetTop - vertical.insetBottom, 1)
         let idealRow = availableHeight / CGFloat(Self.rows)
-        let maxCellHeight = max(220, iconSize + 48)
-        let unscaledCellHeight = min(max(idealRow, iconSize + 48), maxCellHeight)
+        let unscaledCellHeight = min(
+            max(idealRow, iconSize + vertical.minCellExtra),
+            vertical.maxCell
+        )
         cellHeight = iconSize
             + (unscaledCellHeight - iconSize) * Self.current.spacingScale
 
         gridWidth = cellWidth * CGFloat(Self.columns)
         gridHeight = cellHeight * CGFloat(Self.rows)
         gridLeft = (size.width - gridWidth) / 2
-        // Prefer optical center slightly above geometric center (search field above).
-        gridTop = max(vInsetTop, (size.height - gridHeight) / 2 - 12)
+        if vertical.centerInChromeBand {
+            gridTop = Self.centeredGridTop(
+                screenHeight: size.height,
+                gridHeight: gridHeight,
+                cellHeight: cellHeight,
+                iconSize: iconSize,
+                placement: vertical
+            )
+        } else {
+            // Prefer optical center slightly above geometric center (search field above).
+            gridTop = max(vertical.insetTop, (size.height - gridHeight) / 2 - vertical.opticalLift)
+        }
+    }
+
+    /// Comfortable padding on large displays. 7×5 128pt on a 13" built-in
+    /// (~1440×900 / 1470×956) cannot keep that padding and still sit in the
+    /// band between the search field and the page dots.
+    private struct VerticalPlacement {
+        var insetTop: CGFloat
+        var insetBottom: CGFloat
+        var minCellExtra: CGFloat
+        var maxCell: CGFloat
+        var opticalLift: CGFloat
+        var centerInChromeBand: Bool
+    }
+
+    private static func verticalPlacement(
+        screenHeight: CGFloat,
+        iconSize: CGFloat
+    ) -> VerticalPlacement {
+        let comfortable = VerticalPlacement(
+            insetTop: 120,
+            insetBottom: 96,
+            minCellExtra: 48,
+            maxCell: max(220, iconSize + 48),
+            opticalLift: 12,
+            centerInChromeBand: false
+        )
+        guard current == .sevenByFive else { return comfortable }
+
+        let comfortableBlock = (iconSize + comfortable.minCellExtra) * CGFloat(rows)
+            + comfortable.insetTop
+            + comfortable.insetBottom
+        guard screenHeight + 0.5 < comfortableBlock else { return comfortable }
+
+        // Search field occupies 36…74; page capsule sits ~36pt from the bottom.
+        let chromeTop = LaunchpadFieldHitArea.topInset
+            + LaunchpadFieldHitArea.fieldSize.height
+            + 6
+        let chromeBottom = LaunchpadPageIndicatorHitArea.bottomInset
+            + LaunchpadPageIndicatorHitArea.dotHeight
+            + LaunchpadPageIndicatorHitArea.verticalPadding * 2
+        return VerticalPlacement(
+            insetTop: chromeTop,
+            insetBottom: chromeBottom,
+            minCellExtra: 40,
+            maxCell: comfortable.maxCell,
+            opticalLift: 8,
+            centerInChromeBand: true
+        )
+    }
+
+    /// Center the grid, then lift it slightly for the search field. If the
+    /// block is taller than the chrome-safe band, pin under the search field
+    /// instead of the old 120pt floor (which left 7×5 sitting too low).
+    private static func centeredGridTop(
+        screenHeight: CGFloat,
+        gridHeight: CGFloat,
+        cellHeight: CGFloat,
+        iconSize: CGFloat,
+        placement: VerticalPlacement
+    ) -> CGFloat {
+        let opticalTop = (screenHeight - gridHeight) / 2 - placement.opticalLift
+        let minTop = placement.insetTop - cellHeight * 0.5 + iconSize * 0.5
+        let maxTop = screenHeight - placement.insetBottom - gridHeight
+        if maxTop + 0.5 < minTop {
+            return minTop
+        }
+        return min(max(opticalTop, minTop), maxTop)
     }
 
     /// Icon center in **top-left** coordinates (y grows downward). Used by Metal.

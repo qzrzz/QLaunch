@@ -30,6 +30,8 @@
 "settings.keyboard.arrows" = "화살표 키";
 "settings.keyboard.open" = "앱 열기";
 "settings.keyboard.record" = "단축키 입력";
+"settings.keyboard.detail" = "macOS 시스템 단축키로 등록됩니다. 동작하지 않으면 시스템 설정 → 키보드 → 키보드 단축키에서 같은 조합을 끄세요.";
+"settings.keyboard.registerFailed" = "macOS가 이 단축키를 등록하지 못했습니다. 다른 조합을 사용해 보세요.";
 "settings.section.cache" = "캐시 지우기";
 "settings.cache.clear" = "캐시 지우기";
 "settings.cache.detail" = "아이콘, 텍스트 및 배경화면 캐시를 지우고 다시 생성합니다";

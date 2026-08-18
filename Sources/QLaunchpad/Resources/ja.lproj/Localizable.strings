@@ -30,6 +30,8 @@
 "settings.keyboard.arrows" = "矢印キー";
 "settings.keyboard.open" = "アプリを開く";
 "settings.keyboard.record" = "ショートカットを入力";
+"settings.keyboard.detail" = "macOS にシステムショートカットとして登録します。効かない場合は、「システム設定 → キーボード → キーボードショートカット」で同じキーのシステムショートカットをオフにしてください。";
+"settings.keyboard.registerFailed" = "macOS がこのショートカットを登録できませんでした。別の組み合わせを試してください。";
 "settings.section.cache" = "キャッシュを消去";
 "settings.cache.clear" = "キャッシュを消去";
 "settings.cache.detail" = "アイコン、テキスト、壁紙のキャッシュを消去して再構築します";
