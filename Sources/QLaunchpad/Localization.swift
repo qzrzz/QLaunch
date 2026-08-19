@@ -94,8 +94,11 @@ final class LocalizationManager: ObservableObject {
 enum L10n {
     static func tr(_ key: String, _ arguments: CVarArg...) -> String {
         let language = LocalizationManager.shared.effectiveLanguage
+        // Never use SwiftPM `Bundle.module` here: its generated accessor
+        // traps when the resource bundle is not next to the `.app`.
+        let stringsBundle = QLaunchpadResources.bundle ?? .main
         let resourceBundle: Bundle
-        if let stringsPath = Bundle.module.path(
+        if let stringsPath = stringsBundle.path(
             forResource: "Localizable",
             ofType: "strings",
             inDirectory: nil,
@@ -104,7 +107,7 @@ enum L10n {
            let bundle = Bundle(path: (stringsPath as NSString).deletingLastPathComponent) {
             resourceBundle = bundle
         } else {
-            resourceBundle = .module
+            resourceBundle = stringsBundle
         }
 
         let format = NSLocalizedString(

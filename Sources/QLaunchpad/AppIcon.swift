@@ -4,10 +4,11 @@ enum QLaunchpadResources {
     private static let bundleName = "QLaunchpad_QLaunchpad.bundle"
 
     /// Resolve resources without using SwiftPM's generated `Bundle.module`
-    /// accessor. In a packaged app SwiftPM looks beside the `.app`, while the
-    /// resource bundle belongs in `Contents/Resources`; on another machine its
-    /// build-directory fallback is also unavailable and traps the process.
-    static var bundle: Bundle? {
+    /// accessor. That accessor looks at `App.app/QLaunchpad_QLaunchpad.bundle`
+    /// and a machine-local SwiftPM build path, then `fatalError`s. Packaged
+    /// builds put the bundle in `Contents/Resources`; after a Sparkle update
+    /// the build-directory fallback is gone and the process traps on launch.
+    static let bundle: Bundle? = {
         let candidates = [
             Bundle.main.resourceURL?.appendingPathComponent(bundleName),
             Bundle.main.executableURL?
@@ -17,7 +18,7 @@ enum QLaunchpadResources {
         ].compactMap { $0 }
 
         return candidates.lazy.compactMap(Bundle.init(url:)).first
-    }
+    }()
 }
 
 enum QLaunchpadAppIcon {
