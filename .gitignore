@@ -5,6 +5,7 @@ build/
 build_tmp/
 build_derived/
 dist/
+dist-*/
 output/
 release/
 scratch/
