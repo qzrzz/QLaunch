@@ -1,7 +1,7 @@
 # 🚀 QLaunch
 
 <div align="center">
-  <img src="web/src/assets/qlaunchpad-icon-full-512.png" width="128" alt="QLaunch">
+  <img src="web/icons/qlaunchpad-512.png" width="128" alt="QLaunch">
 </div>
 
 ---
@@ -15,8 +15,8 @@
 
 <table>
   <tr>
-    <td><img src="web/src/assets/s1.png" alt="QLaunch" width="100%"></td>
-    <td><img src="web/src/assets/s2.png" alt="QLaunch" width="100%"></td>
+    <td><img src="web/assets/s1.png" alt="QLaunch" width="100%"></td>
+    <td><img src="web/assets/s2.png" alt="QLaunch" width="100%"></td>
   </tr>
 </table>
 
