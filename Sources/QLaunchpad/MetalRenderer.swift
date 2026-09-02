@@ -328,6 +328,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     // Content view transition: sequential fade-out → swap → fade-in.
     private var displayedItems: [LaunchpadItem] = []
+    /// Folder ID represented by settled `displayedItems`. Nil while the root
+    /// grid is showing, including during an opening morph that still draws root.
+    private var displayedFolderID: String?
     private var pendingDisplayItems: [LaunchpadItem]?
     private var lastDisplaySignature: AppListSignature?
     private enum ContentTransitionPhase { case idle, fadingOut, fadingIn }
@@ -336,6 +339,58 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var contentTransitionAlpha: Float = 1
     private var frozenPageOffset: Double = 0
     private let contentTransitionHalfDuration: CFTimeInterval = 0.15
+
+    /// iOS SpringBoard-style folder morph. Progress 0 is the collapsed icon;
+    /// 1 is the open grid.
+    private struct FolderTransition {
+        enum Direction {
+            case opening
+            case closing
+        }
+
+        var direction: Direction
+        var folderID: String
+        var sourceCenter: CGPoint
+        var sourceSize: CGFloat
+        var rootItems: [LaunchpadItem]
+        var folderItems: [LaunchpadItem]
+        var rootPageOffset: Double
+        var rootCanvasScale: CGFloat
+        var rootCanvasPan: CGPoint
+        var rootCanvasAdaptive: Bool
+        var startTime: CFTimeInterval
+        var duration: CFTimeInterval
+        var progress: CGFloat
+        var hasDrawnSettledFrame: Bool = false
+    }
+
+    private struct FolderSourceSnapshot {
+        var folderID: String
+        var center: CGPoint
+        var size: CGFloat
+        var rootPageOffset: Double
+        var canvasScale: CGFloat
+        var canvasPan: CGPoint
+        var canvasAdaptive: Bool
+        var boundsSize: CGSize
+    }
+
+    private struct GridDrawStyle {
+        var recedeTowardCenter: CGFloat = 1
+        var extraAlpha: Float = 1
+        var extraIconScale: CGFloat = 1
+        var suppressPerIconMotion: Bool = false
+        var hiddenIDs: Set<String> = []
+        var hideLabels: Bool = false
+        var restCanvas: (metrics: InfiniteCanvasMetrics, scale: CGFloat, pan: CGPoint)?
+    }
+
+    private var folderTransition: FolderTransition?
+    private var lastFolderSource: FolderSourceSnapshot?
+    private let folderOpenDuration: CFTimeInterval = 0.46
+    private let folderCloseDuration: CFTimeInterval = 0.38
+
+    private var isFolderTransitionActive: Bool { folderTransition != nil }
 
     // MARK: Init
 
@@ -693,6 +748,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             && !isPanningPage
             && !animatingPresentation
             && contentTransitionPhase == .idle
+            && !isFolderTransitionActive
             && !isReorderAnimationActive
             && !dragInteractionActive
             && dragReleaseAnimation == nil
@@ -913,6 +969,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
               draggedAppID != nil,
               !isPanningPage,
               contentTransitionPhase == .idle,
+              !isFolderTransitionActive,
               now - lastEdgePageTurnTime >= edgePageTurnDelay else {
             return
         }
@@ -934,7 +991,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
               didDrag,
               store.allowsUserLayoutEditing,
               store.openedFolderID == nil,
-              contentTransitionPhase == .idle else {
+              contentTransitionPhase == .idle,
+              !isFolderTransitionActive else {
             return
         }
 
@@ -1056,7 +1114,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         guard let folderID = store.openedFolderID,
               let source = dragSource,
               didDrag,
-              contentTransitionPhase == .idle else { return }
+              contentTransitionPhase == .idle,
+              !isFolderTransitionActive else { return }
 
         guard let destination = layoutItemIndex(at: point, hitRadiusScale: 1.05) else { return }
         guard displayedItems.indices.contains(destination), destination != source else { return }
@@ -1186,6 +1245,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 prune: IconRenderQuality.current.usesLazyTextureLoading
             )
         } else {
+            if folderTransition != nil {
+                finishFolderTransition()
+            }
             presentFrom = store.presentationProgress
             presentTo = 0
             pauseResourcePrewarming()
@@ -1412,6 +1474,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     func prepareFirstPageIcons() async {
         if displayedItems.isEmpty, !store.activeDisplayItems.isEmpty {
             displayedItems = store.activeDisplayItems
+            displayedFolderID = store.isSearching ? nil : store.openedFolderID
             lastDisplaySignature = AppListSignature(items: displayedItems)
             contentTransitionPhase = .idle
             contentTransitionAlpha = 1
@@ -1512,6 +1575,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         if displayedItems.isEmpty {
             displayedItems = store.activeDisplayItems
+            displayedFolderID = store.isSearching ? nil : store.openedFolderID
             lastDisplaySignature = AppListSignature(items: displayedItems)
             contentTransitionPhase = .idle
             contentTransitionAlpha = 1
@@ -1593,7 +1657,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let quality = IconRenderQuality.current
         // Prefer the list about to appear during a content transition.
         let items: [LaunchpadItem]
-        if contentTransitionPhase == .fadingOut, let pending = pendingDisplayItems {
+        if let transition = folderTransition {
+            items = transition.direction == .opening
+                ? transition.folderItems
+                : transition.rootItems
+        } else if contentTransitionPhase == .fadingOut, let pending = pendingDisplayItems {
             items = pending
         } else {
             items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
@@ -1622,7 +1690,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             window = iconCacheWindow(around: targetPage, items: items, radius: 1)
         }
 
-        if prune {
+        if prune, folderTransition == nil {
             pruneIconTextureCaches(appIDs: window.appIDs, folderIDs: window.folderIDs)
             lastTextureWindowPage = targetPage
         } else {
@@ -1644,6 +1712,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         if displayedItems.isEmpty {
             displayedItems = store.displayItems
+            displayedFolderID = store.isSearching ? nil : store.openedFolderID
             lastDisplaySignature = AppListSignature(items: displayedItems)
             contentTransitionPhase = .idle
             contentTransitionAlpha = 1
@@ -2026,10 +2095,21 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         if displayedItems.isEmpty {
             displayedItems = target
+            displayedFolderID = store.isSearching ? nil : store.openedFolderID
             pendingDisplayItems = nil
             contentTransitionPhase = .idle
             contentTransitionAlpha = 1
             return
+        }
+
+        if tryBeginFolderTransition(to: target, signature: signature) {
+            return
+        }
+        if folderTransition != nil {
+            finishFolderTransition()
+            if lastDisplaySignature?.matches(target) == true {
+                return
+            }
         }
         if signature.matches(displayedItems) {
             pendingDisplayItems = nil
@@ -2094,6 +2174,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             contentTransitionAlpha = Float(1 - smoothstep(t))
             if t >= 1 {
                 displayedItems = pendingDisplayItems ?? store.activeDisplayItems
+                displayedFolderID = store.isSearching ? nil : store.openedFolderID
                 resetReorderVisualSlots(to: displayedItems)
                 pendingDisplayItems = nil
                 currentPageOffset = store.pageOffset
@@ -2126,6 +2207,536 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
     }
 
+    // MARK: Folder open / close morph
+
+    /// Intercept a root ↔ folder swap and play the iOS-style expand instead of
+    /// the generic fade. Search and reduced-motion still use the fade.
+    private func tryBeginFolderTransition(
+        to target: [LaunchpadItem],
+        signature: AppListSignature
+    ) -> Bool {
+        guard store.layoutMode.isUser,
+              !store.isSearching,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            return false
+        }
+
+        let nextFolderID = store.openedFolderID
+        if nextFolderID == displayedFolderID {
+            return false
+        }
+
+        if let nextFolderID, displayedFolderID == nil {
+            if beginFolderOpenTransition(folderID: nextFolderID, target: target) {
+                lastDisplaySignature = signature
+                return true
+            }
+            return false
+        }
+
+        if nextFolderID == nil, let previous = displayedFolderID {
+            if beginFolderCloseTransition(folderID: previous, target: target) {
+                lastDisplaySignature = signature
+                return true
+            }
+        }
+        return false
+    }
+
+    @discardableResult
+    private func beginFolderOpenTransition(
+        folderID: String,
+        target: [LaunchpadItem]
+    ) -> Bool {
+        if var active = folderTransition, active.folderID == folderID {
+            reverseFolderTransition(&active, to: .opening)
+            folderTransition = active
+            startDisplayLink()
+            needsDisplay = true
+            return true
+        }
+
+        let source = folderIconPresentation(
+            folderID: folderID,
+            items: displayedItems,
+            pageOffset: currentPageOffset,
+            canvasScale: canvasScale,
+            canvasPan: canvasPan,
+            canvasAdaptive: canvasStateUsesAdaptiveLayout,
+            useVisualSlots: true
+        )
+        guard let source else { return false }
+
+        lastFolderSource = FolderSourceSnapshot(
+            folderID: folderID,
+            center: source.center,
+            size: source.size,
+            rootPageOffset: currentPageOffset,
+            canvasScale: canvasScale,
+            canvasPan: canvasPan,
+            canvasAdaptive: canvasStateUsesAdaptiveLayout,
+            boundsSize: bounds.size
+        )
+        frozenPageOffset = currentPageOffset
+        contentTransitionPhase = .idle
+        contentTransitionAlpha = 1
+        pendingDisplayItems = nil
+        folderTransition = FolderTransition(
+            direction: .opening,
+            folderID: folderID,
+            sourceCenter: source.center,
+            sourceSize: source.size,
+            rootItems: displayedItems,
+            folderItems: target,
+            rootPageOffset: currentPageOffset,
+            rootCanvasScale: canvasScale,
+            rootCanvasPan: canvasPan,
+            rootCanvasAdaptive: canvasStateUsesAdaptiveLayout,
+            startTime: CACurrentMediaTime(),
+            duration: folderOpenDuration,
+            progress: 0
+        )
+        prepareFolderTransitionResources(items: target)
+        startDisplayLink()
+        needsDisplay = true
+        return true
+    }
+
+    @discardableResult
+    private func beginFolderCloseTransition(
+        folderID: String,
+        target: [LaunchpadItem]
+    ) -> Bool {
+        if var active = folderTransition, active.folderID == folderID {
+            reverseFolderTransition(&active, to: .closing)
+            active.rootItems = target
+            folderTransition = active
+            startDisplayLink()
+            needsDisplay = true
+            return true
+        }
+
+        let source = resolvedFolderSource(folderID: folderID, rootItems: target)
+        guard let source else { return false }
+
+        frozenPageOffset = currentPageOffset
+        contentTransitionPhase = .idle
+        contentTransitionAlpha = 1
+        pendingDisplayItems = nil
+        folderTransition = FolderTransition(
+            direction: .closing,
+            folderID: folderID,
+            sourceCenter: source.center,
+            sourceSize: source.size,
+            rootItems: target,
+            folderItems: displayedItems,
+            rootPageOffset: source.pageOffset,
+            rootCanvasScale: source.canvasScale,
+            rootCanvasPan: source.canvasPan,
+            rootCanvasAdaptive: source.canvasAdaptive,
+            startTime: CACurrentMediaTime(),
+            duration: folderCloseDuration,
+            progress: 1
+        )
+        prepareFolderTransitionResources(items: target)
+        startDisplayLink()
+        needsDisplay = true
+        return true
+    }
+
+    private func reverseFolderTransition(
+        _ transition: inout FolderTransition,
+        to direction: FolderTransition.Direction
+    ) {
+        guard transition.direction != direction else { return }
+        transition.direction = direction
+        transition.duration = direction == .opening
+            ? folderOpenDuration
+            : folderCloseDuration
+        let consumed = direction == .opening
+            ? transition.progress
+            : 1 - transition.progress
+        transition.startTime = CACurrentMediaTime()
+            - transition.duration * Double(consumed)
+        transition.hasDrawnSettledFrame = false
+    }
+
+    private func prepareFolderTransitionResources(items: [LaunchpadItem]) {
+        guard IconRenderQuality.current.usesLazyTextureLoading else { return }
+        resourcePrewarmSignature = nil
+        lastTextureWindowPage = -1
+        isResourcePrewarmingPaused = false
+        let appIDs = Set(items.compactMap { item -> String? in
+            if case .app(let app) = item { return app.id }
+            return nil
+        })
+        iconTextures.expandAllowedAppIDs(appIDs)
+        scheduleLazyResourcePrewarming(
+            around: max(0, Int(store.pageOffset.rounded())),
+            prune: false
+        )
+    }
+
+    private func tickFolderTransition(now: CFTimeInterval) {
+        guard var transition = folderTransition else { return }
+        let raw = CGFloat((now - transition.startTime) / max(transition.duration, 0.001))
+        let eased = folderOpenEase(min(max(raw, 0), 1))
+        transition.progress = transition.direction == .opening ? eased : 1 - eased
+        if raw >= 1 {
+            transition.progress = transition.direction == .opening ? 1 : 0
+            // Draw one settled morph frame that matches the destination grid,
+            // then swap on the next tick. Switching on this frame made icons
+            // flash as they jumped from the interpolator onto buildGrid.
+            if transition.hasDrawnSettledFrame {
+                finishFolderTransition()
+                return
+            }
+            transition.hasDrawnSettledFrame = true
+        }
+        folderTransition = transition
+        startDisplayLink()
+    }
+
+    private func finishFolderTransition() {
+        let open = store.openedFolderID != nil && !store.isSearching
+        let items = store.activeDisplayItems
+        displayedItems = items
+        displayedFolderID = open ? store.openedFolderID : nil
+        lastDisplaySignature = AppListSignature(items: items)
+        resetReorderVisualSlots(to: items)
+        currentPageOffset = store.pageOffset
+        frozenPageOffset = store.pageOffset
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            if open {
+                applyFolderOpenCanvas(itemCount: items.count)
+            } else if let snapshot = lastFolderSource {
+                restoreRootCanvas(snapshot)
+            }
+        }
+        folderTransition = nil
+        // Morph drawing does not record lazy-reveal misses. Drop any that
+        // arrived mid-flight so the settled grid does not fade the same icons
+        // in again and flash after they reach full size.
+        for item in items {
+            iconsMissingTexture.remove(item.id)
+            iconRevealStartedAt.removeValue(forKey: item.id)
+        }
+        if lastDisplaySignature?.matches(store.activeDisplayItems) != true {
+            lastDisplaySignature = nil
+            noteDisplayChangeIfNeeded()
+        }
+    }
+
+    private func applyFolderOpenCanvas(itemCount: Int) {
+        let metrics = InfiniteCanvasMetrics(
+            size: bounds.size,
+            itemCount: itemCount,
+            adaptsToItemCount: true,
+            maximumScale: GridLayoutPreset.current.infiniteCanvasMaximumScale
+        )
+        let scale = max(metrics.fittedScale, 0.12)
+        canvasScale = scale
+        canvasPan = .zero
+        resetCanvasMotion()
+        canvasStatePreset = GridLayoutPreset.current
+        canvasStateItemCount = itemCount
+        canvasStateSignature = AppListSignature(items: displayedItems)
+        canvasStateUsesAdaptiveLayout = true
+        canvasStateSize = bounds.size
+        canvasZoomAnchor = metrics.viewportCenter
+        canvasRippleCenter = metrics.viewportCenter
+        canvasRippleReferenceScale = scale
+        canvasRippleReferencePan = .zero
+        store.setInfiniteCanvasNavigationColumns(metrics.columnCount)
+    }
+
+    private func restoreRootCanvas(_ snapshot: FolderSourceSnapshot) {
+        canvasScale = snapshot.canvasScale
+        canvasPan = snapshot.canvasPan
+        resetCanvasMotion()
+        canvasStatePreset = GridLayoutPreset.current
+        canvasStateItemCount = displayedItems.count
+        canvasStateSignature = AppListSignature(items: displayedItems)
+        canvasStateUsesAdaptiveLayout = snapshot.canvasAdaptive
+        canvasStateSize = bounds.size
+        store.setInfiniteCanvasNavigationColumns(
+            infiniteCanvasMetrics(itemCount: displayedItems.count).columnCount
+        )
+    }
+
+    private func folderOpenEase(_ t: CGFloat) -> CGFloat {
+        let x = min(max(t, 0), 1)
+        let inv = 1 - x
+        return 1 - inv * inv * inv
+    }
+
+    private func folderMix(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat {
+        a + (b - a) * t
+    }
+
+    private func folderMix(_ a: CGPoint, _ b: CGPoint, _ t: CGFloat) -> CGPoint {
+        CGPoint(x: folderMix(a.x, b.x, t), y: folderMix(a.y, b.y, t))
+    }
+
+    private func folderIconPresentation(
+        folderID: String,
+        items: [LaunchpadItem],
+        pageOffset: Double,
+        canvasScale: CGFloat,
+        canvasPan: CGPoint,
+        canvasAdaptive: Bool,
+        useVisualSlots: Bool
+    ) -> (center: CGPoint, size: CGFloat)? {
+        guard let index = items.firstIndex(where: { $0.id == folderID }) else {
+            return nil
+        }
+        let visualIndex = useVisualSlots
+            ? (reorderVisualSlots[folderID] ?? Double(index))
+            : Double(index)
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            let metrics = InfiniteCanvasMetrics(
+                size: bounds.size,
+                itemCount: items.count,
+                adaptsToItemCount: canvasAdaptive,
+                maximumScale: GridLayoutPreset.current.infiniteCanvasMaximumScale
+            )
+            let center = metrics.screenCenter(
+                globalIndex: visualIndex,
+                scale: canvasScale,
+                pan: canvasPan
+            )
+            return (center, 128 * canvasScale)
+        }
+        let metrics = GridMetrics(size: bounds.size)
+        return (
+            metrics.iconCenter(globalIndex: visualIndex, pageOffset: pageOffset),
+            metrics.iconSize
+        )
+    }
+
+    private func resolvedFolderSource(
+        folderID: String,
+        rootItems: [LaunchpadItem]
+    ) -> (
+        center: CGPoint,
+        size: CGFloat,
+        pageOffset: Double,
+        canvasScale: CGFloat,
+        canvasPan: CGPoint,
+        canvasAdaptive: Bool
+    )? {
+        let snapshot = lastFolderSource
+        let pageOffset = snapshot?.folderID == folderID
+            ? snapshot!.rootPageOffset
+            : store.pageOffset
+        let canvasScale = snapshot?.folderID == folderID
+            ? snapshot!.canvasScale
+            : self.canvasScale
+        let canvasPan = snapshot?.folderID == folderID
+            ? snapshot!.canvasPan
+            : self.canvasPan
+        let canvasAdaptive = snapshot?.folderID == folderID
+            ? snapshot!.canvasAdaptive
+            : false
+        if let live = folderIconPresentation(
+            folderID: folderID,
+            items: rootItems,
+            pageOffset: pageOffset,
+            canvasScale: canvasScale,
+            canvasPan: canvasPan,
+            canvasAdaptive: canvasAdaptive,
+            useVisualSlots: false
+        ) {
+            return (
+                live.center,
+                live.size,
+                pageOffset,
+                canvasScale,
+                canvasPan,
+                canvasAdaptive
+            )
+        }
+        guard let snapshot, snapshot.folderID == folderID else { return nil }
+        let sx = bounds.width / max(snapshot.boundsSize.width, 1)
+        let sy = bounds.height / max(snapshot.boundsSize.height, 1)
+        return (
+            CGPoint(x: snapshot.center.x * sx, y: snapshot.center.y * sy),
+            snapshot.size * min(sx, sy),
+            snapshot.rootPageOffset,
+            snapshot.canvasScale,
+            snapshot.canvasPan,
+            snapshot.canvasAdaptive
+        )
+    }
+
+    private func folderOpenDestinationLayout(
+        itemCount: Int
+    ) -> (centers: [CGPoint], iconSize: CGFloat) {
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            let metrics = InfiniteCanvasMetrics(
+                size: bounds.size,
+                itemCount: itemCount,
+                adaptsToItemCount: true,
+                maximumScale: GridLayoutPreset.current.infiniteCanvasMaximumScale
+            )
+            let scale = max(metrics.fittedScale, 0.12)
+            let centers = (0..<itemCount).map {
+                metrics.screenCenter(globalIndex: Double($0), scale: scale, pan: .zero)
+            }
+            return (centers, 128 * scale)
+        }
+        let metrics = GridMetrics(size: bounds.size)
+        let centers = (0..<itemCount).map {
+            metrics.iconCenter(globalIndex: Double($0), pageOffset: 0)
+        }
+        return (centers, metrics.iconSize)
+    }
+
+    private func buildFolderTransition(
+        alphaScale: Float,
+        now: CFTimeInterval,
+        metrics: GridMetrics,
+        midX: CGFloat,
+        midY: CGFloat,
+        iconDrawTextures: inout [MTLTexture],
+        iconSprites: inout [SpriteInstance],
+        labelsBySheet: inout [[SpriteInstance]]
+    ) {
+        guard let transition = folderTransition else { return }
+        let progress = min(max(transition.progress, 0), 1)
+        let recede = 1 - 0.09 * progress
+        // Drop the root grid quickly so it does not sit under the flying icons.
+        let rootAlpha = Float(max(0, 1 - progress / 0.22))
+        var rootStyle = GridDrawStyle(
+            recedeTowardCenter: recede,
+            extraAlpha: rootAlpha,
+            extraIconScale: 1 - 0.05 * progress,
+            suppressPerIconMotion: true,
+            hiddenIDs: [transition.folderID],
+            hideLabels: true
+        )
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            rootStyle.restCanvas = (
+                InfiniteCanvasMetrics(
+                    size: bounds.size,
+                    itemCount: transition.rootItems.count,
+                    adaptsToItemCount: transition.rootCanvasAdaptive,
+                    maximumScale: GridLayoutPreset.current.infiniteCanvasMaximumScale
+                ),
+                transition.rootCanvasScale,
+                transition.rootCanvasPan
+            )
+        }
+        buildGrid(
+            items: transition.rootItems,
+            pageOffset: transition.rootPageOffset,
+            alphaScale: alphaScale,
+            now: now,
+            metrics: metrics,
+            midX: midX,
+            midY: midY,
+            iconDrawTextures: &iconDrawTextures,
+            iconSprites: &iconSprites,
+            labelsBySheet: &labelsBySheet,
+            style: rootStyle
+        )
+
+        let destination = folderOpenDestinationLayout(itemCount: transition.folderItems.count)
+        // Empty glass only — the composited tile already contains the same
+        // minis that fly out, and drawing both produced a trailing double image.
+        let plateAlpha = alphaScale * Float(max(0, 1 - progress / 0.22))
+        if plateAlpha > 0.01,
+           let pad = folderIconTextures.backgroundTexture(for: GridLayoutPreset.current) {
+            iconDrawTextures.append(pad)
+            iconSprites.append(
+                .icon(
+                    center: transition.sourceCenter,
+                    size: transition.sourceSize,
+                    uv: SIMD4(0, 0, 1, 1),
+                    alpha: plateAlpha,
+                    pressed: false
+                )
+            )
+        }
+
+        let showLabels = UserDefaults.standard.object(forKey: "showLabels") as? Bool ?? true
+        let fullUV = SIMD4<Float>(0, 0, 1, 1)
+        let miniSize = FolderPreviewLayout.miniSize(in: transition.sourceSize)
+        let local = folderOpenEase(progress)
+        for (index, item) in transition.folderItems.enumerated() {
+            guard case .app(let app) = item else { continue }
+            let destCenter = destination.centers.indices.contains(index)
+                ? destination.centers[index]
+                : CGPoint(x: midX, y: midY)
+            let fromCenter: CGPoint
+            let fromSize: CGFloat
+            let fromAlpha: Float
+            if index < FolderPreviewLayout.capacity {
+                fromCenter = FolderPreviewLayout.miniCenter(
+                    index: index,
+                    folderCenter: transition.sourceCenter,
+                    folderSize: transition.sourceSize,
+                    yIncreasesDown: true
+                )
+                fromSize = miniSize
+                fromAlpha = 1
+            } else {
+                fromCenter = transition.sourceCenter
+                fromSize = destination.iconSize * 0.18
+                fromAlpha = 0
+            }
+            let center = folderMix(fromCenter, destCenter, local)
+            let size = folderMix(fromSize, destination.iconSize, local)
+            let iconAlpha = folderMix(CGFloat(fromAlpha), 1, local)
+            let texture = iconTextures.cachedTexture(for: app)
+            // Do not run lazy-reveal here: a texture that lands mid-morph would
+            // fade 0→1 and flash once the icon is already at full size.
+            let settledPageFade: CGFloat = GridLayoutPreset.current.isInfiniteCanvas
+                ? 1
+                : max(0, min(1, 1.15 - abs(destCenter.x - midX) / max(bounds.width, 1)))
+            let pageFade = folderMix(1, settledPageFade, local)
+            let drawnAlpha = alphaScale * Float(iconAlpha) * Float(pageFade)
+            if let texture, drawnAlpha > 0.002 {
+                iconDrawTextures.append(texture)
+                iconSprites.append(
+                    .icon(
+                        center: center,
+                        size: size,
+                        uv: fullUV,
+                        alpha: drawnAlpha,
+                        pressed: false
+                    )
+                )
+            }
+            let labelFade = max(0, min(1, (local - 0.55) / 0.45))
+            if showLabels,
+               labelFade > 0.02,
+               let label = textAtlas.layouts[app.id],
+               labelsBySheet.indices.contains(label.sheet) {
+                let itemScale = size / max(metrics.iconSize, 1)
+                let labelScale = GridLayoutPreset.current.isInfiniteCanvas
+                    ? min(itemScale, 1)
+                    : itemScale
+                let lc = CGPoint(
+                    x: center.x,
+                    y: center.y + size * 0.5 + 6 + label.heightPoints * 0.5 * labelScale
+                )
+                labelsBySheet[label.sheet].append(
+                    .label(
+                        center: lc,
+                        size: CGSize(
+                            width: label.widthPoints * labelScale,
+                            height: label.heightPoints * labelScale
+                        ),
+                        uv: label.uv,
+                        alpha: drawnAlpha * Float(labelFade) * 0.95,
+                        snapToPixels: false
+                    )
+                )
+            }
+        }
+    }
+
     // MARK: Draw
 
     func draw(in view: MTKView) {
@@ -2143,6 +2754,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // If apps just arrived, populate the grid immediately (no empty first open).
         if displayedItems.isEmpty, !store.activeDisplayItems.isEmpty {
             displayedItems = store.activeDisplayItems
+            displayedFolderID = store.isSearching ? nil : store.openedFolderID
             lastDisplaySignature = AppListSignature(items: displayedItems)
             contentTransitionPhase = .idle
             contentTransitionAlpha = 1
@@ -2154,25 +2766,27 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         let quality = IconRenderQuality.current
         if quality.usesLazyTextureLoading {
-            // Low-memory: also react to search/folder list identity, not just page.
-            let destPage = max(
-                0,
-                Int((store.isPageGestureActive ? store.pageOffset : store.targetPage).rounded())
-            )
-            let pageSettled = !store.isPageGestureActive
-                && abs(currentPageOffset - store.targetPage) < 0.02
-            let displaySignature = AppListSignature(items: displayedItems)
-            let displayChanged = resourcePrewarmSignature?.display != displaySignature
-            if lastCatalogSignature?.matches(store.apps) != true || displayChanged {
-                scheduleResourcePrewarmingIfNeeded(around: destPage, prune: true)
-            } else if pageSettled {
-                let page = max(0, Int(store.targetPage.rounded()))
-                if page != lastTextureWindowPage
-                    || iconTextures.cachedTextureCount > (store.pageCapacity * 3 + 8) {
-                    scheduleResourcePrewarmingIfNeeded(around: page, prune: true)
+            if !isFolderTransitionActive {
+                // Low-memory: also react to search/folder list identity, not just page.
+                let destPage = max(
+                    0,
+                    Int((store.isPageGestureActive ? store.pageOffset : store.targetPage).rounded())
+                )
+                let pageSettled = !store.isPageGestureActive
+                    && abs(currentPageOffset - store.targetPage) < 0.02
+                let displaySignature = AppListSignature(items: displayedItems)
+                let displayChanged = resourcePrewarmSignature?.display != displaySignature
+                if lastCatalogSignature?.matches(store.apps) != true || displayChanged {
+                    scheduleResourcePrewarmingIfNeeded(around: destPage, prune: true)
+                } else if pageSettled {
+                    let page = max(0, Int(store.targetPage.rounded()))
+                    if page != lastTextureWindowPage
+                        || iconTextures.cachedTextureCount > (store.pageCapacity * 3 + 8) {
+                        scheduleResourcePrewarmingIfNeeded(around: page, prune: true)
+                    }
+                } else if !store.isSearching, destPage != resourcePrewarmSignature?.page {
+                    scheduleResourcePrewarmingIfNeeded(around: destPage, prune: false)
                 }
-            } else if !store.isSearching, destPage != resourcePrewarmSignature?.page {
-                scheduleResourcePrewarmingIfNeeded(around: destPage, prune: false)
             }
         } else {
             // Quality / performance: keep full-catalog residency for smooth paging.
@@ -2184,7 +2798,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let scale = windowScale
         let labelItems: [LaunchpadItem]
         if quality.usesLazyTextureLoading {
-            if store.isSearching {
+            if let transition = folderTransition {
+                labelItems = transition.rootItems + transition.folderItems
+            } else if store.isSearching {
                 let searchCap = max(store.pageCapacity * 6, 48)
                 labelItems = Array(displayedItems.prefix(searchCap))
             } else {
@@ -2209,12 +2825,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let dt = min(max(now - lastFrameTime, 1.0 / 240.0), 1.0 / 30.0)
         lastFrameTime = now
         tickContentTransition(now: now)
+        tickFolderTransition(now: now)
         tickDragVisualAnimations(now: now, dt: dt)
         synchronizeReorderVisualSlots(with: displayedItems)
         tickReorderAnimation(dt: dt)
         tickCanvasMotion(now: now, dt: CGFloat(dt))
 
         if contentTransitionPhase != .fadingOut,
+           !isFolderTransitionActive,
            !GridLayoutPreset.current.isInfiniteCanvas {
             let pageTarget = store.isPageGestureActive ? store.pageOffset : store.targetPage
             if store.isPageGestureActive {
@@ -2266,7 +2884,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             // A folder/search swap ends fade-out at alpha 0 in the same
             // draw. Clearing here blanks the layer until the next atlas
             // rebuild finishes — quality text bake made that a long hitch.
-            if contentTransitionPhase == .idle {
+            if contentTransitionPhase == .idle, !isFolderTransitionActive {
                 clearDrawableIfAvailable()
                 stopDisplayLinkIfIdle()
             } else {
@@ -2297,7 +2915,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let metrics = GridMetrics(size: bounds.size)
         let midX = bounds.midX
         let midY = bounds.height * 0.5
-        let pageOffset = contentTransitionPhase == .fadingOut
+        let pageOffset = contentTransitionPhase == .fadingOut || isFolderTransitionActive
             ? frozenPageOffset
             : currentPageOffset
 
@@ -2322,18 +2940,31 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             labelsBySheet[sheet].removeAll(keepingCapacity: true)
         }
 
-        buildGrid(
-            items: displayedItems,
-            pageOffset: pageOffset,
-            alphaScale: gridAlpha,
-            now: now,
-            metrics: metrics,
-            midX: midX,
-            midY: midY,
-            iconDrawTextures: &iconDrawTextures,
-            iconSprites: &iconSprites,
-            labelsBySheet: &labelsBySheet
-        )
+        if isFolderTransitionActive {
+            buildFolderTransition(
+                alphaScale: gridAlpha,
+                now: now,
+                metrics: metrics,
+                midX: midX,
+                midY: midY,
+                iconDrawTextures: &iconDrawTextures,
+                iconSprites: &iconSprites,
+                labelsBySheet: &labelsBySheet
+            )
+        } else {
+            buildGrid(
+                items: displayedItems,
+                pageOffset: pageOffset,
+                alphaScale: gridAlpha,
+                now: now,
+                metrics: metrics,
+                midX: midX,
+                midY: midY,
+                iconDrawTextures: &iconDrawTextures,
+                iconSprites: &iconSprites,
+                labelsBySheet: &labelsBySheet
+            )
+        }
         prepareFrameResources(frameSlot)
 
         var uniforms = FrameUniforms(
@@ -2640,6 +3271,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         now: CFTimeInterval
     ) -> Float {
         guard IconRenderQuality.current.usesLazyTextureLoading else { return 1 }
+        if isFolderTransitionActive {
+            return hasTexture ? 1 : 0
+        }
         if suppressLazyIconReveal || store.isApplyingRenderQuality {
             iconRevealStartedAt.removeValue(forKey: id)
             return hasTexture ? 1 : 0
@@ -2696,7 +3330,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         midY: CGFloat,
         iconDrawTextures: inout [MTLTexture],
         iconSprites: inout [SpriteInstance],
-        labelsBySheet: inout [[SpriteInstance]]
+        labelsBySheet: inout [[SpriteInstance]],
+        style: GridDrawStyle = GridDrawStyle()
     ) {
         guard !items.isEmpty, alphaScale > 0.001 else { return }
         let infiniteCanvas = GridLayoutPreset.current.isInfiniteCanvas
@@ -2711,6 +3346,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // is the shared view opacity. Do not let page-edge fading, icon entrance,
         // zoom, or content scaling modulate individual sprites at the same time.
         let viewTransitionActive = contentTransitionPhase != .idle
+            || style.suppressPerIconMotion
         let center = Int(pageOffset.rounded())
         // Avoid lazy-loading adjacent pages while the entrance animation is live.
         // The background prewarmer resumes as soon as presentation completes.
@@ -2744,17 +3380,29 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 let local = index - start
                 let item = items[index]
                 let itemID = item.id
+                if style.hiddenIDs.contains(itemID) { continue }
                 let app: AppInfo? = if case .app(let value) = item { value } else { nil }
                 let folder: AppFolder? = if case .folder(let value) = item { value } else { nil }
                 let isOpeningAppTarget = !isShowingPresentation
                     && stationaryDismissedAppID == app?.id
                 let visualIndex = reorderVisualSlots[itemID] ?? Double(index)
-                let canvasTransform = canvasMetrics.map {
-                    canvasVisualTransform(globalIndex: visualIndex, now: now, metrics: $0)
+                let canvasItemScale: CGFloat
+                var c: CGPoint
+                if let rest = style.restCanvas {
+                    c = rest.metrics.screenCenter(
+                        globalIndex: visualIndex,
+                        scale: rest.scale,
+                        pan: rest.pan
+                    )
+                    canvasItemScale = rest.scale
+                } else {
+                    let canvasTransform = canvasMetrics.map {
+                        canvasVisualTransform(globalIndex: visualIndex, now: now, metrics: $0)
+                    }
+                    c = canvasTransform?.center
+                        ?? metrics.iconCenter(globalIndex: visualIndex, pageOffset: pageOffset)
+                    canvasItemScale = canvasTransform?.scale ?? 1
                 }
-                var c = canvasTransform?.center
-                    ?? metrics.iconCenter(globalIndex: visualIndex, pageOffset: pageOffset)
-                let canvasItemScale = canvasTransform?.scale ?? 1
                 if didDrag,
                    contentTransitionPhase == .idle,
                    draggedAppID == itemID {
@@ -2839,6 +3487,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                     c.x = release.from.x + (finalCenter.x - release.from.x) * progress
                     c.y = release.from.y + (finalCenter.y - release.from.y) * progress
                 }
+                if style.recedeTowardCenter < 0.999 {
+                    c.x = midX + (c.x - midX) * style.recedeTowardCenter
+                    c.y = midY + (c.y - midY) * style.recedeTowardCenter
+                }
                 let pageFade: Float = infiniteCanvas || viewTransitionActive
                     ? 1
                     : Float(max(
@@ -2846,6 +3498,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                         min(1, 1.15 - abs(finalCenter.x - midX) / max(bounds.width, 1))
                     ))
                 let alpha = pageFade * alphaScale * entrance.opacity * zoom.opacity
+                    * style.extraAlpha
 
                 // Resolve the transparent presentation frame too, but never
                 // rasterize or upload a cache miss from the draw path. The
@@ -2866,10 +3519,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 // restore full brightness and produce a visible flash.
                 let pressed = !isDragged
                     && contentTransitionPhase == .idle
+                    && !style.suppressPerIconMotion
                     && (dragSource == index || isOpeningAppTarget)
                 let itemScale = canvasItemScale
                     * (viewTransitionActive ? 1 : contentScale)
                     * entrance.scale * zoom.iconScale
+                    * style.extraIconScale
                 let hoverProgress = smoothstep(dragHoverProgress)
                 let isHoverVisualTarget = dragHoverVisualTargetID == itemID
                     && draggedAppID != itemID
@@ -2896,6 +3551,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                         )
                     }
                     if contentTransitionPhase == .idle,
+                       !style.suppressPerIconMotion,
                        store.isKeyboardNavigationActive,
                        store.keyboardFocusID == itemID {
                         // Insert at the front so the focus plate is encoded before
@@ -2924,6 +3580,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 }
 
                 if showLabels,
+                   !style.hideLabels,
                    let label = textAtlas.layouts[itemID],
                    labelsBySheet.indices.contains(label.sheet) {
                     // Larger canvas presets only increase icon size. Keep labels
@@ -2993,9 +3650,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         // Freeze the outgoing geometry while it fades away. Incoming search
         // results and folder contents adopt their fitted layout on fade-in.
-        let usesAdaptiveLayout = contentTransitionPhase == .fadingOut
-            ? canvasStateUsesAdaptiveLayout
-            : store.isSearching || store.openedFolderID != nil
+        // Folder morph also keeps the outgoing canvas until it completes.
+        let usesAdaptiveLayout: Bool
+        if let transition = folderTransition {
+            usesAdaptiveLayout = transition.direction == .closing
+                ? true
+                : transition.rootCanvasAdaptive
+        } else if contentTransitionPhase == .fadingOut {
+            usesAdaptiveLayout = canvasStateUsesAdaptiveLayout
+        } else {
+            usesAdaptiveLayout = store.isSearching || store.openedFolderID != nil
+        }
         let signature = AppListSignature(items: displayedItems)
         let presetChanged = canvasStatePreset != preset
         let adaptiveChanged = canvasStateUsesAdaptiveLayout != usesAdaptiveLayout
@@ -3156,6 +3821,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var canvasEdgePanTargetVelocity: CGPoint {
         guard GridLayoutPreset.current.isInfiniteCanvas,
               contentTransitionPhase == .idle,
+              !isFolderTransitionActive,
               !isPanningPage,
               let pointer = canvasEdgePointer else {
             return .zero
@@ -3523,7 +4189,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     private var interactionPageOffset: Double {
-        contentTransitionPhase == .fadingOut ? frozenPageOffset : currentPageOffset
+        contentTransitionPhase == .fadingOut || isFolderTransitionActive
+            ? frozenPageOffset
+            : currentPageOffset
     }
 
     private var isDragCancelledByLayout: Bool {
@@ -3581,6 +4249,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return
         }
 
+        if isFolderTransitionActive {
+            return
+        }
         if contentTransitionPhase != .idle {
             beginEmptyAreaPagePan(from: dragStart)
             return
@@ -3630,7 +4301,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        guard contentTransitionPhase == .idle else { return nil }
+        guard contentTransitionPhase == .idle, !isFolderTransitionActive else { return nil }
         let point = convert(event.locationInWindow, from: nil)
         if LaunchpadFieldHitArea.rect(in: bounds).contains(point) {
             return nil
@@ -4043,7 +4714,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
            draggedAppID != nil,
            !isPanningPage,
            store.openedFolderID == nil,
-           contentTransitionPhase == .idle {
+           contentTransitionPhase == .idle,
+           !isFolderTransitionActive {
             let releasePoint = convert(event.locationInWindow, from: nil)
             dragPoint = CGPoint(x: releasePoint.x, y: bounds.height - releasePoint.y)
             updateReorderDestination(at: releasePoint)
@@ -4173,7 +4845,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         guard let source = dragSource, displayedItems.indices.contains(source) else { return }
-        if !didDrag, contentTransitionPhase == .idle {
+        if !didDrag, contentTransitionPhase == .idle, !isFolderTransitionActive {
             let item = displayedItems[source]
             if case .folder(let folder) = item {
                 store.enterFolder(folder.id)

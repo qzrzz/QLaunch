@@ -282,18 +282,14 @@ final class LaunchpadContainerView: NSView {
             }
             .store(in: &cancellables)
 
-        // NSHostingView can keep a first-responder NSTextView on screen after
-        // SwiftUI removes SearchField. Resign, then remount the overlay tree.
+        // Resign any field editor so SwiftUI can fade search ↔ folder title.
+        // Remounting the hosting view would cancel that transition.
         store.$openedFolderID
             .removeDuplicates()
             .dropFirst()
             .receive(on: RunLoop.main)
-            .sink { [weak self] folderID in
-                guard let self else { return }
-                if folderID != nil {
-                    self.window?.makeFirstResponder(self)
-                }
-                self.overlayView.rootView = LaunchpadOverlayView(store: self.store)
+            .sink { [weak self] _ in
+                self?.window?.makeFirstResponder(self)
             }
             .store(in: &cancellables)
 
@@ -456,16 +452,17 @@ struct LaunchpadOverlayView: View {
         GeometryReader { _ in
             ZStack {
                 VStack(spacing: 0) {
-                    Group {
+                    ZStack {
                         if let folderID = store.openedFolderID,
                            let folder = store.folder(withID: folderID) {
                             FolderTitleField(store: store, folder: folder)
+                                .transition(.opacity)
                         } else {
                             SearchField(store: store)
+                                .transition(.opacity)
                         }
                     }
-                    .id(store.openedFolderID ?? "search")
-                    .animation(nil, value: store.openedFolderID)
+                    .animation(.easeOut(duration: 0.40), value: store.openedFolderID)
                     .background {
                         Color.clear
                             .frame(

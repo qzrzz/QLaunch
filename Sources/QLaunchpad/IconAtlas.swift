@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import ImageIO
 import Metal
+import QLaunchpadCore
 
 /// One linear Display P3 texture per app.
 ///
@@ -736,25 +737,24 @@ final class FolderIconTextureStore: @unchecked Sendable {
         context.interpolationQuality = .high
         context.draw(padImage, in: CGRect(x: 0, y: 0, width: px, height: px))
 
-        // Keep the 3 × 3 preview proportional to its parent icon. The old
-        // point-based constants made previews too large at 64pt and too small
-        // at 256pt even though the outer folder icon scaled correctly.
-        let miniSize = CGFloat(px) * (22.0 / 128.0)
-        let gap = CGFloat(px) * (4.0 / 128.0)
-        let contentSize = miniSize * 3 + gap * 2
-        let left = (CGFloat(px) - contentSize) * 0.5
-        let bottom = (CGFloat(px) - contentSize) * 0.5
+        let folderSize = CGFloat(px)
+        let miniSize = FolderPreviewLayout.miniSize(in: folderSize)
+        let folderCenter = CGPoint(x: folderSize * 0.5, y: folderSize * 0.5)
 
         NSGraphicsContext.saveGraphicsState()
         let graphics = NSGraphicsContext(cgContext: context, flipped: false)
         NSGraphicsContext.current = graphics
         graphics.imageInterpolation = .high
         for (index, app) in members.enumerated() {
-            let column = index % 3
-            let rowFromBottom = 2 - index / 3
+            let center = FolderPreviewLayout.miniCenter(
+                index: index,
+                folderCenter: folderCenter,
+                folderSize: folderSize,
+                yIncreasesDown: false
+            )
             let rect = NSRect(
-                x: left + CGFloat(column) * (miniSize + gap),
-                y: bottom + CGFloat(rowFromBottom) * (miniSize + gap),
+                x: center.x - miniSize * 0.5,
+                y: center.y - miniSize * 0.5,
                 width: miniSize,
                 height: miniSize
             )
