@@ -20,6 +20,7 @@ const i18n: II18nConfig = {
       name: "English",
       page: {
         tagline: "The smoothest macOS application launchpad — simple, seamless, visually stunning, free and open source.",
+        taglineShort: "Smoothest launchpad",
         metaDesc:
           "The smoothest macOS application launchpad. Simple, seamless, visually stunning, free and open source, powered by Metal GPU rendering.",
       },
@@ -69,7 +70,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Download",
+        useNow: "Use Now",
         viewOnGithub: "GitHub",
+        selectPlatform: "Choose platform",
+        thisDevice: "This device",
         langSwitchAria: "Select language",
         otherProducts: "Other Products",
         moreProducts: "More Products",
@@ -86,6 +90,7 @@ const i18n: II18nConfig = {
       name: "日本語",
       page: {
         tagline: "最もスムーズな macOS アプリ Launchpad。シンプルでシームレス、美しく、オープンソースで完全無料。",
+        taglineShort: "最もスムーズな macOS アプリ Launchpad",
         metaDesc:
           "最もスムーズな macOS アプリ Launchpad。シンプル、無感、美しいグラフィック、オープンソース＆無料。Metal GPU レンダリング採用。",
       },
@@ -135,7 +140,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "ダウンロード",
+        useNow: "今すぐ使う",
         viewOnGithub: "GitHub",
+        selectPlatform: "プラットフォームを選択",
+        thisDevice: "このデバイス",
         langSwitchAria: "言語を選択",
         otherProducts: "その他の製品",
         moreProducts: "その他の製品",
@@ -152,6 +160,7 @@ const i18n: II18nConfig = {
       name: "한국어",
       page: {
         tagline: "가장 부드러운 macOS 앱 런치패드. 심플함, 자연스러움, 아름다운 디자인, 오픈소스 및 완전 무료.",
+        taglineShort: "가장 부드러운 macOS 앱 런치패드",
         metaDesc:
           "가장 부드러운 macOS 앱 런치패드. 심플하고 직관적이며 뛰어난 비주얼, 오픈소스 및 무료. Metal GPU 렌더링 지원.",
       },
@@ -201,7 +210,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "다운로드",
+        useNow: "지금 사용",
         viewOnGithub: "GitHub",
+        selectPlatform: "플랫폼 선택",
+        thisDevice: "이 기기",
         langSwitchAria: "언어 선택",
         otherProducts: "기타 제품",
         moreProducts: "더 많은 제품",
@@ -218,6 +230,7 @@ const i18n: II18nConfig = {
       name: "Tiếng Việt",
       page: {
         tagline: "Trình khởi chạy ứng dụng macOS mượt mà nhất — đơn giản, tự nhiên, mãn nhãn, mã nguồn mở và miễn phí.",
+        taglineShort: "Trình khởi chạy ứng dụng macOS mượt mà nhất",
         metaDesc:
           "Trình khởi chạy ứng dụng macOS mượt mà nhất. Đơn giản, liền mạch, đồ họa đẹp mắt, mã nguồn mở & miễn phí, hỗ trợ Metal GPU.",
       },
@@ -267,7 +280,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Tải về",
+        useNow: "Dùng ngay",
         viewOnGithub: "GitHub",
+        selectPlatform: "Chọn nền tảng",
+        thisDevice: "Thiết bị này",
         langSwitchAria: "Chọn ngôn ngữ",
         otherProducts: "Sản phẩm khác",
         moreProducts: "Thêm sản phẩm",
@@ -284,6 +300,7 @@ const i18n: II18nConfig = {
       name: "Português",
       page: {
         tagline: "O Launchpad de aplicativos para macOS mais fluido — simples, imperceptível, deslumbrante, gratuito e de código aberto.",
+        taglineShort: "O Launchpad de aplicativos para macOS mais fluido",
         metaDesc:
           "O Launchpad de aplicativos para macOS mais fluido. Simples, fluido, visual deslumbrante, código aberto e gratuito, com renderização Metal.",
       },
@@ -333,7 +350,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Baixar",
+        useNow: "Usar agora",
         viewOnGithub: "GitHub",
+        selectPlatform: "Escolher plataforma",
+        thisDevice: "Este dispositivo",
         langSwitchAria: "Selecionar idioma",
         otherProducts: "Outros produtos",
         moreProducts: "Mais produtos",
@@ -350,6 +370,7 @@ const i18n: II18nConfig = {
       name: "Español",
       page: {
         tagline: "El Launchpad de aplicaciones para macOS más fluido: simple, transparente, visualmente deslumbrante, gratuito y de código abierto.",
+        taglineShort: "El Launchpad de aplicaciones para macOS más fluido",
         metaDesc:
           "El Launchpad de aplicaciones para macOS más fluido. Simple, fluido, interfaz deslumbrante, código abierto y gratuito, renderizado por GPU Metal.",
       },
@@ -399,7 +420,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Descargar",
+        useNow: "Usar ahora",
         viewOnGithub: "GitHub",
+        selectPlatform: "Elegir plataforma",
+        thisDevice: "Este dispositivo",
         langSwitchAria: "Seleccionar idioma",
         otherProducts: "Otros productos",
         moreProducts: "Más productos",
@@ -416,6 +440,7 @@ const i18n: II18nConfig = {
       name: "Deutsch",
       page: {
         tagline: "Der flüssigste macOS App-Launchpad — einfach, nahtlos, visuell beeindruckend, kostenlos und Open Source.",
+        taglineShort: "Der flüssigste macOS-App-Launchpad",
         metaDesc:
           "Der flüssigste macOS App-Launchpad. Einfach, nahtlos, wunderschön, kostenlos & Open Source mit Metal GPU-Rendering.",
       },
@@ -465,7 +490,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Herunterladen",
+        useNow: "Jetzt verwenden",
         viewOnGithub: "GitHub",
+        selectPlatform: "Plattform auswählen",
+        thisDevice: "Dieses Gerät",
         langSwitchAria: "Sprache auswählen",
         otherProducts: "Weitere Produkte",
         moreProducts: "Mehr Produkte",
@@ -482,6 +510,7 @@ const i18n: II18nConfig = {
       name: "Français",
       page: {
         tagline: "Le Launchpad d'applications macOS le plus fluide — simple, transparent, visuellement sublime, gratuit et open source.",
+        taglineShort: "Le Launchpad d'applications macOS le plus fluide",
         metaDesc:
           "Le Launchpad d'applications macOS le plus fluide. Simple, fluide, visuellement remarquable, gratuit et open source, propulsé par le rendu GPU Metal.",
       },
@@ -531,7 +560,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Télécharger",
+        useNow: "Utiliser maintenant",
         viewOnGithub: "GitHub",
+        selectPlatform: "Choisir une plateforme",
+        thisDevice: "Cet appareil",
         langSwitchAria: "Choisir la langue",
         otherProducts: "Autres produits",
         moreProducts: "Plus de produits",
@@ -548,6 +580,7 @@ const i18n: II18nConfig = {
       name: "Русский",
       page: {
         tagline: "Самый плавный Launchpad приложений для macOS — простой, незаметный, красивый, бесплатный и с открытым исходным кодом.",
+        taglineShort: "Самый плавный Launchpad приложений для macOS",
         metaDesc:
           "Самый плавный Launchpad для macOS. Простой, легкий, с великолепной графикой, открытый исходный код и бесплатный, с рендерингом на Metal GPU.",
       },
@@ -597,7 +630,10 @@ const i18n: II18nConfig = {
       ],
       ui: {
         download: "Скачать",
+        useNow: "Использовать сейчас",
         viewOnGithub: "GitHub",
+        selectPlatform: "Выбрать платформу",
+        thisDevice: "Это устройство",
         langSwitchAria: "Выбрать язык",
         otherProducts: "Другие продукты",
         moreProducts: "Больше продуктов",
