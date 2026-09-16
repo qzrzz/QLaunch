@@ -5,6 +5,14 @@ import CoreImage.CIFilterBuiltins
 import Darwin
 import ImageIO
 
+private enum BackgroundVisualTokens {
+    static let saturation: CGFloat = 1.16
+    static let maximumLongEdge: CGFloat = 2_000
+    static let tintAlpha: CGFloat = 0.18
+    static let vignetteBottomAlpha: CGFloat = 0.28
+    static let vignetteTopAlpha: CGFloat = 0.18
+}
+
 /// Best-effort bridge to WindowServer's private wallpaper capture SPI.
 private enum PrivateWindowServerCapture {
     private typealias MainConnectionID = @convention(c) () -> UInt32
@@ -249,21 +257,42 @@ private actor PrivateWallpaperRenderer {
             return nil
         }
 
-        let input = CIImage(cgImage: capturedImage)
+        return render(
+            image: capturedImage,
+            blurRadius: blurRadius,
+            saturation: saturation
+        )
+    }
+
+    private func render(
+        image: CGImage,
+        blurRadius: CGFloat,
+        saturation: CGFloat
+    ) -> CGImage? {
+        let input = CIImage(cgImage: image)
         let inputExtent = input.extent
         guard inputExtent.width > 0, inputExtent.height > 0 else { return nil }
 
-        let maximumLongEdge: CGFloat = 2_000
-        let scale = min(1, maximumLongEdge / max(inputExtent.width, inputExtent.height))
+        let scale = min(
+            1,
+            BackgroundVisualTokens.maximumLongEdge
+                / max(inputExtent.width, inputExtent.height)
+        )
         let scaled = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         let scaledExtent = scaled.extent
 
-        let blur = CIFilter.gaussianBlur()
-        blur.inputImage = scaled.clampedToExtent()
-        blur.radius = Float(max(1, blurRadius * max(scale, 0.5)))
+        let blurredImage: CIImage
+        if blurRadius > 0 {
+            let blur = CIFilter.gaussianBlur()
+            blur.inputImage = scaled.clampedToExtent()
+            blur.radius = Float(max(0.1, blurRadius * max(scale, 0.5)))
+            blurredImage = blur.outputImage ?? scaled
+        } else {
+            blurredImage = scaled
+        }
 
         let controls = CIFilter.colorControls()
-        controls.inputImage = blur.outputImage
+        controls.inputImage = blurredImage
         controls.saturation = Float(saturation)
         controls.contrast = 1.02
         controls.brightness = 0
@@ -279,6 +308,44 @@ private actor PrivateWallpaperRenderer {
             height: max(1, scaledExtent.height)
         )
         return context.createCGImage(output, from: outputRect)
+    }
+
+    func render(
+        mode: LaunchpadBackgroundMode,
+        customURL: URL?,
+        blurRadius: CGFloat,
+        displayID: CGDirectDisplayID,
+        backingScale: CGFloat
+    ) async -> CGImage? {
+        switch mode {
+        case .wallpaper:
+            return await render(
+                displayID: displayID,
+                backingScale: backingScale,
+                blurRadius: blurRadius,
+                saturation: BackgroundVisualTokens.saturation
+            )
+        case .screen:
+            return nil
+        case .custom:
+            guard let customURL,
+                  let image = WallpaperFileSource.loadCGImage(
+                      from: customURL,
+                      prefersDark: false
+                  ) else {
+                return await render(
+                    displayID: displayID,
+                    backingScale: backingScale,
+                    blurRadius: blurRadius,
+                    saturation: BackgroundVisualTokens.saturation
+                )
+            }
+            return render(
+                image: image,
+                blurRadius: blurRadius,
+                saturation: BackgroundVisualTokens.saturation
+            )
+        }
     }
 
     private func captureWallpaperPixels(displayID: CGDirectDisplayID) async -> CGImage? {
@@ -359,6 +426,7 @@ final class DesktopBackgroundView: NSView {
         visualEffectView.material = .fullScreenUI
         visualEffectView.blendingMode = .behindWindow
         visualEffectView.state = .active
+        visualEffectView.alphaValue = 1
         visualEffectView.wantsLayer = true
         visualEffectView.autoresizingMask = [.width, .height]
         addSubview(visualEffectView)
@@ -372,7 +440,7 @@ final class DesktopBackgroundView: NSView {
         tintView.wantsLayer = true
         tintView.layer?.backgroundColor = NSColor(
             calibratedWhite: 0,
-            alpha: 0.18
+            alpha: BackgroundVisualTokens.tintAlpha
         ).cgColor
         tintView.autoresizingMask = [.width, .height]
         addSubview(tintView)
@@ -401,6 +469,7 @@ final class DesktopBackgroundView: NSView {
         wallpaperImageView.frame = bounds
         tintView.frame = bounds
         vignetteView.frame = bounds
+        applyLiveBlurRadius()
     }
 
     func prepare(for screen: NSScreen) {
@@ -409,6 +478,11 @@ final class DesktopBackgroundView: NSView {
 
     /// Recapture after the panel is gone so the next open is fresh, not black.
     func refreshAfterHide() {
+        guard let screen = window?.screen ?? NSScreen.main else { return }
+        startCapture(on: screen, replaceExisting: true)
+    }
+
+    func reloadForPreferenceChange() {
         guard let screen = window?.screen ?? NSScreen.main else { return }
         startCapture(on: screen, replaceExisting: true)
     }
@@ -434,13 +508,28 @@ final class DesktopBackgroundView: NSView {
         ] as? CGDirectDisplayID
         let displayID = screenIdentifier ?? CGMainDisplayID()
         let screenChanged = preparedScreenIdentifier != screenIdentifier
+        let mode = LaunchpadBackgroundPreferences.mode
+
+        if mode == .screen {
+            captureGeneration += 1
+            captureTask?.cancel()
+            captureTask = nil
+            preparedScreenIdentifier = screenIdentifier
+            wallpaperImageView.image = nil
+            wallpaperImageView.isHidden = true
+            visualEffectView.isHidden = false
+            visualEffectView.state = .active
+            visualEffectView.alphaValue = 1
+            applyLiveBlurRadius()
+            return
+        }
 
         if screenChanged {
             preparedScreenIdentifier = screenIdentifier
             wallpaperImageView.image = nil
             wallpaperImageView.isHidden = true
             visualEffectView.isHidden = false
-        } else if !replaceExisting,
+        } else if !replaceExisting, mode != .screen,
                   wallpaperImageView.image != nil || captureTask != nil {
             // Reuse either the cached image or an in-flight capture for this display.
             return
@@ -450,22 +539,32 @@ final class DesktopBackgroundView: NSView {
         let generation = captureGeneration
         captureTask?.cancel()
 
+        let customURL = mode == .custom
+            ? LaunchpadBackgroundPreferences.customImageURL
+            : nil
+        let blurRadius = LaunchpadBackgroundPreferences.blurAmount
         let backingScale = screen.backingScaleFactor
         let keepPrevious = wallpaperImageView.image != nil
         captureTask = Task { [weak self] in
             let image = await self?.renderer.render(
+                mode: mode,
+                customURL: customURL,
+                blurRadius: blurRadius,
                 displayID: displayID,
-                backingScale: backingScale,
-                blurRadius: 44,
-                saturation: 1.22
+                backingScale: backingScale
             )
 
             guard !Task.isCancelled, let self else { return }
             guard generation == self.captureGeneration else { return }
 
             var accepted: CGImage?
-            if let image, !(await self.renderer.isFailedBlackFrame(image)) {
-                accepted = image
+            if let image {
+                let isValid = mode == .custom
+                    ? true
+                    : !(await self.renderer.isFailedBlackFrame(image))
+                if isValid {
+                    accepted = image
+                }
             }
             guard !Task.isCancelled else { return }
             guard generation == self.captureGeneration else { return }
@@ -485,26 +584,62 @@ final class DesktopBackgroundView: NSView {
             self.wallpaperImageView.image = nil
             self.wallpaperImageView.isHidden = true
             self.visualEffectView.isHidden = false
+            self.applyLiveBlurRadius()
         }
     }
 
     func prepareForPresentation() {
-        wallpaperImageView.alphaValue = 0.72
+        layer?.removeAllAnimations()
+        wallpaperImageView.layer?.removeAnimation(forKey: "wallpaperOpacity")
+        visualEffectView.layer?.removeAnimation(forKey: "liveBlurOpacity")
+        alphaValue = 0
+        wallpaperImageView.alphaValue = 1
+        visualEffectView.alphaValue = 1
     }
 
-    func animateWallpaperIn(duration: CFTimeInterval = 0.5) {
-        let animation = CABasicAnimation(keyPath: "opacity")
-        animation.fromValue = wallpaperImageView.layer?.presentation()?.opacity ?? wallpaperImageView.layer?.opacity ?? 1
-        animation.toValue = 1
-        animation.duration = duration
-        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        wallpaperImageView.layer?.add(animation, forKey: "wallpaperOpacity")
-        wallpaperImageView.alphaValue = 1
+    func animateWallpaperIn(duration: CFTimeInterval = 0.64) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            animator().alphaValue = 1
+        }
     }
 
     func showWallpaperImmediately() {
+        layer?.removeAllAnimations()
         wallpaperImageView.layer?.removeAnimation(forKey: "wallpaperOpacity")
+        visualEffectView.layer?.removeAnimation(forKey: "liveBlurOpacity")
+        alphaValue = 1
         wallpaperImageView.alphaValue = 1
+        visualEffectView.alphaValue = 1
+        applyLiveBlurRadius()
+    }
+
+    private func applyLiveBlurRadius() {
+        guard let layer = gaussianBlurLayer(in: visualEffectView.layer) else { return }
+        layer.setValue(
+            NSNumber(value: Double(LaunchpadBackgroundPreferences.blurAmount)),
+            forKeyPath: "filters.gaussianBlur.inputRadius"
+        )
+    }
+
+    private func gaussianBlurLayer(
+        in layer: CALayer?
+    ) -> CALayer? {
+        guard let layer else { return nil }
+        for candidate in layer.filters ?? [] {
+            guard let filter = candidate as? NSObject,
+                  filter.value(forKey: "name") as? String == "gaussianBlur" else {
+                continue
+            }
+            return layer
+        }
+        for sublayer in layer.sublayers ?? [] {
+            if let blurLayer = gaussianBlurLayer(in: sublayer) {
+                return blurLayer
+            }
+        }
+        return nil
     }
 }
 
@@ -517,9 +652,9 @@ private final class GradientVignetteView: NSView {
         gradient.startPoint = CGPoint(x: 0.5, y: 1)
         gradient.endPoint = CGPoint(x: 0.5, y: 0)
         gradient.colors = [
-            NSColor.black.withAlphaComponent(0.28).cgColor,
+            NSColor.black.withAlphaComponent(BackgroundVisualTokens.vignetteBottomAlpha).cgColor,
             NSColor.clear.cgColor,
-            NSColor.black.withAlphaComponent(0.18).cgColor
+            NSColor.black.withAlphaComponent(BackgroundVisualTokens.vignetteTopAlpha).cgColor
         ]
         gradient.locations = [0, 0.52, 1]
         layer?.addSublayer(gradient)

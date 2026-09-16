@@ -20,6 +20,20 @@
 "settings.layout" = "Layout";
 "settings.renderQuality" = "Rendering Quality";
 "settings.renderQuality.applying" = "Applying rendering quality…";
+"settings.section.background" = "Background";
+"settings.background.mode" = "Background Source";
+"background.mode.wallpaper.title" = "Current Desktop Wallpaper";
+"background.mode.wallpaper.detail" = "Use the desktop wallpaper with the existing soft blur effect";
+"background.mode.screen.title" = "Current Screen";
+"background.mode.screen.detail" = "Show the current display with live system blur; no screen recording permission needed";
+"background.mode.custom.title" = "Custom Image";
+"background.mode.custom.detail" = "Use your image with a soft Gaussian blur as the Launchpad background";
+"settings.background.blur" = "Blur Amount";
+"settings.background.blur.detail" = "Adjust the background blur; Current Screen uses live system blur";
+"settings.background.custom.choose" = "Choose an image";
+"settings.background.custom.instructions" = "Choose a local image file";
+"settings.background.custom.missing" = "No image selected yet";
+"settings.background.custom.unavailable" = "This image is no longer available. Choose another one.";
 "settings.section.animation" = "Animation";
 "settings.animation" = "Transition Animation";
 "settings.animation.detail" = "The icon animation used when showing or hiding the page.";
@@ -75,6 +89,7 @@
 "common.new" = "New";
 "common.save" = "Save";
 "common.open" = "Open";
+"common.choose" = "Choose…";
 "common.rename" = "Rename";
 "common.hide" = "Hide";
 "common.export" = "Export…";
@@ -131,6 +146,7 @@
 "renderQuality.performance.detail" = "Standard quality comparable to the system display";
 "renderQuality.lowMemory.detail" = "Standard quality with lower memory use; icons may load more slowly while paging";
 "animation.fly" = "Fly In (iOS Home Screen)";
+"animation.classic" = "Classic";
 "animation.zoom" = "Zoom";
 "animation.fade" = "Fade";
 "animation.none" = "None";

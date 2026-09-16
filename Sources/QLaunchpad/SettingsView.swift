@@ -94,6 +94,12 @@ private struct GeneralSettingsView: View {
     private var gridLayoutPreset = GridLayoutPreset.defaultPreset.rawValue
     @AppStorage(IconRenderQuality.defaultsKey)
     private var iconRenderQuality = IconRenderQuality.defaultQuality.rawValue
+    @AppStorage(LaunchpadBackgroundPreferences.modeKey)
+    private var backgroundMode = LaunchpadBackgroundMode.defaultMode.rawValue
+    @AppStorage(LaunchpadBackgroundPreferences.customImagePathKey)
+    private var customBackgroundPath = ""
+    @AppStorage(LaunchpadBackgroundPreferences.blurAmountKey)
+    private var backgroundBlurAmount = LaunchpadBackgroundPreferences.defaultBlurAmount
     @AppStorage(LaunchpadAnimationStyle.defaultsKey)
     private var presentationAnimationStyle = LaunchpadAnimationStyle.fly.rawValue
     @State private var launchAtLogin = LaunchAtLogin.isEnabled || LaunchAtLogin.needsApproval
@@ -201,6 +207,74 @@ private struct GeneralSettingsView: View {
                 }
             }
 
+            Section(L10n.tr("settings.section.background")) {
+                Picker(L10n.tr("settings.background.mode"), selection: $backgroundMode) {
+                    ForEach(LaunchpadBackgroundMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: backgroundMode) { _, _ in
+                    notifyBackgroundChanged()
+                }
+
+                if let mode = LaunchpadBackgroundMode(rawValue: backgroundMode) {
+                    Text(mode.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(L10n.tr("settings.background.blur"))
+                        Spacer()
+                        Text("\(Int(backgroundBlurAmount.rounded()))")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Slider(
+                        value: $backgroundBlurAmount,
+                        in: LaunchpadBackgroundPreferences.minimumBlurAmount...LaunchpadBackgroundPreferences.maximumBlurAmount,
+                        step: 1
+                    )
+                    .onChange(of: backgroundBlurAmount) { _, _ in
+                        notifyBackgroundChanged()
+                    }
+                    Text(L10n.tr("settings.background.blur.detail"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if LaunchpadBackgroundMode(rawValue: backgroundMode) == .custom {
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(customBackgroundName)
+                            Text(L10n.tr("settings.background.custom.instructions"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Button(L10n.tr("common.choose")) {
+                            chooseCustomBackground()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    if customBackgroundPath.isEmpty {
+                        Text(L10n.tr("settings.background.custom.missing"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if !FileManager.default.fileExists(atPath: customBackgroundPath) {
+                        Text(L10n.tr("settings.background.custom.unavailable"))
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+
             Section(L10n.tr("settings.section.animation")) {
                 Picker(L10n.tr("settings.animation"), selection: $presentationAnimationStyle) {
                     ForEach(LaunchpadAnimationStyle.allCases) { style in
@@ -291,6 +365,50 @@ private struct GeneralSettingsView: View {
 
     private func notifyAppearanceChanged() {
         NotificationCenter.default.post(name: .qlaunchpadAppearanceChanged, object: nil)
+    }
+
+    private func notifyBackgroundChanged() {
+        NotificationCenter.default.post(name: .qlaunchpadBackgroundChanged, object: nil)
+    }
+
+    private var customBackgroundName: String {
+        guard !customBackgroundPath.isEmpty else {
+            return L10n.tr("settings.background.custom.choose")
+        }
+        return URL(fileURLWithPath: customBackgroundPath).lastPathComponent
+    }
+
+    private func chooseCustomBackground() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        let completionHandler: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK, let url = panel.url else { return }
+            Self.applyCustomBackground(at: url)
+        }
+
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: completionHandler)
+        } else if panel.runModal() == .OK, let url = panel.url {
+            Self.applyCustomBackground(at: url)
+        }
+    }
+
+    private static func applyCustomBackground(at url: URL) {
+        let modeWasCustom = LaunchpadBackgroundPreferences.mode == .custom
+        UserDefaults.standard.set(
+            url.path,
+            forKey: LaunchpadBackgroundPreferences.customImagePathKey
+        )
+        UserDefaults.standard.set(
+            LaunchpadBackgroundMode.custom.rawValue,
+            forKey: LaunchpadBackgroundPreferences.modeKey
+        )
+        if modeWasCustom {
+            NotificationCenter.default.post(name: .qlaunchpadBackgroundChanged, object: nil)
+        }
     }
 }
 

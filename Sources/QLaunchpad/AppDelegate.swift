@@ -97,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(backgroundChanged),
+            name: .qlaunchpadBackgroundChanged,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(languageChanged),
             name: .qlaunchpadLanguageChanged,
             object: nil
@@ -435,6 +441,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateStatusMenu()
     }
 
+    @objc private func backgroundChanged() {
+        containerView?.background.reloadForPreferenceChange()
+    }
+
     @objc private func languageChanged() {
         if showMenuBarIconPreference {
             removeStatusItem()
@@ -485,26 +495,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         containerView.metal.beginPresentationHold()
 
         launchpadPanel.setFrame(screen.frame, display: false)
-        // Disable AppKit's automatic utility-window transition when the user
-        // explicitly selects no presentation animation. Otherwise orderOut()
-        // can keep the panel (and its icons) visually disappearing slowly.
-        launchpadPanel.animationBehavior = animationStyle == .none ? .none : .utilityWindow
-        containerView.prepareForShow(on: screen)
+        launchpadPanel.animationBehavior = .none
+        containerView.prepareForShow(on: screen, animationStyle: animationStyle)
 
-        // Show the window and cached wallpaper immediately. Metal content starts
-        // its own presentation animation after the primed drawable is ready.
         launchpadPanel.alphaValue = 1
         launchpadPanel.orderFrontRegardless()
         if animationStyle == .none {
             containerView.showWallpaperImmediately()
-        } else {
-            containerView.animateWallpaperIn()
         }
         NSApp.activate(ignoringOtherApps: true)
         launchpadPanel.makeKey()
         syncSettingsWindowLevel()
 
-        // Prime the icon layer while the already-visible window shows its background.
         containerView.metal.submitFirstPresentationFrame(style: animationStyle) { [weak self] in
             self?.beginContentPresentation(
                 generation: generation,
@@ -525,12 +527,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NotificationCenter.default.post(name: .qlaunchpadFocusSearch, object: nil)
         }
 
+        if animationStyle != .none {
+            containerView.animateWallpaperIn(duration: animationStyle.duration * 0.9)
+        }
+
         // The GPU has replaced any retained drawable with this presentation's
         // transparent start frame, so revealing Metal cannot flash old icons.
         containerView.revealPrimedMetalContent()
 
-        // Only Metal icons and overlay chrome fade in. The panel/background are
-        // already fully visible and intentionally have no opening animation.
         NotificationCenter.default.post(
             name: .qlaunchpadPresentationChanged,
             object: nil,

@@ -20,6 +20,20 @@
 "settings.layout" = "レイアウト";
 "settings.renderQuality" = "レンダリング品質";
 "settings.renderQuality.applying" = "レンダリング品質を適用中…";
+"settings.section.background" = "背景";
+"settings.background.mode" = "背景の種類";
+"background.mode.wallpaper.title" = "現在のデスクトップ壁紙";
+"background.mode.wallpaper.detail" = "デスクトップ壁紙を既存の柔らかなぼかし効果で表示します";
+"background.mode.screen.title" = "現在の画面";
+"background.mode.screen.detail" = "現在のディスプレイをリアルタイムに表示し、システムのぼかしを適用します（画面収録の許可は不要）";
+"background.mode.custom.title" = "カスタム画像";
+"background.mode.custom.detail" = "選択した画像に柔らかなガウスぼかしを重ねて使います";
+"settings.background.blur" = "ぼかし量";
+"settings.background.blur.detail" = "背景のぼかしを調整します。現在の画面ではリアルタイムのシステムぼかしを使用します";
+"settings.background.custom.choose" = "画像を選択";
+"settings.background.custom.instructions" = "ローカルの画像ファイルを選択します";
+"settings.background.custom.missing" = "画像がまだ選択されていません";
+"settings.background.custom.unavailable" = "この画像は利用できません。別の画像を選択してください。";
 "settings.section.animation" = "アニメーション";
 "settings.animation" = "切り替えアニメーション";
 "settings.animation.detail" = "画面の表示／非表示時に使うアイコンのアニメーションです。";
@@ -75,6 +89,7 @@
 "common.new" = "新規";
 "common.save" = "保存";
 "common.open" = "開く";
+"common.choose" = "選択…";
 "common.rename" = "名前を変更";
 "common.hide" = "非表示";
 "common.export" = "書き出す…";
@@ -131,6 +146,7 @@
 "renderQuality.performance.detail" = "システム表示と同等の標準画質";
 "renderQuality.lowMemory.detail" = "標準画質でメモリ使用量を抑えます。ページ移動時のアイコン表示が遅くなる場合があります";
 "animation.fly" = "フライイン（iOS ホーム画面）";
+"animation.classic" = "クラシック";
 "animation.zoom" = "ズーム";
 "animation.fade" = "フェード";
 "animation.none" = "なし";

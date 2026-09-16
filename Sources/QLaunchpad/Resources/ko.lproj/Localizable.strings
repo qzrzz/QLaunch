@@ -20,6 +20,20 @@
 "settings.layout" = "레이아웃";
 "settings.renderQuality" = "렌더링 품질";
 "settings.renderQuality.applying" = "렌더링 품질 적용 중…";
+"settings.section.background" = "배경";
+"settings.background.mode" = "배경 소스";
+"background.mode.wallpaper.title" = "현재 데스크톱 배경화면";
+"background.mode.wallpaper.detail" = "기존의 부드러운 흐림 효과와 함께 데스크톱 배경화면을 사용합니다";
+"background.mode.screen.title" = "현재 화면";
+"background.mode.screen.detail" = "현재 디스플레이를 실시간으로 표시하고 시스템 블러를 적용합니다(화면 녹화 권한 불필요)";
+"background.mode.custom.title" = "사용자 지정 이미지";
+"background.mode.custom.detail" = "선택한 이미지에 부드러운 가우시안 블러를 덧씌워 사용합니다";
+"settings.background.blur" = "블러 강도";
+"settings.background.blur.detail" = "배경 블러를 조절합니다. 현재 화면은 실시간 시스템 블러를 사용합니다";
+"settings.background.custom.choose" = "이미지 선택";
+"settings.background.custom.instructions" = "로컬 이미지 파일을 선택합니다";
+"settings.background.custom.missing" = "아직 이미지를 선택하지 않았습니다";
+"settings.background.custom.unavailable" = "이 이미지를 사용할 수 없습니다. 다른 이미지를 선택하세요.";
 "settings.section.animation" = "애니메이션";
 "settings.animation" = "전환 애니메이션";
 "settings.animation.detail" = "페이지를 표시하거나 숨길 때 사용하는 아이콘 애니메이션입니다.";
@@ -75,6 +89,7 @@
 "common.new" = "신규";
 "common.save" = "저장";
 "common.open" = "열기";
+"common.choose" = "선택…";
 "common.rename" = "이름 변경";
 "common.hide" = "숨기기";
 "common.export" = "내보내기…";
@@ -131,6 +146,7 @@
 "renderQuality.performance.detail" = "시스템 표시와 비슷한 표준 화질";
 "renderQuality.lowMemory.detail" = "표준 화질로 메모리 사용량을 줄이며 페이지 이동 시 아이콘 로딩이 느릴 수 있습니다";
 "animation.fly" = "날아오기(iOS 홈 화면)";
+"animation.classic" = "클래식";
 "animation.zoom" = "확대";
 "animation.fade" = "페이드";
 "animation.none" = "없음";

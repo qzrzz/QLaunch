@@ -11,6 +11,7 @@ extension Notification.Name {
     static let qlaunchpadGridLayoutChanged = Notification.Name("QLaunchpadGridLayoutChanged")
     static let qlaunchpadCacheClearRequested = Notification.Name("QLaunchpadCacheClearRequested")
     static let qlaunchpadRenderQualityChanged = Notification.Name("QLaunchpadRenderQualityChanged")
+    static let qlaunchpadBackgroundChanged = Notification.Name("QLaunchpadBackgroundChanged")
     /// Posted when a background icon bake finishes (may batch multiple).
     static let qlaunchpadIconTexturesUpdated = Notification.Name("QLaunchpadIconTexturesUpdated")
 }
@@ -323,11 +324,7 @@ final class LaunchpadContainerView: NSView {
         let style = (note.userInfo?["animationStyle"] as? String)
             .flatMap(LaunchpadAnimationStyle.init(rawValue:))
             ?? LaunchpadAnimationStyle.current
-        if showing {
-            // The wallpaper is part of the immediately visible window. Only the
-            // interactive overlay accompanies the Metal icon fade-in.
-            backgroundView.alphaValue = 1
-        }
+        setPresentationScale(1)
         guard style != .none else {
             overlayView.alphaValue = showing ? 1 : 0
             if !showing { backgroundView.alphaValue = 0 }
@@ -346,7 +343,7 @@ final class LaunchpadContainerView: NSView {
         if !showing {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = style.dismissalDuration
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 backgroundView.animator().alphaValue = 0
             }
         }
@@ -407,8 +404,11 @@ final class LaunchpadContainerView: NSView {
         super.keyDown(with: event)
     }
 
-    func prepareForShow(on screen: NSScreen) {
-        backgroundView.alphaValue = 1
+    func prepareForShow(
+        on screen: NSScreen,
+        animationStyle _: LaunchpadAnimationStyle
+    ) {
+        setPresentationScale(1)
         // Hide any drawable retained from the previous presentation until Metal
         // confirms that the new animation's transparent start frame is ready.
         metalView.alphaValue = 0
@@ -426,10 +426,19 @@ final class LaunchpadContainerView: NSView {
             view.layer?.removeAllAnimations()
             view.alphaValue = 0
         }
+        setPresentationScale(1)
     }
 
-    func animateWallpaperIn() {
-        backgroundView.animateWallpaperIn(duration: 0.5)
+    private func setPresentationScale(_ scale: CGFloat) {
+        guard let layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.setAffineTransform(CGAffineTransform(scaleX: scale, y: scale))
+        CATransaction.commit()
+    }
+
+    func animateWallpaperIn(duration: CFTimeInterval = 0.64) {
+        backgroundView.animateWallpaperIn(duration: duration)
     }
 
     func showWallpaperImmediately() {

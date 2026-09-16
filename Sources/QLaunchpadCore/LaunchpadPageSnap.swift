@@ -10,6 +10,29 @@ public enum LaunchpadPageSnap {
     /// Mouse empty-area pan: about 1/6 of a page instead of half.
     public static let mouseCommitThreshold = 0.16
 
+    public static func mouseWheelPageDelta(deltaX: Double, deltaY: Double) -> Double? {
+        let primary = abs(deltaX) >= abs(deltaY) ? deltaX : deltaY
+        guard abs(primary) > 0.01 else { return nil }
+        return primary < 0 ? 1 : -1
+    }
+
+    public static func isDiscreteWheel(
+        isPrecise: Bool,
+        phaseIsEmpty: Bool,
+        momentumPhaseIsEmpty: Bool
+    ) -> Bool {
+        !isPrecise || (phaseIsEmpty && momentumPhaseIsEmpty)
+    }
+
+    public static func acceptsDiscreteWheel(
+        now: Double,
+        lastAcceptedAt: Double,
+        cooldown: Double
+    ) -> Bool {
+        guard lastAcceptedAt.isFinite else { return true }
+        return now - lastAcceptedAt >= cooldown
+    }
+
     public static func settledPage(
         offset: Double,
         origin: Double,

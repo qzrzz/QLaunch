@@ -444,6 +444,7 @@ enum IconRenderQuality: String, CaseIterable, Identifiable {
 
 enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
     case fly
+    case classic
     case zoom
     case fade
     case none
@@ -458,9 +459,10 @@ enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
 
     var duration: CFTimeInterval {
         switch self {
-        case .fly: 1.3
-        case .zoom: 0.62
-        case .fade: 0.26
+        case .fly: 1.2
+        case .classic: 0.33
+        case .zoom: 0.57
+        case .fade: 0.24
         case .none: 0
         }
     }
@@ -468,6 +470,7 @@ enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
     var dismissalDuration: CFTimeInterval {
         switch self {
         case .fly: 0.48
+        case .classic: 0.26
         case .zoom: 0.22
         case .fade: 0.25
         case .none: 0
@@ -566,6 +569,8 @@ final class AppStore: ObservableObject {
     private var scrollAxisAccumY: Double = 0
     /// After finger-up settle, leftover trackpad momentum must not start a new flip.
     private var ignoreScrollMomentum = false
+    private var lastDiscreteWheelAcceptedAt: CFTimeInterval = -.infinity
+    private let discreteWheelCooldown: CFTimeInterval = 0.8
     /// Un-rubber-banded page at mouse-down. Pointer X maps 1:1 onto this origin.
     private var pagePanOrigin: Double = 0
     /// The renderer owns adaptive infinite-canvas geometry because it depends
@@ -1428,17 +1433,38 @@ final class AppStore: ObservableObject {
         let inMomentum = momentumPhase.contains(.began) || momentumPhase.contains(.changed)
         let momentumEnded = momentumPhase.contains(.ended) || momentumPhase.contains(.cancelled)
 
-        // Mouse wheel: one notch → one page. Trackpad never takes this path.
-        if !isPrecise && phase.isEmpty && momentumPhase.isEmpty {
-            let primary = abs(deltaX) >= abs(deltaY) ? deltaX : deltaY
-            guard abs(primary) > 0.01 else { return }
-            let pageDelta = Double(-primary) / (pageScrollUnit * 0.35)
+        let isDiscreteWheel = LaunchpadPageSnap.isDiscreteWheel(
+            isPrecise: isPrecise,
+            phaseIsEmpty: phase.isEmpty,
+            momentumPhaseIsEmpty: momentumPhase.isEmpty
+        )
+        if isDiscreteWheel {
+            guard let pageDelta = LaunchpadPageSnap.mouseWheelPageDelta(
+                deltaX: Double(deltaX),
+                deltaY: Double(deltaY)
+            ) else { return }
+
+            if isPrecise {
+                let now = CACurrentMediaTime()
+                guard LaunchpadPageSnap.acceptsDiscreteWheel(
+                    now: now,
+                    lastAcceptedAt: lastDiscreteWheelAcceptedAt,
+                    cooldown: discreteWheelCooldown
+                ) else {
+                    return
+                }
+                lastDiscreteWheelAcceptedAt = now
+            } else {
+                lastDiscreteWheelAcceptedAt = -.infinity
+            }
+
             resetPageScrollGesture()
             settlePage(withVelocity: pageDelta > 0 ? 1.2 : -1.2)
             return
         }
 
         if began {
+            lastDiscreteWheelAcceptedAt = -.infinity
             ignoreScrollMomentum = false
             isPageGestureActive = true
             scrollAccumulated = 0

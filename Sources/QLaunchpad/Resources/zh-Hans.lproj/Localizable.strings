@@ -20,6 +20,20 @@
 "settings.layout" = "布局";
 "settings.renderQuality" = "渲染质量";
 "settings.renderQuality.applying" = "正在应用渲染质量…";
+"settings.section.background" = "背景";
+"settings.background.mode" = "背景来源";
+"background.mode.wallpaper.title" = "当前桌面壁纸";
+"background.mode.wallpaper.detail" = "使用桌面壁纸，并保留现有的柔和模糊效果";
+"background.mode.screen.title" = "当前画面";
+"background.mode.screen.detail" = "实时显示当前显示器画面，并使用系统模糊，无需屏幕录制权限";
+"background.mode.custom.title" = "自定义图片";
+"background.mode.custom.detail" = "使用你选择的图片，并覆盖柔和的高斯模糊";
+"settings.background.blur" = "模糊度";
+"settings.background.blur.detail" = "调节背景模糊强度；当前画面使用实时系统模糊";
+"settings.background.custom.choose" = "选择图片";
+"settings.background.custom.instructions" = "选择本地图片文件";
+"settings.background.custom.missing" = "尚未选择图片";
+"settings.background.custom.unavailable" = "找不到这张图片，请重新选择";
 "settings.section.animation" = "动画";
 "settings.animation" = "切换动画";
 "settings.animation.detail" = "页面显示/隐藏时图标的出入场动画。";
@@ -75,6 +89,7 @@
 "common.new" = "新建";
 "common.save" = "保存";
 "common.open" = "打开";
+"common.choose" = "选择…";
 "common.rename" = "重命名";
 "common.hide" = "隐藏";
 "common.export" = "导出…";
@@ -131,6 +146,7 @@
 "renderQuality.performance.detail" = "常规画质，与系统显示效果相当";
 "renderQuality.lowMemory.detail" = "常规画质，为减小内存消耗，滚动页面时图标加载会更慢";
 "animation.fly" = "飞入（iOS 桌面）";
+"animation.classic" = "经典";
 "animation.zoom" = "放大";
 "animation.fade" = "渐入";
 "animation.none" = "无";
