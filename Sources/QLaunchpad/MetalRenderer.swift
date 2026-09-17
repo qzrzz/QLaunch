@@ -253,7 +253,24 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var canvasEdgePanVelocity: CGPoint = .zero
     /// Current pointer position in the canvas' top-left coordinate system.
     private var canvasEdgePointer: CGPoint?
+    /// Armed only after the pointer has moved into the safe non-edge zone.
+    private var canvasEdgePanArmed = false
     private var canvasEdgeTrackingArea: NSTrackingArea?
+    private var spaceKeyMonitor: Any?
+    private var isSpaceKeyDown = false
+    private var isSpacePanning = false
+    private var isMouseDown = false
+
+    private var isTextInputActive: Bool {
+        guard let window else { return false }
+        return window.firstResponder is NSTextView
+    }
+
+    private var isSpacePanActive: Bool {
+        GridLayoutPreset.current.isInfiniteCanvas
+            && (isSpaceKeyDown || CGEventSource.keyState(.combinedSessionState, key: 49))
+            && !isTextInputActive
+    }
     private var canvasZoomAnchor: CGPoint = .zero
     private var canvasRippleCenter: CGPoint = .zero
     private var canvasRippleReferenceScale: CGFloat = 1
@@ -270,7 +287,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var canvasTransformHistory: [CanvasTransformSample] = []
     private let canvasZoomDamping: CGFloat = 5.2
     private let canvasPanDamping: CGFloat = 4.6
-    private let canvasEdgePanInset: CGFloat = 88
+    private let canvasEdgePanInset: CGFloat = CanvasEdgePan.defaultEdgeInset
     private let canvasEdgePanMaximumSpeed: CGFloat = 760
     /// 100% is the shared 128pt world grid; larger canvas presets extend its ceiling.
     private var canvasMaximumScale: CGFloat {
@@ -498,6 +515,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     deinit {
+        if let spaceKeyMonitor {
+            NSEvent.removeMonitor(spaceKeyMonitor)
+        }
         resourcePrewarmTask?.cancel()
         textAtlasBuildTask?.cancel()
         displayLink?.invalidate()
@@ -876,6 +896,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// delivered event before moving.
     private func syncPagePanToMouse() {
         guard isPanningPage, let window else { return }
+        guard (NSEvent.pressedMouseButtons & 1) != 0 else {
+            isPanningPage = false
+            isSpacePanning = false
+            isMouseDown = false
+            updateSpaceCursor()
+            return
+        }
         let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
         applyPagePan(at: convert(windowPoint, from: nil))
     }
@@ -930,6 +957,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let point = convert(windowPoint, from: nil)
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
         canvasEdgePointer = dragPoint
+        canvasEdgePanArmed = true
         updateEdgePageDirection(for: point)
         return point
     }
@@ -1365,6 +1393,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     func beginPresentationHold() {
         pauseResourcePrewarming()
         isResourcePrewarmingPaused = true
+        canvasEdgePointer = nil
+        canvasEdgePanArmed = false
+        canvasEdgePanVelocity = .zero
+        isSpaceKeyDown = false
+        isSpacePanning = false
+        isMouseDown = false
+        updateSpaceCursor()
         displayLink?.invalidate()
         displayLink = nil
     }
@@ -1380,6 +1415,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         isShowingPresentation = true
         isPrimingPresentationFrame = true
         presentationStyle = style
+        canvasEdgePointer = nil
+        canvasEdgePanArmed = false
+        canvasEdgePanVelocity = .zero
+        isSpaceKeyDown = false
+        isSpacePanning = false
+        isMouseDown = false
+        updateSpaceCursor()
         applyPresentationPhase(0)
         beginPresentationHold()
 
@@ -3818,17 +3860,32 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         return hypot(clamped.x - canvasPan.x, clamped.y - canvasPan.y) > 0.01
     }
 
+    private func isPointerInCanvasEdgeZone(_ pointer: CGPoint) -> Bool {
+        CanvasEdgePan.isPointerInEdgeZone(
+            pointer: pointer,
+            bounds: bounds.size,
+            edgeInset: canvasEdgePanInset
+        )
+    }
+
     private var canvasEdgePanTargetVelocity: CGPoint {
         guard GridLayoutPreset.current.isInfiniteCanvas,
               contentTransitionPhase == .idle,
               !isFolderTransitionActive,
               !isPanningPage,
+              canvasEdgePanArmed,
               let pointer = canvasEdgePointer else {
             return .zero
         }
 
-        let horizontalInset = min(canvasEdgePanInset, bounds.width * 0.25)
-        let verticalInset = min(canvasEdgePanInset, bounds.height * 0.25)
+        let horizontalInset = CanvasEdgePan.horizontalInset(
+            boundsWidth: bounds.width,
+            edgeInset: canvasEdgePanInset
+        )
+        let verticalInset = CanvasEdgePan.verticalInset(
+            boundsHeight: bounds.height,
+            edgeInset: canvasEdgePanInset
+        )
         func edgeStrength(_ distance: CGFloat, inset: CGFloat) -> CGFloat {
             guard inset > 0 else { return 0 }
             return smoothstep(min(max((inset - distance) / inset, 0), 1))
@@ -3854,6 +3911,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         canvasZoomVelocity = 0
         canvasPanVelocity = .zero
         canvasEdgePanVelocity = .zero
+        canvasEdgePointer = nil
+        canvasEdgePanArmed = false
+        isSpaceKeyDown = false
+        isSpacePanning = false
+        isMouseDown = false
+        updateSpaceCursor()
         canvasRippleActiveUntil = 0
         canvasLastZoomInputTime = 0
         canvasPinchNeedsRipple = false
@@ -4167,7 +4230,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     private func updateCanvasEdgePointer(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        canvasEdgePointer = CGPoint(x: point.x, y: bounds.height - point.y)
+        let pointer = CGPoint(x: point.x, y: bounds.height - point.y)
+        canvasEdgePointer = pointer
+        if !isPointerInCanvasEdgeZone(pointer) {
+            canvasEdgePanArmed = true
+        }
         if GridLayoutPreset.current.isInfiniteCanvas {
             startDisplayLink()
         }
@@ -4175,14 +4242,30 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     override func mouseEntered(with event: NSEvent) {
         updateCanvasEdgePointer(with: event)
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            updateSpaceCursor()
+        }
     }
 
     override func mouseMoved(with event: NSEvent) {
+        if isPanningPage && (NSEvent.pressedMouseButtons & 1) == 0 {
+            isPanningPage = false
+            isSpacePanning = false
+            isMouseDown = false
+            updateSpaceCursor()
+        }
         updateCanvasEdgePointer(with: event)
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            updateSpaceCursor()
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
         canvasEdgePointer = nil
+        canvasEdgePanArmed = false
+        if !isMouseDown {
+            updateSpaceCursor()
+        }
         if hypot(canvasEdgePanVelocity.x, canvasEdgePanVelocity.y) > 0.5 {
             startDisplayLink()
         }
@@ -4213,6 +4296,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     override func mouseDown(with event: NSEvent) {
         updateCanvasEdgePointer(with: event)
+        isMouseDown = true
         dragStart = convert(event.locationInWindow, from: nil)
         draggedAppID = nil
         dragGeneration = store.dragGeneration
@@ -4254,6 +4338,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         if contentTransitionPhase != .idle {
             beginEmptyAreaPagePan(from: dragStart)
+            return
+        }
+
+        if isSpacePanActive {
+            isSpacePanning = true
+            beginEmptyAreaPagePan(from: dragStart)
+            updateSpaceCursor()
             return
         }
 
@@ -4301,7 +4392,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        guard contentTransitionPhase == .idle, !isFolderTransitionActive else { return nil }
+        guard contentTransitionPhase == .idle, !isFolderTransitionActive, !isSpacePanActive else { return nil }
         let point = convert(event.locationInWindow, from: nil)
         if LaunchpadFieldHitArea.rect(in: bounds).contains(point) {
             return nil
@@ -4664,6 +4755,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
         canvasEdgePointer = dragPoint
         if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
+        if !isPointerInCanvasEdgeZone(dragPoint) || didDrag {
+            canvasEdgePanArmed = true
+        }
 
         if !store.allowsUserLayoutEditing,
            draggedAppID != nil,
@@ -4707,20 +4801,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
-        // AppKit may coalesce the last mouse-drag sample into mouse-up. Resolve
-        // that final position before consuming `dragHoverTargetID`, otherwise a
-        // visually valid drop can still use the previous non-grouping target.
-        if didDrag,
-           draggedAppID != nil,
-           !isPanningPage,
-           store.openedFolderID == nil,
-           contentTransitionPhase == .idle,
-           !isFolderTransitionActive {
-            let releasePoint = convert(event.locationInWindow, from: nil)
-            dragPoint = CGPoint(x: releasePoint.x, y: bounds.height - releasePoint.y)
-            updateReorderDestination(at: releasePoint)
-        }
-
+        isMouseDown = false
         defer {
             dragSource = nil
             draggedAppID = nil
@@ -4734,10 +4815,34 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             lastGroupingMotionTime = 0
             groupingMotionSpeed = 0
             isPanningPage = false
+            isSpacePanning = false
             pageIndicatorClick = false
             pendingAutoLayoutReorderHint = false
             store.setFolderDragState(isDragging: false)
             needsDisplay = true
+            updateSpaceCursor()
+        }
+
+        if isSpacePanning {
+            if !GridLayoutPreset.current.isInfiniteCanvas {
+                store.endPagePan()
+            }
+            startDisplayLink()
+            return
+        }
+
+        // AppKit may coalesce the last mouse-drag sample into mouse-up. Resolve
+        // that final position before consuming `dragHoverTargetID`, otherwise a
+        // visually valid drop can still use the previous non-grouping target.
+        if didDrag,
+           draggedAppID != nil,
+           !isPanningPage,
+           store.openedFolderID == nil,
+           contentTransitionPhase == .idle,
+           !isFolderTransitionActive {
+            let releasePoint = convert(event.locationInWindow, from: nil)
+            dragPoint = CGPoint(x: releasePoint.x, y: bounds.height - releasePoint.y)
+            updateReorderDestination(at: releasePoint)
         }
         if pageIndicatorClick {
             let point = convert(event.locationInWindow, from: nil)
@@ -4920,4 +5025,110 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            installSpaceKeyMonitor()
+        } else {
+            removeSpaceKeyMonitor()
+            isSpaceKeyDown = false
+            isSpacePanning = false
+            isMouseDown = false
+            updateSpaceCursor()
+        }
+    }
+
+    private func installSpaceKeyMonitor() {
+        guard spaceKeyMonitor == nil else { return }
+        spaceKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self else { return event }
+            return self.handleSpaceKeyEvent(event)
+        }
+    }
+
+    private func removeSpaceKeyMonitor() {
+        if let spaceKeyMonitor {
+            NSEvent.removeMonitor(spaceKeyMonitor)
+            self.spaceKeyMonitor = nil
+        }
+    }
+
+    private func handleSpaceKeyEvent(_ event: NSEvent) -> NSEvent? {
+        guard GridLayoutPreset.current.isInfiniteCanvas else {
+            if isSpaceKeyDown {
+                isSpaceKeyDown = false
+                updateSpaceCursor()
+            }
+            return event
+        }
+
+        if isTextInputActive {
+            if isSpaceKeyDown {
+                isSpaceKeyDown = false
+                updateSpaceCursor()
+            }
+            return event
+        }
+
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isSpace = CanvasSpacePan.isPlainSpace(
+            keyCode: event.keyCode,
+            hasCommand: modifiers.contains(.command),
+            hasControl: modifiers.contains(.control),
+            hasOption: modifiers.contains(.option)
+        )
+
+        if isSpace {
+            switch event.type {
+            case .keyDown:
+                let wasActive = isSpaceKeyDown
+                isSpaceKeyDown = true
+                if !wasActive {
+                    updateSpaceCursor()
+                }
+                return nil
+            case .keyUp:
+                isSpaceKeyDown = false
+                if (NSEvent.pressedMouseButtons & 1) == 0 {
+                    isPanningPage = false
+                    isSpacePanning = false
+                    isMouseDown = false
+                }
+                updateSpaceCursor()
+                return nil
+            default:
+                break
+            }
+        } else if event.keyCode == CanvasSpacePan.spaceKeyCode {
+            if isSpaceKeyDown {
+                isSpaceKeyDown = false
+                if (NSEvent.pressedMouseButtons & 1) == 0 {
+                    isPanningPage = false
+                    isSpacePanning = false
+                    isMouseDown = false
+                }
+                updateSpaceCursor()
+            }
+        }
+        return event
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isSpacePanActive || (isSpacePanning && isMouseDown) {
+            let cursor = (isSpacePanning && isMouseDown) ? NSCursor.closedHand : NSCursor.openHand
+            addCursorRect(bounds, cursor: cursor)
+        }
+    }
+
+    private func updateSpaceCursor() {
+        if isSpacePanActive || (isSpacePanning && isMouseDown) {
+            let cursor = (isSpacePanning && isMouseDown) ? NSCursor.closedHand : NSCursor.openHand
+            cursor.set()
+        } else if !isSpacePanning {
+            NSCursor.arrow.set()
+        }
+        window?.invalidateCursorRects(for: self)
+    }
 }

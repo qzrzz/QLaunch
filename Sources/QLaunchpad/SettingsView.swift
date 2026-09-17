@@ -235,8 +235,7 @@ private struct GeneralSettingsView: View {
                     }
                     Slider(
                         value: $backgroundBlurAmount,
-                        in: LaunchpadBackgroundPreferences.minimumBlurAmount...LaunchpadBackgroundPreferences.maximumBlurAmount,
-                        step: 1
+                        in: LaunchpadBackgroundPreferences.minimumBlurAmount...LaunchpadBackgroundPreferences.maximumBlurAmount
                     )
                     .onChange(of: backgroundBlurAmount) { _, _ in
                         notifyBackgroundChanged()
