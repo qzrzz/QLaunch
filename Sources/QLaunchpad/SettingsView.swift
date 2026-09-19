@@ -102,6 +102,8 @@ private struct GeneralSettingsView: View {
     private var backgroundBlurAmount = LaunchpadBackgroundPreferences.defaultBlurAmount
     @AppStorage(LaunchpadAnimationStyle.defaultsKey)
     private var presentationAnimationStyle = LaunchpadAnimationStyle.fly.rawValue
+    @AppStorage(HotCornerPreferences.positionKey)
+    private var hotCornerPosition = HotCornerPreferences.defaultPosition.rawValue
     @State private var launchAtLogin = LaunchAtLogin.isEnabled || LaunchAtLogin.needsApproval
     @State private var launchAtLoginNeedsApproval = LaunchAtLogin.needsApproval
     @State private var didClearCache = false
@@ -290,6 +292,28 @@ private struct GeneralSettingsView: View {
                 LabeledContent(L10n.tr("settings.keyboard.close"), value: "Esc")
                 LabeledContent(L10n.tr("settings.keyboard.select"), value: L10n.tr("settings.keyboard.arrows"))
                 LabeledContent(L10n.tr("settings.keyboard.open"), value: "Return")
+            }
+
+            Section(L10n.tr("settings.section.hotCorner")) {
+                Picker(
+                    L10n.tr("settings.hotCorner.position"),
+                    selection: Binding(
+                        get: { HotCornerPosition(rawValue: hotCornerPosition) ?? .none },
+                        set: {
+                            hotCornerPosition = $0.rawValue
+                            NotificationCenter.default.post(name: .qlaunchpadHotCornerChanged, object: nil)
+                        }
+                    )
+                ) {
+                    ForEach(HotCornerPosition.allCases) { corner in
+                        Text(corner.title).tag(corner)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Text(L10n.tr("settings.hotCorner.detail"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section(L10n.tr("settings.section.cache")) {

@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         store.load()
         installHotKey()
+        installHotCorner()
         installStatusItem()
         NotificationCenter.default.addObserver(
             self,
@@ -121,6 +122,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(hotCornerChanged),
+            name: .qlaunchpadHotCornerChanged,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(appWindowDidBecomeKey(_:)),
             name: NSWindow.didBecomeKeyNotification,
             object: nil
@@ -145,6 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         LaunchpadHotKeyCenter.shared.uninstall()
+        LaunchpadHotCornerCenter.shared.uninstall()
         if let localHotKeyMonitor { NSEvent.removeMonitor(localHotKeyMonitor) }
         DistributedNotificationCenter.default().removeObserver(
             self,
@@ -256,6 +264,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         center.install()
         installLaunchpadKeyMonitor()
+    }
+
+    private func installHotCorner() {
+        let center = LaunchpadHotCornerCenter.shared
+        center.onTrigger = { [weak self] in
+            guard let self else { return }
+            if !self.store.isPresented && self.launchpadPanel?.isVisible != true {
+                self.showLaunchpad()
+            }
+        }
+        center.install()
+    }
+
+    @objc private func hotCornerChanged() {
+        LaunchpadHotCornerCenter.shared.reloadWindows()
     }
 
     /// In-panel navigation only. The toggle shortcut is a Carbon system hotkey.

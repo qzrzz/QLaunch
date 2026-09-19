@@ -46,6 +46,14 @@
 "settings.keyboard.record" = "Press Shortcut";
 "settings.keyboard.detail" = "Registered with macOS. If it does not work, turn off the same shortcut in System Settings → Keyboard → Keyboard Shortcuts.";
 "settings.keyboard.registerFailed" = "macOS could not register this shortcut. Try a different combination.";
+"settings.section.hotCorner" = "Hot Corner";
+"settings.hotCorner.position" = "Hot Corner";
+"settings.hotCorner.none" = "Disabled";
+"settings.hotCorner.topLeft" = "Top Left";
+"settings.hotCorner.topRight" = "Top Right";
+"settings.hotCorner.bottomLeft" = "Bottom Left";
+"settings.hotCorner.bottomRight" = "Bottom Right";
+"settings.hotCorner.detail" = "Move the mouse pointer to a screen corner and pause to open QLaunch.";
 "settings.section.cache" = "Clear Cache";
 "settings.cache.clear" = "Clear Cache";
 "settings.cache.detail" = "Clear and rebuild the icon, text, and wallpaper caches";

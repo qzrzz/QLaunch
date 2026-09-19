@@ -46,6 +46,14 @@
 "settings.keyboard.record" = "按下快捷键";
 "settings.keyboard.detail" = "已向 macOS 系统注册。若快捷键无效，请在“系统设置 → 键盘 → 键盘快捷键”中关闭占用同一组合的系统快捷键。";
 "settings.keyboard.registerFailed" = "macOS 无法注册此快捷键，请换一组。";
+"settings.section.hotCorner" = "触发角";
+"settings.hotCorner.position" = "触发角";
+"settings.hotCorner.none" = "关闭";
+"settings.hotCorner.topLeft" = "左上角";
+"settings.hotCorner.topRight" = "右上角";
+"settings.hotCorner.bottomLeft" = "左下角";
+"settings.hotCorner.bottomRight" = "右下角";
+"settings.hotCorner.detail" = "将鼠标移动到屏幕角落并稍作停顿即可打开 QLaunch。";
 "settings.section.cache" = "清除缓存";
 "settings.cache.clear" = "清除缓存";
 "settings.cache.detail" = "清除图标、文字和壁纸缓存并重新构建";

@@ -46,6 +46,14 @@
 "settings.keyboard.record" = "ショートカットを入力";
 "settings.keyboard.detail" = "macOS にシステムショートカットとして登録します。効かない場合は、「システム設定 → キーボード → キーボードショートカット」で同じキーのシステムショートカットをオフにしてください。";
 "settings.keyboard.registerFailed" = "macOS がこのショートカットを登録できませんでした。別の組み合わせを試してください。";
+"settings.section.hotCorner" = "ホットコーナー";
+"settings.hotCorner.position" = "ホットコーナー";
+"settings.hotCorner.none" = "オフ";
+"settings.hotCorner.topLeft" = "左上";
+"settings.hotCorner.topRight" = "右上";
+"settings.hotCorner.bottomLeft" = "左下";
+"settings.hotCorner.bottomRight" = "右下";
+"settings.hotCorner.detail" = "マウスポインタを画面の隅に移動して少し待つと、QLaunch が開きます。";
 "settings.section.cache" = "キャッシュを消去";
 "settings.cache.clear" = "キャッシュを消去";
 "settings.cache.detail" = "アイコン、テキスト、壁紙のキャッシュを消去して再構築します";
