@@ -625,6 +625,19 @@ private struct ApplicationSettingsView: View {
                         .disabled(store.isLoading || store.apps.isEmpty)
                 }
 
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L10n.tr("settings.macosSystemLayout"))
+                        Text(L10n.tr("settings.macosSystemLayout.detail"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(L10n.tr("common.importPlain")) { importMacOSSystemLayout() }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isLoading || store.apps.isEmpty)
+                }
+
                 HStack(spacing: 8) {
                     LayoutProfilePopUp(
                         profiles: store.layoutProfiles,
@@ -855,7 +868,53 @@ private struct ApplicationSettingsView: View {
         }
     }
 
+    private func importMacOSSystemLayout() {
+        guard !store.isLoading, !store.apps.isEmpty else { return }
+        importStatusMessage = nil
+
+        let document: LaunchpadLayoutDocument
+        do {
+            document = try MacOSLaunchpadReader.readLayoutDocument()
+        } catch {
+            presentAlert(title: L10n.tr("error.macosLayout.read"), message: layoutErrorMessage(error))
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = L10n.tr("layout.importSystem.confirm.title")
+        alert.informativeText = L10n.tr("layout.importSystem.confirm.detail", layoutBackupDirectoryLabel)
+        alert.addButton(withTitle: L10n.tr("common.importPlain"))
+        alert.addButton(withTitle: L10n.tr("common.cancel"))
+        presentAlert(alert) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            self.applyImportedMacOSLayout(document)
+        }
+    }
+
+    private func applyImportedMacOSLayout(_ document: LaunchpadLayoutDocument) {
+        do {
+            let report = try store.applyLayout(document, mode: .merge)
+            importStatusMessage = L10n.tr(
+                "layout.importSystem.result",
+                report.importedRootItems,
+                report.skippedUnknown.count,
+                report.appendedLeftover.count
+            )
+        } catch {
+            importStatusMessage = nil
+            presentAlert(title: L10n.tr("error.layout.import"), message: layoutErrorMessage(error))
+        }
+    }
+
     private func layoutErrorMessage(_ error: Error) -> String {
+        if let error = error as? MacOSLaunchpadError {
+            switch error {
+            case .databaseNotFound:
+                return L10n.tr("error.macosLayout.notFound")
+            case .emptyDatabase, .cannotOpenDatabase, .queryFailed:
+                return error.localizedDescription
+            }
+        }
         guard let error = error as? LaunchpadLayoutError else {
             return error.localizedDescription
         }

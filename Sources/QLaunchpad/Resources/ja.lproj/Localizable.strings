@@ -60,6 +60,8 @@
 "settings.section.userData" = "ユーザーデータ";
 "settings.layoutFile" = "現在のレイアウトファイル";
 "settings.layoutFile.detail" = "現在の並び順とグループをエクスポートまたはインポートします";
+"settings.macosSystemLayout" = "macOS システム配列";
+"settings.macosSystemLayout.detail" = "macOS の元の Launchpad からアイコンの並び順とグループをインポート";
 "settings.appSupportPath" = "Application Support/%@";
 "settings.ai.detail" = "以下のプロンプトを Codex、Grok Build、Claude Code、Antigravity、Kimi Work などのローカル AI エージェントにコピーしてください";
 "settings.ai.copy" = "プロンプトをコピー";
@@ -126,6 +128,9 @@
 "layout.import.confirm.title" = "レイアウトを読み込みますか？";
 "layout.import.confirm.detail" = "ファイルに従って現在の並び順とグループを変更します。ファイルにないアプリは末尾に配置されます。`hidden` が含まれる場合のみ非表示リスト全体を置き換え、省略時はファイル内のアプリを再表示し、その他の非表示項目は維持します。読み込み前に現在のレイアウトを「%@/layout.backup.json」へバックアップし、後から読み込んで復元できます。";
 "layout.import.result" = "%d 項目を読み込み、不明なアプリ %d 個をスキップし、新しいアプリ %d 個を追加しました";
+"layout.importSystem.confirm.title" = "macOS システムの配列を読み込みますか？";
+"layout.importSystem.confirm.detail" = "macOS の元の Launchpad からアイコンの並び順とグループを読み込んで適用します。システムにないアプリは末尾に配置されます。現在のレイアウトは「%@/layout.backup.json」に自動バックアップされます。";
+"layout.importSystem.result" = "システム Launchpad から %d 項目を読み込み、不明なアプリ %d 個をスキップし、新しいアプリ %d 個を追加しました";
 "layout.auto.recentlyUsed" = "最近使用した順";
 "layout.auto.nameAscending" = "名前（昇順）";
 "layout.auto.nameDescending" = "名前（降順）";
@@ -171,6 +176,8 @@
 "error.layout.export" = "レイアウトを書き出せません";
 "error.layout.read" = "レイアウトファイルを読み込めません";
 "error.layout.import" = "レイアウトを読み込めません";
+"error.macosLayout.notFound" = "macOS の元の Launchpad データベースが見つかりませんでした。";
+"error.macosLayout.read" = "macOS システムの Launchpad 配列を読み込めませんでした";
 "error.layout.invalidKind" = "QLaunch のレイアウトファイルではありません。";
 "error.layout.unsupportedVersion" = "このレイアウトファイルのバージョンはサポートされていません。";
 "error.layout.catalogEmpty" = "アプリ一覧の準備ができていません。スキャン完了後にもう一度お試しください。";
