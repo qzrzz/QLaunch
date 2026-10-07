@@ -120,17 +120,22 @@ private struct AppResourceSignature: Equatable, Sendable {
 
 private struct TextAtlasSignature: Equatable, Sendable {
     let apps: AppListSignature
+    let names: [String]
     let scale: CGFloat
     let options: TextAtlas.Options
 
     init(apps: [AppInfo], scale: CGFloat, options: TextAtlas.Options) {
         self.apps = AppListSignature(apps: apps)
+        names = apps.map(\.name)
         self.scale = scale
         self.options = options
     }
 
     func matches(_ displayedApps: [AppInfo], scale: CGFloat, options: TextAtlas.Options) -> Bool {
-        self.scale == scale && self.options == options && apps.matches(displayedApps)
+        guard self.scale == scale,
+              self.options == options,
+              apps.matches(displayedApps) else { return false }
+        return names == displayedApps.map(\.name)
     }
 }
 
@@ -343,6 +348,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private var panStartPoint: CGPoint = .zero
     private var contextMenuApp: AppInfo?
     private var contextMenuFolder: AppFolder?
+    private var activeFolderRenameAlert: NSAlert?
     private var contextMenuSelectionIDs: [String] = []
     private var contextMenuSelectionFolderIDs: [String] = []
     private let selectionOverlay = SelectionOverlayView(frame: .zero)
@@ -363,6 +369,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     // Keep visual positions separate from the catalog order so reordering an
     // item does not make the surrounding icons jump to their new cells.
     private var reorderVisualSlots: [String: Double] = [:]
+    private var lastUsesFreePlacement = false
+    private var lastFreePlacementRevision: UInt64 = 0
     private var isReorderAnimationActive = false
     private let reorderAnimationRate = 20.0
 
@@ -1091,6 +1099,16 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return
         }
 
+        if selectedItemIDs.count > 1, selectedItemIDs.contains(draggedAppID ?? ""),
+           store.usesFreePlacement {
+            guard let slot = layoutSlotIndex(at: point, hitRadiusScale: 1.05) else { return }
+            if reorderVisualSlots.isEmpty { resetReorderVisualSlots(to: displayedItems) }
+            store.placeItems(selectedItemIDs, anchoredAt: source, intoSlot: slot)
+            isReorderAnimationActive = true
+            startDisplayLink()
+            return
+        }
+
         if selectedItemIDs.count > 1, selectedItemIDs.contains(draggedAppID ?? "") {
             guard let destination = layoutItemIndex(at: point, hitRadiusScale: 1.05),
                   displayedItems.indices.contains(destination),
@@ -1120,7 +1138,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // the target sticky across neighbouring grid cells.
         if let activeTargetID = dragHoverTargetID,
            let activeIndex = displayedItems.firstIndex(where: { $0.id == activeTargetID }) {
-            let visualIndex = reorderVisualSlots[activeTargetID] ?? Double(activeIndex)
+            let visualIndex = reorderVisualSlots[activeTargetID]
+                ?? Double(store.slot(for: displayedItems[activeIndex], fallback: activeIndex))
             let center = interactionIconCenter(globalIndex: visualIndex, metrics: metrics)
             if groupingMotionSpeed <= groupingMaximumIntentSpeed * 1.5,
                hypot(draggedCenter.x - center.x, draggedCenter.y - center.y)
@@ -1149,7 +1168,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 * groupingAcquireRadiusScale
             var groupingCandidate: (id: String, distance: CGFloat)?
             for (index, item) in displayedItems.enumerated() where item.id != draggedAppID {
-                let visualIndex = reorderVisualSlots[item.id] ?? Double(index)
+                let visualIndex = reorderVisualSlots[item.id]
+                    ?? Double(store.slot(for: item, fallback: index))
                 let center = interactionIconCenter(globalIndex: visualIndex, metrics: metrics)
                 let distance = hypot(draggedCenter.x - center.x, draggedCenter.y - center.y)
                 guard distance <= groupingRadius else { continue }
@@ -1179,6 +1199,17 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         groupingCandidateID = nil
         setDragHoverTarget(nil)
+
+        if store.usesFreePlacement {
+            guard let slot = layoutSlotIndex(at: point, hitRadiusScale: 1.05),
+                  slot != store.slot(for: displayedItems[source], fallback: source) else { return }
+            if reorderVisualSlots.isEmpty { resetReorderVisualSlots(to: displayedItems) }
+            store.placeItem(at: source, intoSlot: slot)
+            synchronizeReorderVisualSlots(with: displayedItems)
+            isReorderAnimationActive = true
+            startDisplayLink()
+            return
+        }
 
         // Fast movement and the outer portion of a cell remain available for
         // sorting even while the path crosses another icon.
@@ -1254,6 +1285,20 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     @objc private func storeChanged() {
+        if lastFreePlacementRevision != store.freePlacementRevision {
+            lastFreePlacementRevision = store.freePlacementRevision
+            if !didDrag { resetReorderVisualSlots(to: store.activeDisplayItems) }
+            resourcePrewarmSignature = nil
+            lastTextureWindowPage = -1
+            cachedResidentTextAtlasItems = nil
+        }
+        if lastUsesFreePlacement != store.usesFreePlacement {
+            lastUsesFreePlacement = store.usesFreePlacement
+            resetReorderVisualSlots(to: store.activeDisplayItems)
+            resourcePrewarmSignature = nil
+            lastTextureWindowPage = -1
+            cachedResidentTextAtlasItems = nil
+        }
         if isDragCancelledByLayout {
             discardCancelledDrag()
         }
@@ -1569,17 +1614,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// Apps and folder previews on the page that will actually appear first.
     private func firstPageIconWork() -> FirstPageIconWork {
         let items = displayedItems.isEmpty ? store.activeDisplayItems : displayedItems
-        let capacity = max(store.pageCapacity, 1)
         let page = max(0, Int((displayedItems.isEmpty ? store.pageOffset : currentPageOffset).rounded()))
-        let start = min(items.count, page * capacity)
-        let end = min(items.count, start + capacity)
-        guard start < end else {
+        let pageItems = itemsForPages(around: page, radius: 0, in: items)
+        guard !pageItems.isEmpty else {
             return FirstPageIconWork(apps: [], folders: [])
         }
 
         var apps: [AppInfo] = []
         var folders: [(AppFolder, [AppInfo])] = []
-        for item in items[start..<end] {
+        for item in pageItems {
             switch item {
             case .app(let app):
                 apps.append(app)
@@ -1862,14 +1905,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         let capacity = max(store.pageCapacity, 1)
-        let pageStart = min(items.count, targetPage * capacity)
-        let pageEnd = min(items.count, pageStart + capacity)
         let pageItems: [LaunchpadItem]
         if store.isSearching {
             // Prioritize the first screen of search hits, then the rest of the cap.
             pageItems = Array(items.prefix(capacity))
         } else {
-            pageItems = pageStart < pageEnd ? Array(items[pageStart..<pageEnd]) : []
+            pageItems = itemsForPages(around: targetPage, radius: 0, in: items)
         }
         var pageAppIDs = Set<String>()
         for item in pageItems {
@@ -1919,6 +1960,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let capacity = max(store.pageCapacity, 1)
         let startPage = max(0, page - radius)
         let endPage = page + radius
+        if store.usesFreePlacement {
+            return items.enumerated().compactMap { index, item in
+                let itemPage = store.slot(for: item, fallback: index) / capacity
+                return (startPage...endPage).contains(itemPage) ? item : nil
+            }
+        }
         let start = min(items.count, startPage * capacity)
         let end = min(items.count, (endPage + 1) * capacity)
         guard start < end else { return [] }
@@ -1931,6 +1978,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         items: [LaunchpadItem],
         radius: Int = 1
     ) -> IconCacheWindow {
+        if store.usesFreePlacement {
+            let selected = itemsForPages(around: page, radius: radius, in: items)
+            return iconCacheWindow(covering: selected, maxCount: selected.count)
+        }
         let capacity = max(store.pageCapacity, 1)
         let startPage = max(0, page - radius)
         let endPage = page + radius
@@ -2152,19 +2203,23 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             case .app(let app):
                 append(app)
             case .folder(let folder):
-                if let cached = folderAppInfoCache[folder.id], cached.name == folder.name {
+                // `displayedItems` intentionally keeps ID-stable snapshots while
+                // the grid is animating. Resolve folder labels from the store so
+                // a rename is visible even when that snapshot has not changed.
+                let currentFolder = store.folder(withID: folder.id) ?? folder
+                if let cached = folderAppInfoCache[folder.id], cached.name == currentFolder.name {
                     append(cached.app)
                 } else {
-                    let memberURL = folder.appIDs.lazy.compactMap { self.store.app(withID: $0)?.url }.first
+                    let memberURL = currentFolder.appIDs.lazy.compactMap { self.store.app(withID: $0)?.url }.first
                         ?? URL(fileURLWithPath: "/Applications")
                     let fakeApp = AppInfo(
-                        id: folder.id,
-                        name: folder.name,
+                        id: currentFolder.id,
+                        name: currentFolder.name,
                         url: memberURL,
-                        bundleIdentifier: folder.id,
+                        bundleIdentifier: currentFolder.id,
                         pinyin: .empty
                     )
-                    folderAppInfoCache[folder.id] = (folder.name, fakeApp)
+                    folderAppInfoCache[folder.id] = (currentFolder.name, fakeApp)
                     append(fakeApp)
                 }
             }
@@ -2180,7 +2235,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private func resetReorderVisualSlots(to items: [LaunchpadItem]) {
         reorderVisualSlots = Dictionary(
             uniqueKeysWithValues: items.enumerated().map { index, item in
-                (item.id, Double(index))
+                (item.id, Double(store.slot(for: item, fallback: index)))
             }
         )
         isReorderAnimationActive = false
@@ -2190,7 +2245,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let ids = Set(items.map(\.id))
         reorderVisualSlots = reorderVisualSlots.filter { ids.contains($0.key) }
         for (index, item) in items.enumerated() where reorderVisualSlots[item.id] == nil {
-            reorderVisualSlots[item.id] = Double(index)
+            reorderVisualSlots[item.id] = Double(store.slot(for: item, fallback: index))
         }
     }
 
@@ -2211,7 +2266,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
         synchronizeReorderVisualSlots(with: items)
         isReorderAnimationActive = items.enumerated().contains { index, item in
-            abs((reorderVisualSlots[item.id] ?? Double(index)) - Double(index)) >= 0.001
+            let target = Double(store.slot(for: item, fallback: index))
+            return abs((reorderVisualSlots[item.id] ?? target) - target) >= 0.001
         }
         if isReorderAnimationActive { startDisplayLink() }
         needsDisplay = true
@@ -2226,7 +2282,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let step = 1 - exp(-dt * reorderAnimationRate)
         var active = false
         for (index, item) in displayedItems.enumerated() {
-            let target = Double(index)
+            let target = Double(store.slot(for: item, fallback: index))
             let current = reorderVisualSlots[item.id] ?? target
             let distance = target - current
             if abs(distance) < 0.001 {
@@ -2643,8 +2699,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return nil
         }
         let visualIndex = useVisualSlots
-            ? (reorderVisualSlots[folderID] ?? Double(index))
-            : Double(index)
+            ? (reorderVisualSlots[folderID] ?? Double(store.slot(for: items[index], fallback: index)))
+            : Double(store.slot(for: items[index], fallback: index))
         if GridLayoutPreset.current.isInfiniteCanvas {
             let metrics = InfiniteCanvasMetrics(
                 size: bounds.size,
@@ -3491,7 +3547,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let cap = infiniteCanvas ? max(items.count, 1) : store.pageCapacity
         let pages = infiniteCanvas
             ? 1
-            : max(1, Int(ceil(Double(items.count) / Double(cap))))
+            : (store.usesFreePlacement ? store.pageCount
+               : max(1, Int(ceil(Double(items.count) / Double(cap)))))
         let canvasMetrics = infiniteCanvas
             ? infiniteCanvasMetrics(itemCount: items.count)
             : nil
@@ -3510,13 +3567,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         // than one page away from its current catalog slot.
         if let draggedAppID,
            let draggedIndex = items.firstIndex(where: { $0.id == draggedAppID }) {
-            let draggedPage = draggedIndex / cap
+            let draggedPage = store.slot(for: items[draggedIndex], fallback: draggedIndex) / cap
             first = min(first, draggedPage)
             last = max(last, draggedPage)
         }
         if let returningID = dragReleaseAnimation?.itemID,
            let returningIndex = items.firstIndex(where: { $0.id == returningID }) {
-            let returningPage = returningIndex / cap
+            let returningPage = store.slot(for: items[returningIndex], fallback: returningIndex) / cap
             first = min(first, returningPage)
             last = max(last, returningPage)
         }
@@ -3531,19 +3588,18 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         var pileIconDraws: [(layer: Int, texture: MTLTexture, sprite: SpriteInstance)] = []
 
         for page in first...last {
-            let start = page * cap
-            let end = min(start + cap, items.count)
-            guard start < end else { continue }
-            for index in start..<end {
-                let local = index - start
+            for index in items.indices {
                 let item = items[index]
+                let slot = store.slot(for: item, fallback: index)
+                guard slot / cap == page else { continue }
+                let local = slot % cap
                 let itemID = item.id
                 if style.hiddenIDs.contains(itemID) { continue }
                 let app: AppInfo? = if case .app(let value) = item { value } else { nil }
                 let folder: AppFolder? = if case .folder(let value) = item { value } else { nil }
                 let isOpeningAppTarget = !isShowingPresentation
                     && stationaryDismissedAppID == app?.id
-                let visualIndex = reorderVisualSlots[itemID] ?? Double(index)
+                let visualIndex = reorderVisualSlots[itemID] ?? Double(slot)
                 let canvasItemScale: CGFloat
                 var c: CGPoint
                 if let rest = style.restCanvas {
@@ -4308,7 +4364,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 pageOffset: interactionPageOffset,
                 hitRadiusScale: hitRadiusScale
             ) else { return nil }
-            return hit.page * store.pageCapacity + hit.localIndex
+            let slot = hit.page * store.pageCapacity + hit.localIndex
+            return store.usesFreePlacement ? store.itemIndex(atSlot: slot) : slot
         }
 
         let topLeftPoint = CGPoint(x: point.x, y: bounds.height - point.y)
@@ -4349,6 +4406,16 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return nil
         }
         return index
+    }
+
+    private func layoutSlotIndex(at point: CGPoint, hitRadiusScale: CGFloat) -> Int? {
+        let metrics = GridMetrics(size: bounds.size)
+        guard let hit = metrics.hitTest(
+            point: point,
+            pageOffset: interactionPageOffset,
+            hitRadiusScale: hitRadiusScale
+        ) else { return nil }
+        return hit.page * store.pageCapacity + hit.localIndex
     }
 
     private var windowScale: CGFloat {
@@ -4482,7 +4549,8 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let metrics = GridMetrics(size: bounds.size)
         let size = interactionIconPointSize(metrics: metrics)
         let hitIDs = Set(displayedItems.enumerated().compactMap { index, item -> String? in
-            let visualIndex = reorderVisualSlots[item.id] ?? Double(index)
+            let visualIndex = reorderVisualSlots[item.id]
+                ?? Double(store.slot(for: item, fallback: index))
             let center = interactionIconCenter(globalIndex: visualIndex, metrics: metrics)
             let iconRect = CGRect(x: center.x - size / 2, y: center.y - size / 2,
                                   width: size, height: size)
@@ -4609,7 +4677,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 }
                 dragSource = index
                 draggedAppID = item.id
-                let iconCenter = interactionIconCenter(globalIndex: Double(index), metrics: metrics)
+                let iconCenter = interactionIconCenter(
+                    globalIndex: Double(store.slot(for: item, fallback: index)), metrics: metrics
+                )
                 dragGrabOffset = CGPoint(
                     x: dragPoint.x - iconCenter.x,
                     y: dragPoint.y - iconCenter.y
@@ -4762,6 +4832,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             remove.target = self
             remove.isEnabled = canEdit
         }
+        addOrganizeMenuItem(to: menu)
         return menu
     }
 
@@ -4864,11 +4935,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         for item in menu.items where item.action != nil {
             item.target = self
         }
+        addOrganizeMenuItem(to: menu)
         return menu
     }
 
     private func makeLayoutSelectorMenu() -> NSMenu {
         let menu = NSMenu(title: L10n.tr("settings.layout"))
+        addOrganizeMenuItem(to: menu, separatorBefore: false)
+        menu.addItem(.separator())
 
         let userHeader = NSMenuItem(title: L10n.tr("layout.user"), action: nil, keyEquivalent: "")
         userHeader.isEnabled = false
@@ -4917,6 +4991,10 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     @objc private func openSettingsFromContextMenu() {
         NotificationCenter.default.post(name: .qlaunchpadOpenSettings, object: nil)
+    }
+
+    @objc private func openOrganizerFromContextMenu() {
+        NotificationCenter.default.post(name: .qlaunchpadOpenOrganizer, object: nil)
     }
 
     @objc private func selectLayoutFromMenu(_ sender: NSMenuItem) {
@@ -4968,7 +5046,20 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             keyEquivalent: ""
         )
         dissolveItem.target = self
+        addOrganizeMenuItem(to: menu)
         return menu
+    }
+
+    private func addOrganizeMenuItem(to menu: NSMenu, separatorBefore: Bool = true) {
+        guard store.openedFolderID == nil, !store.isSearching else { return }
+        if separatorBefore { menu.addItem(.separator()) }
+        let item = menu.addItem(
+            withTitle: L10n.tr("organize.menu"),
+            action: #selector(openOrganizerFromContextMenu),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.isEnabled = store.allowsUserLayoutEditing && !store.isLoading
     }
 
     @objc private func openContextMenuApp() {
@@ -5072,17 +5163,21 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     @objc private func renameContextMenuFolder() {
-        guard let folder = contextMenuFolder else { return }
+        guard activeFolderRenameAlert == nil,
+              let folder = contextMenuFolder,
+              let parentWindow = window else { return }
         let alert = NSAlert()
         alert.messageText = L10n.tr("context.renameFolder")
         alert.addButton(withTitle: L10n.tr("common.save"))
         alert.addButton(withTitle: L10n.tr("common.cancel"))
         let field = NSTextField(string: folder.name)
         field.frame = NSRect(x: 0, y: 0, width: 280, height: 26)
-        field.selectText(nil)
         alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        activeFolderRenameAlert = alert
 
-        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+        alert.beginSheetModal(for: parentWindow) { [weak self] response in
+            defer { self?.activeFolderRenameAlert = nil }
             guard let self else { return }
             if response == .alertFirstButtonReturn {
                 self.store.renameFolder(folder.id, to: field.stringValue)
@@ -5090,10 +5185,18 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             self.contextMenuFolder = nil
             self.needsDisplay = true
         }
-        if let window {
-            alert.beginSheetModal(for: window, completionHandler: completion)
-        } else {
-            completion(alert.runModal())
+
+        DispatchQueue.main.async { [weak self, weak alert] in
+            guard let self,
+                  let alert,
+                  self.activeFolderRenameAlert === alert else { return }
+            alert.window.makeFirstResponder(field)
+            if let editor = alert.window.fieldEditor(false, for: field) {
+                editor.selectedRange = NSRange(
+                    location: 0,
+                    length: (field.stringValue as NSString).length
+                )
+            }
         }
     }
 
@@ -5126,7 +5229,12 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         let point = convert(event.locationInWindow, from: nil)
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
         canvasEdgePointer = dragPoint
-        if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
+        if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 {
+            didDrag = true
+            if draggedAppID != nil && store.usesFreePlacement {
+                store.setFreePlacementDragActive(true)
+            }
+        }
         if marqueeStart != nil {
             updateMarquee(at: dragPoint)
             return
@@ -5182,6 +5290,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     override func mouseUp(with event: NSEvent) {
         isMouseDown = false
         defer {
+            store.setFreePlacementDragActive(false)
             dragSource = nil
             draggedAppID = nil
             dragDestination = nil

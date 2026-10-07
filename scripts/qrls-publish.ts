@@ -4,6 +4,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { SPARKLE_PUBLIC_ED_KEY } from "./build-app";
+import { sparkleZipName, verifySparkleArchive } from "./sparkle-artifacts";
 import {
   parseSparkleAppcast,
   qrls,
@@ -126,6 +128,34 @@ export function collectSparkleAttachments(
   return attachments;
 }
 
+/** 在上传任何文件之前核对 appcast 与待发布的 ZIP / delta。 */
+export function validateSparkleArtifacts(
+  files: IQrlsPublishFiles,
+  version: string,
+  build: string,
+  publicKey = SPARKLE_PUBLIC_ED_KEY,
+): void {
+  const items = parseSparkleAppcast(readFileSync(files.appcastPath, "utf8"));
+  const current = items.filter((item) => item.buildVersion === build);
+  if (current.length !== 1) throw new Error(`appcast 必须包含唯一的 build ${build}`);
+  const main = current[0].mainFile;
+  if (basename(files.zipPath) !== sparkleZipName(version, build) || main.name !== basename(files.zipPath)) {
+    throw new Error("Sparkle ZIP 必须使用包含 build 的独立文件名，并与 appcast 一致");
+  }
+  verifySparkleArchive(files.zipPath, main.sparkle?.edSignature, main.size, publicKey);
+  const deltas = current[0].deltaFiles ?? [];
+  for (const delta of deltas) {
+    const path = files.deltaPaths.find((path) => basename(path) === delta.name);
+    if (!path) throw new Error(`appcast 中的 delta 文件缺失: ${delta.name}`);
+    verifySparkleArchive(path, delta.sparkle?.edSignature, delta.size, publicKey);
+  }
+  for (const path of files.deltaPaths) {
+    if (!deltas.some((delta) => delta.name === basename(path))) {
+      throw new Error(`delta 未包含在当前 build 的 appcast 中: ${path}`);
+    }
+  }
+}
+
 /**
  * 调用 QRls：主发 R2，可选同步 GitHub
  * @param input 版本与本地产物
@@ -136,6 +166,7 @@ export async function publishWithQrls(
   if (!existsSync(input.dmgPath) || !existsSync(input.zipPath)) {
     throw new Error("QRls 发布缺少已公证的 DMG 或 Sparkle ZIP");
   }
+  validateSparkleArtifacts(input, input.version, input.build);
 
   const changelog =
     input.changelog ||

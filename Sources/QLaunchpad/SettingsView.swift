@@ -92,6 +92,8 @@ private struct GeneralSettingsView: View {
     @AppStorage("showLabels") private var showLabels = true
     @AppStorage(GridLayoutPreset.defaultsKey)
     private var gridLayoutPreset = GridLayoutPreset.defaultPreset.rawValue
+    @AppStorage(AppStore.freePlacementEnabledKey)
+    private var freePlacementEnabled = false
     @AppStorage(IconRenderQuality.defaultsKey)
     private var iconRenderQuality = IconRenderQuality.defaultQuality.rawValue
     @AppStorage(LaunchpadBackgroundPreferences.modeKey)
@@ -203,6 +205,12 @@ private struct GeneralSettingsView: View {
                 .onChange(of: gridLayoutPreset) { _, _ in
                     NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
                 }
+
+                Toggle(L10n.tr("settings.freePlacement"), isOn: $freePlacementEnabled)
+                    .toggleStyle(.switch)
+                    .onChange(of: freePlacementEnabled) { _, _ in
+                        NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
+                    }
 
                 Picker(selection: $iconRenderQuality) {
                     ForEach(IconRenderQuality.allCases) { quality in

@@ -8,6 +8,10 @@ final class LaunchpadPanel: NSPanel {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {
+            if let container = contentView as? LaunchpadContainerView, container.isOrganizing {
+                container.hideOrganizer()
+                return
+            }
             NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
             return
         }
@@ -315,6 +319,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return event
             }
 
+            if self.containerView.isOrganizing {
+                if event.keyCode == 53 {
+                    self.containerView.hideOrganizer()
+                    return nil
+                }
+                return event
+            }
+
             // Typing an ASCII letter or number anywhere on the launchpad starts
             // a search. Commit the first character before requesting focus so it
             // cannot be lost while SwiftUI installs the native field editor.
@@ -605,6 +617,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func beginDismissal(openingAppID: String?) {
+        if containerView.isOrganizing && openingAppID == nil {
+            containerView.hideOrganizer()
+            return
+        }
         // Ignore when already dismissed or mid-dismiss.
         if store.presentation == .dismissing || store.presentation == .hidden {
             return

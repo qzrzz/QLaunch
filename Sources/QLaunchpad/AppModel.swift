@@ -515,6 +515,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var keyboardFocusID: String?
     @Published private(set) var isKeyboardNavigationActive = false
     @Published private(set) var hiddenAppIDs: Set<String>
+    @Published private(set) var hiddenAppOrderIDs: [String] = []
     @Published private(set) var customApplicationSourcePaths: [String]
     @Published private(set) var layoutProfiles: [LaunchpadLayoutProfile]
     @Published private(set) var activeLayoutProfileID: String
@@ -600,6 +601,579 @@ final class AppStore: ObservableObject {
     private let scrollAxisLockPoints: Double = 8
 
     private var itemOrderIDs: [String]
+    private var freePlacementSlots: [String: Int] = [:]
+    private(set) var freePlacementRevision: UInt64 = 0
+    private var freePlacementDragActive = false
+    private static let freePlacementKey = "freePlacementSlots"
+    static let freePlacementEnabledKey = "freePlacementEnabled"
+    private var freePlacementStorageKey: String {
+        "\(Self.freePlacementKey).\(activeLayoutProfileID)"
+    }
+
+    var usesFreePlacement: Bool {
+        UserDefaults.standard.bool(forKey: Self.freePlacementEnabledKey)
+            && !GridLayoutPreset.current.isInfiniteCanvas
+            && layoutMode.isUser && !isSearching && openedFolderID == nil
+    }
+
+    func slot(for item: LaunchpadItem, fallback index: Int) -> Int {
+        usesFreePlacement ? (freePlacementSlots[item.id] ?? index) : index
+    }
+
+    func itemIndex(atSlot slot: Int) -> Int? {
+        activeDisplayItems.enumerated().first {
+            self.slot(for: $0.element, fallback: $0.offset) == slot
+        }?.offset
+    }
+
+    func placeItem(at source: Int, intoSlot destination: Int) {
+        guard usesFreePlacement, launchpadItems.indices.contains(source),
+              destination >= 0, destination < pageCount * pageCapacity else { return }
+        let item = launchpadItems[source]
+        let oldSlot = slot(for: item, fallback: source)
+        guard oldSlot != destination else { return }
+        if let displaced = itemIndex(atSlot: destination) {
+            freePlacementSlots[launchpadItems[displaced].id] = oldSlot
+        }
+        freePlacementSlots[item.id] = destination
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        objectWillChange.send()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func placeItems(
+        _ selectedIDs: Set<String>,
+        anchoredAt source: Int,
+        intoSlot destination: Int,
+        allowNextPage: Bool = false
+    ) {
+        guard usesFreePlacement, launchpadItems.indices.contains(source),
+              selectedIDs.contains(launchpadItems[source].id) else { return }
+        let anchor = launchpadItems[source]
+        let delta = destination - slot(for: anchor, fallback: source)
+        guard delta != 0 else { return }
+        let selected = launchpadItems.enumerated().filter { selectedIDs.contains($0.element.id) }
+        let oldSlots = selected.map { slot(for: $0.element, fallback: $0.offset) }
+        let newSlots = oldSlots.map { $0 + delta }
+        let slotLimit = (pageCount + (allowNextPage ? 1 : 0)) * pageCapacity
+        guard newSlots.allSatisfy({ $0 >= 0 && $0 < slotLimit }) else { return }
+        let oldSet = Set(oldSlots)
+        let newSet = Set(newSlots)
+        let vacated = oldSet.subtracting(newSet).sorted()
+        let displaced = launchpadItems.enumerated().filter {
+            !selectedIDs.contains($0.element.id)
+                && newSet.contains(slot(for: $0.element, fallback: $0.offset))
+        }.sorted {
+            slot(for: $0.element, fallback: $0.offset)
+                < slot(for: $1.element, fallback: $1.offset)
+        }
+        guard displaced.count <= vacated.count else { return }
+        for (item, slot) in zip(displaced, vacated) {
+            freePlacementSlots[item.element.id] = slot
+        }
+        for (item, slot) in zip(selected, newSlots) {
+            freePlacementSlots[item.element.id] = slot
+        }
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        objectWillChange.send()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func organizeMoveItems(_ selectedIDs: Set<String>, anchorID: String, toSlot destination: Int) {
+        guard allowsUserLayoutEditing, openedFolderID == nil,
+              let source = launchpadItems.firstIndex(where: { $0.id == anchorID }) else { return }
+        if GridLayoutPreset.current.isInfiniteCanvas {
+            moveItems(selectedIDs, to: destination, folderID: nil)
+            return
+        }
+        guard usesFreePlacement else {
+            moveItems(selectedIDs, to: destination, folderID: nil)
+            return
+        }
+        enableFreePlacementForOrganizing()
+        let capacity = pageCapacity
+        let destPage = destination / capacity
+        let anchor = launchpadItems[source]
+        let anchorSlot = slot(for: anchor, fallback: source)
+        let sourcePage = anchorSlot / capacity
+
+        let indexed = launchpadItems.enumerated().map {
+            (item: $0.element, slot: slot(for: $0.element, fallback: $0.offset))
+        }.sorted { $0.slot < $1.slot }
+
+        let moving = indexed.filter { selectedIDs.contains($0.item.id) }
+        guard !moving.isEmpty else { return }
+
+        if let targetOccupant = indexed.first(where: { $0.slot == destination && !selectedIDs.contains($0.item.id) }) {
+            if sourcePage == destPage && moving.allSatisfy({ $0.slot / capacity == destPage }) {
+                let pageItems = indexed.filter { $0.slot / capacity == destPage }
+                let remaining = pageItems.filter { !selectedIDs.contains($0.item.id) }
+                guard let targetRank = remaining.firstIndex(where: { $0.item.id == targetOccupant.item.id }) else { return }
+                let movingBefore = moving.filter { $0.slot < targetOccupant.slot }.count
+                let anchorOffset = moving.firstIndex(where: { $0.item.id == anchorID }) ?? 0
+                let rawInsertion = targetRank + movingBefore - anchorOffset
+                let insertion = min(max(rawInsertion, 0), remaining.count)
+                var newPageItems = remaining
+                newPageItems.insert(contentsOf: moving, at: insertion)
+                let occupiedSlots = pageItems.map(\.slot)
+                for (entry, newSlot) in zip(newPageItems, occupiedSlots) {
+                    freePlacementSlots[entry.item.id] = newSlot
+                }
+            } else {
+                let destPageItems = indexed.filter { $0.slot / capacity == destPage }
+                let remainingDest = destPageItems.filter { !selectedIDs.contains($0.item.id) }
+                let targetRank = remainingDest.firstIndex(where: { $0.item.id == targetOccupant.item.id }) ?? remainingDest.count
+                let anchorOffset = moving.firstIndex(where: { $0.item.id == anchorID }) ?? 0
+                let rawInsertion = targetRank - anchorOffset
+                let insertion = min(max(rawInsertion, 0), remainingDest.count)
+                var newDestItems = remainingDest
+                newDestItems.insert(contentsOf: moving, at: insertion)
+
+                let startSlot = max(destPage * capacity, destination - anchorOffset)
+                var nextSlot = startSlot
+                let reassignedIDs = Set(newDestItems.dropFirst(insertion).map { $0.item.id })
+                    .union(moving.map { $0.item.id })
+                var occupied = Set(indexed.compactMap { entry in
+                    reassignedIDs.contains(entry.item.id) ? nil : entry.slot
+                })
+                for (i, entry) in newDestItems.enumerated() {
+                    if i < insertion {
+                        freePlacementSlots[entry.item.id] = entry.slot
+                    } else {
+                        while occupied.contains(nextSlot) { nextSlot += 1 }
+                        freePlacementSlots[entry.item.id] = nextSlot
+                        occupied.insert(nextSlot)
+                        nextSlot += 1
+                    }
+                }
+            }
+            freePlacementRevision &+= 1
+            persistFreePlacementSlots()
+            objectWillChange.send()
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        } else {
+            placeItems(selectedIDs, anchoredAt: source, intoSlot: destination, allowNextPage: true)
+        }
+        syncOrganizedOrder()
+    }
+
+    func organizeMovePage(from source: Int, to destination: Int) {
+        guard allowsUserLayoutEditing, openedFolderID == nil,
+              !GridLayoutPreset.current.isInfiniteCanvas,
+              source >= 0, destination >= 0,
+              source < pageCount, destination < pageCount,
+              source != destination else { return }
+        guard usesFreePlacement else {
+            let capacity = max(pageCapacity, 1)
+            let ids = launchpadItems.map(\.id)
+            let sourceStart = source * capacity
+            let sourceEnd = min(sourceStart + capacity, ids.count)
+            guard sourceStart < sourceEnd else { return }
+            let moving = Array(ids[sourceStart..<sourceEnd])
+            var remaining = ids
+            remaining.removeSubrange(sourceStart..<sourceEnd)
+            let insertion = source < destination
+                ? min((destination + 1) * capacity - moving.count, remaining.count)
+                : min(destination * capacity, remaining.count)
+            remaining.insert(contentsOf: moving, at: insertion)
+            guard remaining != ids else { return }
+            itemOrderIDs = remaining
+            persistItemOrder()
+            reconcileLaunchpadItems()
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+            return
+        }
+        enableFreePlacementForOrganizing()
+        let capacity = pageCapacity
+        for (index, item) in launchpadItems.enumerated() {
+            let oldSlot = slot(for: item, fallback: index)
+            let page = oldSlot / capacity
+            let newPage: Int
+            if page == source {
+                newPage = destination
+            } else if source < destination && page > source && page <= destination {
+                newPage = page - 1
+            } else if destination < source && page >= destination && page < source {
+                newPage = page + 1
+            } else {
+                newPage = page
+            }
+            freePlacementSlots[item.id] = newPage * capacity + oldSlot % capacity
+        }
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        syncOrganizedOrder()
+        objectWillChange.send()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    @discardableResult
+    func organizeCreateFolder(draggedID: String, targetID: String) -> AppFolder? {
+        guard let targetIndex = launchpadItems.firstIndex(where: { $0.id == targetID }) else { return nil }
+        let preserveFreePlacement = usesFreePlacement
+        if preserveFreePlacement { enableFreePlacementForOrganizing() }
+        let targetSlot = slot(for: launchpadItems[targetIndex], fallback: targetIndex)
+        guard let folder = createFolder(draggedAppID: draggedID, targetAppID: targetID) else { return nil }
+        guard preserveFreePlacement else { return folder }
+        freePlacementSlots.removeValue(forKey: draggedID)
+        freePlacementSlots.removeValue(forKey: targetID)
+        freePlacementSlots[folder.id] = targetSlot
+        reconcileFreePlacementSlots()
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        syncOrganizedOrder()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return folder
+    }
+
+    @discardableResult
+    func organizeCreateFolder(with appIDs: [String], targetID: String) -> AppFolder? {
+        guard let targetIndex = launchpadItems.firstIndex(where: { $0.id == targetID }) else { return nil }
+        let preserveFreePlacement = usesFreePlacement
+        if preserveFreePlacement { enableFreePlacementForOrganizing() }
+        let targetSlot = slot(for: launchpadItems[targetIndex], fallback: targetIndex)
+        var allIDs = appIDs.filter { $0 != targetID }
+        allIDs.insert(targetID, at: 0)
+        guard let folder = createFolder(with: allIDs) else { return nil }
+        guard preserveFreePlacement else { return folder }
+        for id in allIDs {
+            freePlacementSlots.removeValue(forKey: id)
+        }
+        freePlacementSlots[folder.id] = targetSlot
+        reconcileFreePlacementSlots()
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        syncOrganizedOrder()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return folder
+    }
+
+    func organizeMoveAppIntoFolder(appID: String, folderID: String) {
+        guard usesFreePlacement else {
+            _ = moveAppToFolder(appID: appID, folderID: folderID)
+            return
+        }
+        enableFreePlacementForOrganizing()
+        freePlacementSlots.removeValue(forKey: appID)
+        _ = moveAppToFolder(appID: appID, folderID: folderID)
+        reconcileFreePlacementSlots()
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        syncOrganizedOrder()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    @discardableResult
+    func organizeDissolveFolder(_ folderID: String) -> [String]? {
+        guard usesFreePlacement else { return dissolveFolder(folderID) }
+        enableFreePlacementForOrganizing()
+        let folderSlot = launchpadItems.firstIndex(where: { $0.id == folderID }).map {
+            slot(for: launchpadItems[$0], fallback: $0)
+        }
+        freePlacementSlots.removeValue(forKey: folderID)
+        guard let members = dissolveFolder(folderID) else { return nil }
+        if let folderSlot, let first = members.first {
+            freePlacementSlots[first] = folderSlot
+        }
+        reconcileFreePlacementSlots()
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        syncOrganizedOrder()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return members
+    }
+
+    @discardableResult
+    func organizeRemoveAppFromFolder(appID: String, folderID: String) -> Bool {
+        guard usesFreePlacement else {
+            return removeAppFromFolder(appID: appID, folderID: folderID)
+        }
+        enableFreePlacementForOrganizing()
+        guard removeAppFromFolder(appID: appID, folderID: folderID) else { return false }
+        reconcileFreePlacementSlots()
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        syncOrganizedOrder()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        return true
+    }
+
+    func organizeHideItems(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        if usesFreePlacement {
+            enableFreePlacementForOrganizing()
+        }
+        var appIDsToHide = Set<String>()
+        var folderIDsToRemove = [String]()
+
+        for id in ids {
+            if let item = launchpadItems.first(where: { $0.id == id }) {
+                switch item {
+                case .app(let app):
+                    appIDsToHide.insert(app.id)
+                case .folder(let folder):
+                    appIDsToHide.formUnion(folder.appIDs)
+                    folderIDsToRemove.append(folder.id)
+                }
+            } else if let app = apps.first(where: { $0.id == id }) {
+                appIDsToHide.insert(app.id)
+            }
+        }
+
+        for folderID in folderIDsToRemove {
+            _ = dissolveFolder(folderID)
+        }
+
+        var changed = false
+        for appID in appIDsToHide {
+            if hiddenAppIDs.insert(appID).inserted {
+                if !hiddenAppOrderIDs.contains(appID) {
+                    hiddenAppOrderIDs.append(appID)
+                }
+                changed = true
+            }
+            freePlacementSlots.removeValue(forKey: appID)
+        }
+
+        if changed || !folderIDsToRemove.isEmpty {
+            invalidateAllAutoLayouts()
+            persistHiddenApps()
+            reconcileFreePlacementSlots()
+            freePlacementRevision &+= 1
+            persistFreePlacementSlots()
+            reconcileLaunchpadItems()
+            syncOrganizedOrder()
+            refreshFilteredApps(resetPage: false)
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+        }
+    }
+
+    func organizeUnhideItems(_ ids: [String], toSlot destination: Int? = nil, isInsertion: Bool = false) {
+        guard !ids.isEmpty else { return }
+        var changed = false
+        for id in ids {
+            if hiddenAppIDs.remove(id) != nil {
+                changed = true
+            }
+            if let idx = hiddenAppOrderIDs.firstIndex(of: id) {
+                hiddenAppOrderIDs.remove(at: idx)
+            }
+        }
+        guard changed else { return }
+
+        if destination != nil && !GridLayoutPreset.current.isInfiniteCanvas {
+            enableFreePlacementForOrganizing()
+        }
+
+        invalidateAllAutoLayouts()
+        persistHiddenApps()
+        reconcileLaunchpadItems(persist: false)
+
+        if let destination {
+            if GridLayoutPreset.current.isInfiniteCanvas {
+                let existingIDs = itemOrderIDs.filter { !ids.contains($0) }
+                let insertPos = min(max(destination, 0), existingIDs.count)
+                var newOrder = existingIDs
+                newOrder.insert(contentsOf: ids, at: insertPos)
+                itemOrderIDs = newOrder
+                persistItemOrder()
+                reconcileLaunchpadItems()
+            } else if usesFreePlacement {
+                let capacity = max(pageCapacity, 1)
+                let destPage = destination / capacity
+                let existingItems = launchpadItems.filter { !ids.contains($0.id) }
+                let indexed = existingItems.enumerated().map {
+                    (item: $0.element, slot: slot(for: $0.element, fallback: $0.offset))
+                }.sorted { $0.slot < $1.slot }
+
+                let destPageItems = indexed.filter { $0.slot / capacity == destPage }
+                let hasOccupantAtDestination = destPageItems.contains(where: { $0.slot == destination })
+
+                if isInsertion || hasOccupantAtDestination {
+                    let insertionIndex = destPageItems.firstIndex(where: { $0.slot >= destination }) ?? destPageItems.count
+                    let remainingOccupantSlots = Set(indexed.compactMap { entry -> Int? in
+                        if entry.slot / capacity == destPage && entry.slot >= destination {
+                            return nil
+                        }
+                        return entry.slot
+                    })
+
+                    var occupied = remainingOccupantSlots
+                    var curSlot = max(destPage * capacity, destination)
+                    for id in ids {
+                        while occupied.contains(curSlot) { curSlot += 1 }
+                        freePlacementSlots[id] = curSlot
+                        occupied.insert(curSlot)
+                        curSlot += 1
+                    }
+
+                    for entry in destPageItems.dropFirst(insertionIndex) {
+                        while occupied.contains(curSlot) { curSlot += 1 }
+                        freePlacementSlots[entry.item.id] = curSlot
+                        occupied.insert(curSlot)
+                        curSlot += 1
+                    }
+                } else {
+                    var occupied = Set(indexed.map(\.slot))
+                    var curSlot = destination
+                    for id in ids {
+                        while occupied.contains(curSlot) { curSlot += 1 }
+                        freePlacementSlots[id] = curSlot
+                        occupied.insert(curSlot)
+                        curSlot += 1
+                    }
+                }
+
+                reconcileFreePlacementSlots()
+                freePlacementRevision &+= 1
+                persistFreePlacementSlots()
+            } else {
+                if let firstID = ids.first {
+                    organizeMoveItems(Set(ids), anchorID: firstID, toSlot: destination)
+                }
+            }
+        } else {
+            if usesFreePlacement {
+                reconcileFreePlacementSlots()
+                freePlacementRevision &+= 1
+                persistFreePlacementSlots()
+            }
+        }
+
+        syncOrganizedOrder()
+        refreshFilteredApps(resetPage: false)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func organizeUnhideItemsIntoFolder(_ ids: [String], folderID: String) {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            hiddenAppIDs.remove(id)
+            if let idx = hiddenAppOrderIDs.firstIndex(of: id) {
+                hiddenAppOrderIDs.remove(at: idx)
+            }
+        }
+        invalidateAllAutoLayouts()
+        persistHiddenApps()
+        reconcileLaunchpadItems(persist: false)
+        for id in ids {
+            organizeMoveAppIntoFolder(appID: id, folderID: folderID)
+        }
+        refreshFilteredApps(resetPage: false)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func organizeUnhideItemsCreatingFolder(_ ids: [String], targetAppID: String) {
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            hiddenAppIDs.remove(id)
+            if let idx = hiddenAppOrderIDs.firstIndex(of: id) {
+                hiddenAppOrderIDs.remove(at: idx)
+            }
+        }
+        invalidateAllAutoLayouts()
+        persistHiddenApps()
+        reconcileLaunchpadItems(persist: false)
+        organizeCreateFolder(with: ids, targetID: targetAppID)
+        refreshFilteredApps(resetPage: false)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func organizeUnhideItems(_ ids: Set<String>, toSlot destination: Int? = nil, isInsertion: Bool = false) {
+        organizeUnhideItems(Array(ids), toSlot: destination, isInsertion: isInsertion)
+    }
+
+    func reorderHiddenApps(_ newOrder: [String]) {
+        hiddenAppOrderIDs = newOrder
+        persistHiddenApps()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    var orderedHiddenApps: [AppInfo] {
+        var result: [AppInfo] = []
+        var seen = Set<String>()
+        for id in hiddenAppOrderIDs where hiddenAppIDs.contains(id) {
+            if let app = apps.first(where: { $0.id == id }) {
+                result.append(app)
+                seen.insert(id)
+            }
+        }
+        for id in hiddenAppIDs where !seen.contains(id) {
+            if let app = apps.first(where: { $0.id == id }) {
+                result.append(app)
+                seen.insert(id)
+            }
+        }
+        return result
+    }
+
+    private func syncOrganizedOrder() {
+        let sorted = launchpadItems.enumerated().sorted {
+            slot(for: $0.element, fallback: $0.offset)
+                < slot(for: $1.element, fallback: $1.offset)
+        }.map { $0.element.id }
+        guard sorted != itemOrderIDs else { return }
+        itemOrderIDs = sorted
+        rebuildLaunchpadItems()
+        persistItemOrder()
+    }
+
+    func enableFreePlacementForOrganizing() {
+        guard UserDefaults.standard.bool(forKey: Self.freePlacementEnabledKey) else { return }
+        if freePlacementSlots.isEmpty {
+            let saved = defaultsFreePlacementSlots(for: activeLayoutProfileID)
+            if !saved.isEmpty {
+                freePlacementSlots = saved
+            } else {
+                freePlacementSlots = Dictionary(uniqueKeysWithValues: launchpadItems.enumerated().map {
+                    ($0.element.id, $0.offset)
+                })
+            }
+        }
+        reconcileFreePlacementSlots()
+        freePlacementRevision &+= 1
+        persistFreePlacementSlots()
+        NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
+    }
+
+    private func reconcileFreePlacementSlots() {
+        let ids = Set(launchpadItems.map(\.id))
+        freePlacementSlots = freePlacementSlots.filter { ids.contains($0.key) && $0.value >= 0 }
+        var occupied = Set<Int>()
+        for item in launchpadItems {
+            if let slot = freePlacementSlots[item.id], occupied.insert(slot).inserted { continue }
+            freePlacementSlots.removeValue(forKey: item.id)
+        }
+        var next = 0
+        for item in launchpadItems where freePlacementSlots[item.id] == nil {
+            while occupied.contains(next) { next += 1 }
+            freePlacementSlots[item.id] = next
+            occupied.insert(next)
+        }
+        persistFreePlacementSlots()
+    }
+
+    private func persistFreePlacementSlots() {
+        UserDefaults.standard.set(freePlacementSlots, forKey: freePlacementStorageKey)
+    }
+
+    private func defaultsFreePlacementSlots(for profileID: String) -> [String: Int] {
+        UserDefaults.standard.dictionary(forKey: "\(Self.freePlacementKey).\(profileID)") as? [String: Int] ?? [:]
+    }
+
+    func setFreePlacementDragActive(_ active: Bool) {
+        guard freePlacementDragActive != active else { return }
+        freePlacementDragActive = active
+        if !active {
+            let lastPage = Double(max(pageCount - 1, 0))
+            pageOffset = min(pageOffset, lastPage)
+            targetPage = min(targetPage, lastPage)
+        }
+        objectWillChange.send()
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
     private var recentLaunchDates: [String: Date]
     private var iconColorByAppID: [String: LaunchpadIconColor] = [:]
     private var iconColorTask: Task<Void, Never>?
@@ -621,11 +1195,15 @@ final class AppStore: ObservableObject {
         let layout = LaunchpadPreferenceStore.readLayout(domain: Self.preferenceDomain)
         LaunchpadPreferenceStore.writeThroughToStandardDefaults(layout)
         hiddenAppIDs = Set(layout.hiddenIDs)
+        hiddenAppOrderIDs = layout.hiddenIDs
         itemOrderIDs = layout.itemOrder
         folders = (try? LaunchpadPreferenceStore.decodeFolders(layout.foldersData)) ?? []
         let profileIndex = LaunchpadLayoutProfileStore.loadIndex(domain: Self.preferenceDomain)
         layoutProfiles = profileIndex.profiles
         activeLayoutProfileID = profileIndex.activeID
+        freePlacementSlots = UserDefaults.standard.dictionary(
+            forKey: "freePlacementSlots.\(profileIndex.activeID)"
+        ) as? [String: Int] ?? [:]
 
         let defaults = UserDefaults.standard
         customApplicationSourcePaths = defaults.stringArray(forKey: LaunchpadPersistence.customSourcesKey) ?? []
@@ -648,7 +1226,11 @@ final class AppStore: ObservableObject {
     }
 
     var pageCount: Int {
-        max(1, Int(ceil(Double(max(activeDisplayItems.count, 1)) / Double(pageCapacity))))
+        if usesFreePlacement {
+            return max(1, (freePlacementSlots.values.max() ?? 0) / max(pageCapacity, 1) + 1)
+                + (freePlacementDragActive ? 1 : 0)
+        }
+        return max(1, Int(ceil(Double(max(activeDisplayItems.count, 1)) / Double(pageCapacity))))
     }
 
     var currentPage: Int {
@@ -897,6 +1479,8 @@ final class AppStore: ObservableObject {
         )
         folders = applied.folders
         itemOrderIDs = applied.order
+        freePlacementSlots = [:]
+        freePlacementRevision &+= 1
         hiddenAppIDs = applied.hidden
         layoutMode = .user
         if hiddenAppIDs != hiddenBeforeImport {
@@ -932,8 +1516,14 @@ final class AppStore: ObservableObject {
             in: layoutProfilesDirectory,
             profileID: id
         )
+        let priorSlots = freePlacementSlots
         _ = try applyLayout(document, mode: .merge, writeBackup: false)
+        freePlacementSlots = priorSlots
+        persistFreePlacementSlots()
         activeLayoutProfileID = id
+        freePlacementSlots = defaultsFreePlacementSlots(for: id)
+        reconcileFreePlacementSlots()
+        freePlacementRevision &+= 1
         try persistLayoutProfileIndex()
     }
 
@@ -1025,6 +1615,7 @@ final class AppStore: ObservableObject {
         )
         layoutProfiles.append(profile)
         activeLayoutProfileID = profile.id
+        persistFreePlacementSlots()
         layoutMode = .user
         persistLayoutMode()
         try persistLayoutProfileIndex()
@@ -1045,6 +1636,7 @@ final class AppStore: ObservableObject {
             profileID: id
         )
         layoutProfiles.removeAll { $0.id == id }
+        UserDefaults.standard.removeObject(forKey: "\(Self.freePlacementKey).\(id)")
         try persistLayoutProfileIndex()
     }
 
@@ -1230,6 +1822,14 @@ final class AppStore: ObservableObject {
             keyboardFocusID = nil
             return
         }
+        if usesFreePlacement {
+            keyboardFocusID = items.enumerated()
+                .filter { slot(for: $0.element, fallback: $0.offset) / pageCapacity == currentPage }
+                .min { slot(for: $0.element, fallback: $0.offset)
+                    < slot(for: $1.element, fallback: $1.offset) }?.element.id
+            NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+            return
+        }
         let start = min(currentPage * pageCapacity, items.count - 1)
         keyboardFocusID = items[start].id
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
@@ -1240,6 +1840,43 @@ final class AppStore: ObservableObject {
         guard !items.isEmpty else {
             keyboardFocusID = nil
             isKeyboardNavigationActive = false
+            return
+        }
+        if usesFreePlacement {
+            let indexed = items.enumerated().map { (slot: slot(for: $0.element, fallback: $0.offset), id: $0.element.id) }
+            let current = indexed.first { $0.id == keyboardFocusID && $0.slot / pageCapacity == currentPage }
+                ?? indexed.filter { $0.slot / pageCapacity == currentPage }.min { $0.slot < $1.slot }
+            guard let current else { return }
+            if !isKeyboardNavigationActive {
+                isKeyboardNavigationActive = true
+                keyboardFocusID = current.id
+                NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+                return
+            }
+            let columns = GridMetrics.columns
+            let candidates = indexed.filter { item in
+                switch direction {
+                case .left: item.slot < current.slot
+                case .right: item.slot > current.slot
+                case .up: item.slot / columns < current.slot / columns
+                case .down: item.slot / columns > current.slot / columns
+                }
+            }
+            let next = candidates.min { a, b in
+                let aDistance = abs(a.slot / columns - current.slot / columns) * 2
+                    + abs(a.slot % columns - current.slot % columns)
+                let bDistance = abs(b.slot / columns - current.slot / columns) * 2
+                    + abs(b.slot % columns - current.slot % columns)
+                return aDistance == bDistance ? a.slot < b.slot : aDistance < bDistance
+            }
+            if let next {
+                keyboardFocusID = next.id
+                if next.slot / pageCapacity != currentPage {
+                    goToPage(next.slot / pageCapacity)
+                } else {
+                    NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+                }
+            }
             return
         }
 
@@ -1637,6 +2274,16 @@ final class AppStore: ObservableObject {
             keyboardFocusID = nil
             return
         }
+        if usesFreePlacement {
+            let onPage = items.enumerated().filter {
+                slot(for: $0.element, fallback: $0.offset) / pageCapacity == page
+            }
+            keyboardFocusID = onPage.min {
+                slot(for: $0.element, fallback: $0.offset)
+                    < slot(for: $1.element, fallback: $1.offset)
+            }?.element.id
+            return
+        }
         if let id = keyboardFocusID,
            let index = items.firstIndex(where: { $0.id == id }),
            index / pageCapacity == page {
@@ -1660,6 +2307,10 @@ final class AppStore: ObservableObject {
         let item = ids.remove(at: source)
         ids.insert(item, at: min(destination, ids.endIndex))
         itemOrderIDs = ids
+        if !usesFreePlacement {
+            freePlacementSlots = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($0.element, $0.offset) })
+            persistFreePlacementSlots()
+        }
         persistItemOrder()
         reconcileLaunchpadItems()
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
@@ -1689,6 +2340,12 @@ final class AppStore: ObservableObject {
             remaining.insert(contentsOf: block, at: insertion)
             guard remaining != ids else { return }
             itemOrderIDs = remaining
+            if !usesFreePlacement {
+                freePlacementSlots = Dictionary(uniqueKeysWithValues: remaining.enumerated().map {
+                    ($0.element, $0.offset)
+                })
+                persistFreePlacementSlots()
+            }
             persistItemOrder()
         }
         reconcileLaunchpadItems()
@@ -2051,7 +2708,10 @@ final class AppStore: ObservableObject {
         let layout = LaunchpadPreferenceStore.readLayout(domain: Self.preferenceDomain)
         LaunchpadPreferenceStore.writeThroughToStandardDefaults(layout)
         itemOrderIDs = layout.itemOrder
+        freePlacementSlots = defaultsFreePlacementSlots(for: activeLayoutProfileID)
+        freePlacementRevision &+= 1
         hiddenAppIDs = Set(layout.hiddenIDs)
+        hiddenAppOrderIDs = layout.hiddenIDs
         folders = (try? LaunchpadPreferenceStore.decodeFolders(layout.foldersData)) ?? []
     }
 
@@ -2094,6 +2754,7 @@ final class AppStore: ObservableObject {
             guard let app = apps.first(where: { $0.id == id }) else { return nil }
             return .app(app)
         }
+        if !apps.isEmpty { reconcileFreePlacementSlots() }
     }
 
     private func persistLayout() {
@@ -2101,12 +2762,15 @@ final class AppStore: ObservableObject {
         // a reconcile of `apps = []` would write an empty grid over a live import.
         guard !apps.isEmpty else { return }
         guard let foldersData = try? LaunchpadPreferenceStore.encodeFolders(folders) else { return }
+        let orderedHidden = hiddenAppOrderIDs.filter { hiddenAppIDs.contains($0) }
+        let remainingHidden = hiddenAppIDs.subtracting(orderedHidden).sorted()
+        let finalHidden = orderedHidden + remainingHidden
         LaunchpadPreferenceStore.writeLayout(
             domain: Self.preferenceDomain,
             LaunchpadPersistedLayout(
                 itemOrder: itemOrderIDs,
                 foldersData: foldersData,
-                hiddenIDs: hiddenAppIDs.sorted()
+                hiddenIDs: finalHidden
             )
         )
     }

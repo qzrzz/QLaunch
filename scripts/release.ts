@@ -46,6 +46,7 @@ import {
   runCommand,
 } from "./build-app";
 import { generateAppcast } from "./generate-appcast";
+import { normalizeSparkleArchiveUrls, sparkleZipName } from "./sparkle-artifacts";
 import {
   PUBLISH_GITHUB,
   R2_ONLINE_URL,
@@ -348,42 +349,16 @@ async function prepareLocalDeltaBaselines(
   }
 }
 
-/** 读取本地 Sparkle 缓存里各历史版本的完整 ZIP 地址。 */
-function readPreviousAppcastZipUrls(): Map<string, string> {
-  const urls = new Map<string, string>();
-  if (!existsSync(RELEASE_CACHE_APPCAST_PATH)) return urls;
-  const previous = readFileSync(RELEASE_CACHE_APPCAST_PATH, "utf8");
-  for (const match of previous.matchAll(/<item>[\s\S]*?<\/item>/g)) {
-    const itemVersion = match[0].match(
-      /<sparkle:shortVersionString>([^<]+)<\/sparkle:shortVersionString>/,
-    )?.[1];
-    const archiveUrl = match[0].match(/<enclosure\s+url="([^"]+\.zip)"/)?.[1];
-    if (itemVersion && archiveUrl) urls.set(itemVersion, archiveUrl);
-  }
-  return urls;
-}
-
-/** 当前版本 ZIP 改写到 R2；历史 item 恢复 generate_appcast 之前的原始 URL。 */
-async function normalizeAppcastArchiveUrls(path: string, version: string): Promise<void> {
+/** 当前 ZIP 使用独立 build 地址，历史地址按 build 恢复。 */
+async function normalizeAppcastArchiveUrls(path: string, version: string, build: string): Promise<void> {
   const original = readFileSync(path, "utf8");
-  const previousZipByVersion = readPreviousAppcastZipUrls();
-  const normalized = original.replace(/<item>[\s\S]*?<\/item>/g, (item): string => {
-    const itemVersion = item.match(
-      /<sparkle:shortVersionString>([^<]+)<\/sparkle:shortVersionString>/,
-    )?.[1];
-    if (!itemVersion || !/^[0-9A-Za-z.+-]+$/.test(itemVersion)) return item;
-    const archiveUrl =
-      itemVersion === version
-        ? r2PublicUrl(ARTIFACT_PREFIX + "-" + itemVersion + ".zip")
-        : previousZipByVersion.get(itemVersion);
-    if (!archiveUrl) return item;
-    return item
-      .replace(/<title>[^<]*<\/title>/, "<title>" + itemVersion + "</title>")
-      .replace(/(<enclosure\s+url=")[^"]+\.zip(")/, "$1" + archiveUrl + "$2");
-  });
-  if (normalized !== original) {
-    await Bun.write(path, normalized);
-  }
+  const previous = existsSync(RELEASE_CACHE_APPCAST_PATH)
+    ? readFileSync(RELEASE_CACHE_APPCAST_PATH, "utf8")
+    : "";
+  const normalized = normalizeSparkleArchiveUrls(
+    original, previous, build, r2PublicUrl(sparkleZipName(version, build)),
+  );
+  if (normalized !== original) await Bun.write(path, normalized);
 }
 
 async function writeReleaseCacheManifest(manifest: ReleaseCacheManifest): Promise<void> {
@@ -473,7 +448,7 @@ async function generateSparkleUpdates(options: {
   sign: boolean;
 }): Promise<{ zipPath: string; notesPath: string; appcastPath: string }> {
   const { appPath, version, buildNumber, notes, env, sign } = options;
-  const zipName = ARTIFACT_PREFIX + "-" + version + ".zip";
+  const zipName = sparkleZipName(version, buildNumber);
   const notesName = ARTIFACT_PREFIX + "-" + version + ".md";
   const zipPath = join(UPDATES_DIR, zipName);
   const notesPath = join(UPDATES_DIR, notesName);
@@ -512,7 +487,7 @@ async function generateSparkleUpdates(options: {
       },
       ROOT_DIR,
     );
-    await normalizeAppcastArchiveUrls(appcastPath, version);
+    await normalizeAppcastArchiveUrls(appcastPath, version, buildNumber);
   } else {
     writeFileSync(
       appcastPath,
@@ -528,14 +503,14 @@ async function generateSparkleUpdates(options: {
   return { zipPath, notesPath, appcastPath };
 }
 
-function collectReleaseAssets(version: string): {
+function collectReleaseAssets(version: string, buildNumber: string): {
   dmgPath: string;
   zipPath: string;
   notesPath: string;
   appcastPath: string;
 } {
   const dmgPath = join(ROOT_DIR, "build/QLaunch-" + version + ".dmg");
-  const zipPath = join(UPDATES_DIR, ARTIFACT_PREFIX + "-" + version + ".zip");
+  const zipPath = join(UPDATES_DIR, sparkleZipName(version, buildNumber));
   const notesPath = join(UPDATES_DIR, ARTIFACT_PREFIX + "-" + version + ".md");
   const appcastPath = join(UPDATES_DIR, "appcast.xml");
   const required = [dmgPath, zipPath, notesPath, appcastPath];
@@ -605,7 +580,7 @@ async function publishExistingBuild(
   force = false,
 ): Promise<void> {
   const repository = env.GITHUB_REPOSITORY || DEFAULT_GITHUB_REPOSITORY;
-  const { dmgPath, zipPath, notesPath, appcastPath } = collectReleaseAssets(version);
+  const { dmgPath, zipPath, notesPath, appcastPath } = collectReleaseAssets(version, buildNumber);
   const changelog = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
   console.log("\n📦 QLaunch 补发 QRls 发布");
   console.log("▸ 版本: " + version + " | Build: " + buildNumber);

@@ -12,6 +12,7 @@ extension Notification.Name {
     static let qlaunchpadCacheClearRequested = Notification.Name("QLaunchpadCacheClearRequested")
     static let qlaunchpadRenderQualityChanged = Notification.Name("QLaunchpadRenderQualityChanged")
     static let qlaunchpadBackgroundChanged = Notification.Name("QLaunchpadBackgroundChanged")
+    static let qlaunchpadOpenOrganizer = Notification.Name("QLaunchpadOpenOrganizer")
     /// Posted when a background icon bake finishes (may batch multiple).
     static let qlaunchpadIconTexturesUpdated = Notification.Name("QLaunchpadIconTexturesUpdated")
 }
@@ -245,10 +246,12 @@ final class LaunchpadContainerView: NSView {
     private let backgroundView: DesktopBackgroundView
     private let metalView: LaunchpadMetalView
     private let overlayView: PassthroughHostingView<LaunchpadOverlayView>
+    private var organizeView: OrganizeModeView?
     private var cancellables = Set<AnyCancellable>()
 
     var metal: LaunchpadMetalView { metalView }
     var background: DesktopBackgroundView { backgroundView }
+    var isOrganizing: Bool { organizeView != nil }
 
     init(store: AppStore) {
         self.store = store
@@ -309,6 +312,12 @@ final class LaunchpadContainerView: NSView {
             name: .qlaunchpadCacheClearRequested,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(showOrganizer),
+            name: .qlaunchpadOpenOrganizer,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) {
@@ -353,7 +362,39 @@ final class LaunchpadContainerView: NSView {
         backgroundView.clearCacheAndReload()
     }
 
+    @objc private func showOrganizer() {
+        guard organizeView == nil, store.allowsUserLayoutEditing,
+              store.openedFolderID == nil else { return }
+        let view = OrganizeModeView(store: store) { [weak self] in
+            self?.hideOrganizer()
+        }
+        view.frame = bounds
+        addSubview(view)
+        view.layoutSubtreeIfNeeded()
+        organizeView = view
+        metalView.alphaValue = 0
+        metalView.isHidden = true
+        backgroundView.isHidden = true
+        overlayView.alphaValue = 0
+        overlayView.isHidden = true
+        window?.makeFirstResponder(self)
+    }
+
+    func hideOrganizer() {
+        guard let organizeView else { return }
+        organizeView.removeFromSuperview()
+        self.organizeView = nil
+        metalView.isHidden = false
+        backgroundView.isHidden = false
+        overlayView.isHidden = false
+        if store.isPresented {
+            metalView.alphaValue = 1
+            overlayView.alphaValue = 1
+        }
+    }
+
     private func syncOverlayAlpha() {
+        guard !isOrganizing else { return }
         // Keep overlay in sync if presentationProgress is driven from Metal.
         if store.presentation == .visible {
             overlayView.alphaValue = 1
@@ -372,6 +413,7 @@ final class LaunchpadContainerView: NSView {
         backgroundView.frame = bounds
         metalView.frame = bounds
         overlayView.frame = bounds
+        organizeView?.frame = bounds
     }
 
     override var acceptsFirstResponder: Bool { true }
@@ -381,6 +423,10 @@ final class LaunchpadContainerView: NSView {
     override func keyDown(with event: NSEvent) {
         // Esc
         if event.keyCode == 53 {
+            if isOrganizing {
+                hideOrganizer()
+                return
+            }
             NotificationCenter.default.post(name: .qlaunchpadDismiss, object: nil)
             return
         }
@@ -408,6 +454,7 @@ final class LaunchpadContainerView: NSView {
         on screen: NSScreen,
         animationStyle _: LaunchpadAnimationStyle
     ) {
+        hideOrganizer()
         setPresentationScale(1)
         // Hide any drawable retained from the previous presentation until Metal
         // confirms that the new animation's transparent start frame is ready.
@@ -422,6 +469,7 @@ final class LaunchpadContainerView: NSView {
     }
 
     func hideImmediately() {
+        hideOrganizer()
         [backgroundView, metalView, overlayView].forEach { view in
             view.layer?.removeAllAnimations()
             view.alphaValue = 0
