@@ -223,3 +223,20 @@
 "error.icon.download" = "アイコンをダウンロードできません";
 "error.icon.downloadsDirectory" = "ダウンロードフォルダが見つかりません。";
 "error.icon.generate" = "アイコン画像を生成できません。";
+
+"context.appNote" = "メモ";
+"appNote.description" = "メモは検索に使用されます。";
+
+"settings.trackpad.title" = "トラックパッドジェスチャ";
+"settings.trackpad.detail" = "指をピンチして QLaunch を開きます。";
+"settings.trackpad.disabled" = "オフ";
+"settings.trackpad.fourOrFive" = "4 本指または 5 本指でピンチ（デフォルト）";
+"settings.trackpad.three" = "3 本指でピンチ";
+"settings.trackpad.five" = "5 本指でピンチ";
+"settings.trackpad.compatibility" = "システムのアプリ一覧も開く場合は、3 本指または 5 本指をお試しください。";
+"settings.trackpad.unavailable" = "対応するトラックパッドが見つからないか、このシステムでは利用できません。";
+
+"appRename.description" = "カスタム名は表示と検索に使用されます。";
+"appRename.name" = "アプリ名";
+"appRename.defaultName" = "デフォルト名";
+"appRename.confirm" = "OK";

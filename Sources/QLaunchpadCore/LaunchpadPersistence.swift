@@ -1,6 +1,8 @@
 import Foundation
 
 public enum LaunchpadPersistence {
+    public static let appNotesKey = "applicationNotes"
+    public static let appNamesKey = "applicationCustomNames"
     public static let hiddenAppsKey = "hiddenAppIdentifiers"
     public static let customSourcesKey = "customApplicationSourcePaths"
     public static let showHiddenAppsKey = "showHiddenAppsInSearch"

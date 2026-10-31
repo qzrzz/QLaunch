@@ -7,6 +7,14 @@ final class LaunchpadPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     override func keyDown(with event: NSEvent) {
+        if let sheet = attachedSheet {
+            if event.keyCode == 53 {
+                endSheet(sheet, returnCode: .alertSecondButtonReturn)
+                return
+            }
+            super.keyDown(with: event)
+            return
+        }
         if event.keyCode == 53 {
             if let container = contentView as? LaunchpadContainerView, container.isOrganizing {
                 container.hideOrganizer()
@@ -74,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.load()
         installHotKey()
         installHotCorner()
+        installTrackpadGesture()
         installStatusItem()
         NotificationCenter.default.addObserver(
             self,
@@ -157,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         LaunchpadHotKeyCenter.shared.uninstall()
         LaunchpadHotCornerCenter.shared.uninstall()
+        LaunchpadGestureCenter.shared.uninstall()
         if let localHotKeyMonitor { NSEvent.removeMonitor(localHotKeyMonitor) }
         DistributedNotificationCenter.default().removeObserver(
             self,
@@ -296,6 +306,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         center.install()
     }
 
+    private func installTrackpadGesture() {
+        let center = LaunchpadGestureCenter.shared
+        center.onTrigger = { [weak self] in
+            guard let self, !self.store.isPresented, self.launchpadPanel?.isVisible != true else { return }
+            self.showLaunchpad()
+            self.updateStatusMenu()
+        }
+        center.install()
+    }
+
     @objc private func hotCornerChanged() {
         LaunchpadHotCornerCenter.shared.reloadWindows()
     }
@@ -308,7 +328,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard self.launchpadPanel.isVisible else { return event }
             // A sheet or Settings window may be key while Launchpad remains
             // visible. Let that window handle Return/arrows normally.
-            guard self.launchpadPanel.isKeyWindow else { return event }
+            guard self.launchpadPanel.attachedSheet == nil,
+                  self.launchpadPanel.isKeyWindow else { return event }
 
             // Do not steal arrows/Return while an IME candidate window is active.
             if let editor = self.launchpadPanel.firstResponder as? NSTextView,

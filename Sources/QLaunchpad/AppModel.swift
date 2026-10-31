@@ -86,7 +86,8 @@ enum LaunchpadHotKeyPreferences {
 
 struct AppInfo: Identifiable, Hashable, Sendable {
     let id: String
-    let name: String
+    let appName: AppName
+    var name: String { appName.display }
     let url: URL
     /// Pre-normalized once because icon cache lookups run for every visible item
     /// on every frame.
@@ -95,7 +96,7 @@ struct AppInfo: Identifiable, Hashable, Sendable {
     /// Search metadata generated once while the application catalog is built.
     /// Full pinyin and initials include polyphone variants so 音乐 matches
     /// both `yy` / `yinyue` and the Unihan default `yl` / `yinle`.
-    let pinyin: PinyinSearchMetadata
+    var pinyin: PinyinSearchMetadata { appName.pinyin }
     let installedAt: Date?
     let lastUsedAt: Date?
 
@@ -106,16 +107,22 @@ struct AppInfo: Identifiable, Hashable, Sendable {
         bundleIdentifier: String,
         pinyin: PinyinSearchMetadata? = nil,
         installedAt: Date? = nil,
-        lastUsedAt: Date? = nil
+        lastUsedAt: Date? = nil,
+        customName: String? = nil
     ) {
         self.id = id
-        self.name = name
+        self.appName = AppName(original: name, custom: customName, originalPinyin: pinyin)
         self.url = url
         self.resourceSourcePath = url.standardizedFileURL.path
         self.bundleIdentifier = bundleIdentifier
-        self.pinyin = pinyin ?? PinyinSearchMetadata.make(for: name)
         self.installedAt = installedAt
         self.lastUsedAt = lastUsedAt
+    }
+
+    func withCustomName(_ customName: String?) -> AppInfo {
+        AppInfo(id: id, name: appName.original, url: url, bundleIdentifier: bundleIdentifier,
+                pinyin: appName.originalPinyin, installedAt: installedAt, lastUsedAt: lastUsedAt,
+                customName: customName)
     }
 }
 
@@ -509,6 +516,11 @@ final class AppStore: ObservableObject {
     @Published private(set) var openedFolderID: String?
     @Published private(set) var isDraggingFolderApp = false
     @Published private(set) var isFolderRemovalTargeted = false
+    private var appNotes: [String: String]
+    lazy var noteEditor = AppNoteEditor(store: self)
+    private var appCustomNames: [String: String]
+    lazy var renameEditor = AppRenameEditor(store: self)
+
     @Published private(set) var searchText = ""
     @Published private(set) var isLoading = true
     @Published private(set) var isApplyingRenderQuality = false
@@ -1206,6 +1218,8 @@ final class AppStore: ObservableObject {
         ) as? [String: Int] ?? [:]
 
         let defaults = UserDefaults.standard
+        appNotes = defaults.dictionary(forKey: LaunchpadPersistence.appNotesKey) as? [String: String] ?? [:]
+        appCustomNames = defaults.dictionary(forKey: LaunchpadPersistence.appNamesKey) as? [String: String] ?? [:]
         customApplicationSourcePaths = defaults.stringArray(forKey: LaunchpadPersistence.customSourcesKey) ?? []
         showHiddenAppsInSearch = defaults.bool(forKey: LaunchpadPersistence.showHiddenAppsKey)
         layoutMode = LaunchpadLayoutMode(
@@ -1352,10 +1366,14 @@ final class AppStore: ObservableObject {
         let generationAtStart = layoutGeneration
         let additionalRoots = customApplicationSourcePaths.map { URL(fileURLWithPath: $0) }
         scanTask = Task { @MainActor [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
+            let scanned = await Task.detached(priority: .userInitiated) {
                 AppScanner.scan(additionalRoots: additionalRoots)
             }.value
             guard let self else { return }
+            // Apply the latest names after scanning, including edits made while it ran.
+            let result = scanned.map { app in
+                app.withCustomName(self.appCustomNames[app.id])
+            }
             let catalogChanged = apps != result
             let affectedAutoLayouts: Set<LaunchpadAutoLayoutKind> = catalogChanged
                 ? autoLayoutsAffectedByCatalogChange(from: apps, to: result)
@@ -1659,6 +1677,32 @@ final class AppStore: ObservableObject {
         refreshFilteredApps(resetPage: false)
         layoutLogger.info("layout.reload from distributed notification")
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func note(for appID: String) -> String {
+        appNotes[appID] ?? ""
+    }
+
+    func setCustomName(_ name: String, for appID: String) {
+        guard let index = apps.firstIndex(where: { $0.id == appID }) else { return }
+        let renamed = apps[index].withCustomName(name)
+        guard renamed != apps[index] else { return }
+        appCustomNames[appID] = renamed.appName.custom
+        UserDefaults.standard.set(appCustomNames, forKey: LaunchpadPersistence.appNamesKey)
+        apps[index] = renamed
+        appsByID[appID] = renamed
+        rebuildLaunchpadItems()
+        invalidateAllAutoLayouts()
+        refreshFilteredApps(resetPage: false)
+        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    }
+
+    func setNote(_ note: String, for appID: String) {
+        let value = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value != self.note(for: appID) else { return }
+        appNotes[appID] = value.isEmpty ? nil : value
+        UserDefaults.standard.set(appNotes, forKey: LaunchpadPersistence.appNotesKey)
+        refreshFilteredApps(resetPage: false)
     }
 
     func updateSearch(_ text: String) {
@@ -2656,7 +2700,10 @@ final class AppStore: ObservableObject {
             guard let rank = matcher.rank(
                 name: app.name,
                 bundleIdentifier: app.bundleIdentifier,
-                pinyin: app.pinyin
+                pinyin: app.pinyin,
+                note: note(for: app.id),
+                alternateName: app.appName.custom == nil ? nil : app.appName.original,
+                alternatePinyin: app.appName.custom == nil ? .empty : app.appName.originalPinyin
             ) else {
                 return nil
             }

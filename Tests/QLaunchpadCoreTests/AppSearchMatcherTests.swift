@@ -2,6 +2,42 @@ import XCTest
 @testable import QLaunchpadCore
 
 final class AppSearchMatcherTests: XCTestCase {
+    func testNotesAreSearchableWithoutMatchingApplicationName() {
+        XCTAssertEqual(AppSearchMatcher(query: "修图").rank(
+            name: "Adobe Photoshop",
+            bundleIdentifier: "com.adobe.photoshop",
+            pinyin: .empty,
+            note: "工作用的修图工具"
+        ), .existingMetadata)
+    }
+
+    func testNoteMatchingIgnoresCaseAndDiacritics() {
+        XCTAssertEqual(AppSearchMatcher(query: " CAFE ").rank(
+            name: "Notes",
+            bundleIdentifier: "com.example.notes",
+            pinyin: .empty,
+            note: "Café planning"
+        ), .existingMetadata)
+    }
+
+    func testNameRankingIsPreservedWhenNoteAlsoMatches() {
+        XCTAssertEqual(AppSearchMatcher(query: "Notes").rank(
+            name: "Notes",
+            bundleIdentifier: "com.example.notes",
+            pinyin: .empty,
+            note: "Meeting notes"
+        ), .exactName)
+    }
+
+    func testRemovingNoteRemovesItsSearchMatch() {
+        XCTAssertNil(AppSearchMatcher(query: "修图").rank(
+            name: "Adobe Photoshop",
+            bundleIdentifier: "com.adobe.photoshop",
+            pinyin: .empty,
+            note: ""
+        ))
+    }
+
     func testOrderedLettersMatchAdobePhotoshop() {
         let matcher = AppSearchMatcher(query: "ps")
         let rank = matcher.rank(

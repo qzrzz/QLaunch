@@ -223,3 +223,20 @@
 "error.icon.download" = "无法下载图标";
 "error.icon.downloadsDirectory" = "找不到下载目录。";
 "error.icon.generate" = "无法生成图标图片。";
+
+"context.appNote" = "备注";
+"appNote.description" = "备注会在搜索时用到";
+
+"settings.trackpad.title" = "触摸板手势";
+"settings.trackpad.detail" = "捏合手指唤起 QLaunch。";
+"settings.trackpad.disabled" = "关闭";
+"settings.trackpad.fourOrFive" = "四指或五指捏合（默认）";
+"settings.trackpad.three" = "三指捏合";
+"settings.trackpad.five" = "五指捏合";
+"settings.trackpad.compatibility" = "若与系统启动台冲突，请尝试三指或五指。";
+"settings.trackpad.unavailable" = "未检测到可用的触摸板，或当前系统不支持。";
+
+"appRename.description" = "自定义名称用于显示和搜索。";
+"appRename.name" = "应用名称";
+"appRename.defaultName" = "默认名称";
+"appRename.confirm" = "确定";

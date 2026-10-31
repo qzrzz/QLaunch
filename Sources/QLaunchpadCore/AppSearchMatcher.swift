@@ -24,7 +24,7 @@ public struct AppSearchMatcher: Sendable {
         self.compactQuery = Self.compact(normalizedQuery)
     }
 
-    /// Ranks an app's existing name, bundle identifier, and pinyin search matches.
+    /// Ranks display/original names, note, bundle identifier and both names' pinyin.
     ///
     /// Ordered-character matching removes spaces and punctuation from the app name,
     /// then checks that every query character appears in order. For example, `ps`
@@ -32,28 +32,35 @@ public struct AppSearchMatcher: Sendable {
     public func rank(
         name: String,
         bundleIdentifier: String,
-        pinyin: PinyinSearchMetadata
+        pinyin: PinyinSearchMetadata,
+        note: String = "",
+        alternateName: String? = nil,
+        alternatePinyin: PinyinSearchMetadata = .empty
     ) -> AppSearchMatchRank? {
         guard !query.isEmpty else { return nil }
 
         let normalizedName = Self.normalize(name)
-        if normalizedName == query {
+        let normalizedAlternate = alternateName.map(Self.normalize) ?? ""
+        if normalizedName == query || normalizedAlternate == query {
             return .exactName
         }
-        if normalizedName.hasPrefix(query) {
+        if normalizedName.hasPrefix(query) || normalizedAlternate.hasPrefix(query) {
             return .namePrefix
         }
-        if normalizedName.contains(query) {
+        if normalizedName.contains(query) || normalizedAlternate.contains(query) {
             return .nameSubstring
         }
 
-        if Self.normalize(bundleIdentifier).contains(query)
-            || pinyin.matches(compactQuery) {
+        if Self.normalize(note).contains(query)
+            || Self.normalize(bundleIdentifier).contains(query)
+            || pinyin.matches(compactQuery)
+            || alternatePinyin.matches(compactQuery) {
             return .existingMetadata
         }
 
         guard !compactQuery.isEmpty,
-              Self.containsInOrder(compactQuery, in: Self.compact(normalizedName)) else {
+              Self.containsInOrder(compactQuery, in: Self.compact(normalizedName))
+                || Self.containsInOrder(compactQuery, in: Self.compact(normalizedAlternate)) else {
             return nil
         }
         return .orderedCharacters

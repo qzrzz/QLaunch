@@ -972,14 +972,23 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private func syncPagePanToMouse() {
         guard isPanningPage, let window else { return }
         guard (NSEvent.pressedMouseButtons & 1) != 0 else {
-            isPanningPage = false
-            isSpacePanning = false
-            isMouseDown = false
-            updateSpaceCursor()
+            finishPagePanAfterMissedMouseUp()
             return
         }
         let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
         applyPagePan(at: convert(windowPoint, from: nil))
+    }
+
+    private func finishPagePanAfterMissedMouseUp() {
+        guard isPanningPage else { return }
+        if !GridLayoutPreset.current.isInfiniteCanvas {
+            store.endPagePan()
+        }
+        isPanningPage = false
+        isSpacePanning = false
+        isMouseDown = false
+        startDisplayLink()
+        updateSpaceCursor()
     }
 
     private func applyPagePan(at point: CGPoint) {
@@ -2201,7 +2210,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         for item in items {
             switch item {
             case .app(let app):
-                append(app)
+                // Visible / resident snapshots preserve stable IDs across edits.
+                // Resolve current names before comparing or baking text atlases.
+                append(store.app(withID: app.id) ?? app)
             case .folder(let folder):
                 // `displayedItems` intentionally keeps ID-stable snapshots while
                 // the grid is animating. Resolve folder labels from the store so
@@ -4489,10 +4500,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     override func mouseMoved(with event: NSEvent) {
         if isPanningPage && (NSEvent.pressedMouseButtons & 1) == 0 {
-            isPanningPage = false
-            isSpacePanning = false
-            isMouseDown = false
-            updateSpaceCursor()
+            finishPagePanAfterMissedMouseUp()
         }
         updateCanvasEdgePointer(with: event)
         if GridLayoutPreset.current.isInfiniteCanvas {
@@ -4871,12 +4879,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     private func makeAppContextMenu(for app: AppInfo) -> NSMenu {
+        let app = store.app(withID: app.id) ?? app
         contextMenuFolder = nil
         contextMenuApp = app
         store.focusApp(id: app.id)
         needsDisplay = true
 
         let menu = NSMenu(title: app.name)
+        store.renameEditor.addMenuItem(to: menu, app: app, window: window)
+        store.noteEditor.addMenuItem(to: menu, app: app, window: window)
         menu.addItem(withTitle: L10n.tr("common.open"), action: #selector(openContextMenuApp), keyEquivalent: "")
         menu.addItem(withTitle: L10n.tr("common.revealInFinder"), action: #selector(revealContextMenuApp), keyEquivalent: "")
         menu.addItem(withTitle: L10n.tr("context.showInfo"), action: #selector(showContextMenuAppInfo), keyEquivalent: "")
@@ -4932,7 +4943,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         menu.addItem(.separator())
         let hideItem = menu.addItem(withTitle: L10n.tr("common.hide"), action: #selector(hideContextMenuApp), keyEquivalent: "")
         hideItem.isEnabled = !store.hiddenAppIDs.contains(app.id)
-        for item in menu.items where item.action != nil {
+        for item in menu.items where item.action != nil && item.target == nil {
             item.target = self
         }
         addOrganizeMenuItem(to: menu)
@@ -5619,7 +5630,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             case .keyUp:
                 isSpaceKeyDown = false
                 if (NSEvent.pressedMouseButtons & 1) == 0 {
-                    isPanningPage = false
+                    finishPagePanAfterMissedMouseUp()
                     isSpacePanning = false
                     isMouseDown = false
                 }
@@ -5632,7 +5643,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             if isSpaceKeyDown {
                 isSpaceKeyDown = false
                 if (NSEvent.pressedMouseButtons & 1) == 0 {
-                    isPanningPage = false
+                    finishPagePanAfterMissedMouseUp()
                     isSpacePanning = false
                     isMouseDown = false
                 }

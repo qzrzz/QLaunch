@@ -223,3 +223,20 @@
 "error.icon.download" = "아이콘을 다운로드할 수 없음";
 "error.icon.downloadsDirectory" = "다운로드 폴더를 찾을 수 없습니다.";
 "error.icon.generate" = "아이콘 이미지를 생성할 수 없습니다.";
+
+"context.appNote" = "메모";
+"appNote.description" = "메모는 검색에 사용됩니다.";
+
+"settings.trackpad.title" = "트랙패드 제스처";
+"settings.trackpad.detail" = "손가락을 오므려 QLaunch를 엽니다.";
+"settings.trackpad.disabled" = "끔";
+"settings.trackpad.fourOrFive" = "네 손가락 또는 다섯 손가락 오므리기 (기본)";
+"settings.trackpad.three" = "세 손가락 오므리기";
+"settings.trackpad.five" = "다섯 손가락 오므리기";
+"settings.trackpad.compatibility" = "시스템 앱 목록도 열리면 세 손가락 또는 다섯 손가락을 사용해 보세요.";
+"settings.trackpad.unavailable" = "호환되는 트랙패드를 찾을 수 없거나 이 시스템에서 지원하지 않습니다.";
+
+"appRename.description" = "사용자 지정 이름은 표시 및 검색에 사용됩니다.";
+"appRename.name" = "앱 이름";
+"appRename.defaultName" = "기본 이름";
+"appRename.confirm" = "확인";

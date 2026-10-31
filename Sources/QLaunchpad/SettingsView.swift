@@ -41,7 +41,7 @@ struct SettingsView: View {
             .safeAreaInset(edge: .top) {
                 Color.clear.frame(height: 28)
             }
-            .background(Color(nsColor: .underPageBackgroundColor))
+            .background(SettingsSidebarBackground())
             .frame(width: 140)
 
             Divider()
@@ -82,6 +82,18 @@ struct SettingsView: View {
     }
 }
 
+private struct SettingsSidebarBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .withinWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+}
+
 private struct GeneralSettingsView: View {
     @ObservedObject var store: AppStore
     @ObservedObject private var language = LocalizationManager.shared
@@ -106,6 +118,9 @@ private struct GeneralSettingsView: View {
     private var presentationAnimationStyle = LaunchpadAnimationStyle.fly.rawValue
     @AppStorage(HotCornerPreferences.positionKey)
     private var hotCornerPosition = HotCornerPreferences.defaultPosition.rawValue
+    @AppStorage(TrackpadGesturePreferences.modeKey)
+    private var trackpadGestureMode = TrackpadGesturePreferences.defaultMode.rawValue
+    @ObservedObject private var trackpadGestures = LaunchpadGestureCenter.shared
     @State private var launchAtLogin = false
     @State private var launchAtLoginNeedsApproval = false
     @State private var didClearCache = false
@@ -186,6 +201,26 @@ private struct GeneralSettingsView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                }
+
+                Picker(selection: $trackpadGestureMode) {
+                    ForEach(TrackpadGestureMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L10n.tr("settings.trackpad.title"))
+                        Text(L10n.tr("settings.trackpad.detail"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if trackpadGestureMode != TrackpadGestureMode.disabled.rawValue {
+                    Text(L10n.tr(trackpadGestures.unavailable ? "settings.trackpad.unavailable" : "settings.trackpad.compatibility"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 

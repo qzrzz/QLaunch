@@ -908,6 +908,8 @@ private final class HiddenShelfGridView: NSView {
         guard let app = store.app(withID: appID) else { return nil }
 
         let menu = NSMenu(title: app.name)
+        store.renameEditor.addMenuItem(to: menu, app: app, window: window)
+        store.noteEditor.addMenuItem(to: menu, app: app, window: window)
         let unhideItem = menu.addItem(
             withTitle: L10n.tr("organize.action.hide.unhide"),
             action: #selector(handleMenuUnhide(_:)),
@@ -1927,6 +1929,8 @@ private final class OrganizeCanvasView: NSView {
 
     private func makeAppContextMenu(for app: AppInfo) -> NSMenu {
         let menu = NSMenu(title: app.name)
+        store.renameEditor.addMenuItem(to: menu, app: app, window: window)
+        store.noteEditor.addMenuItem(to: menu, app: app, window: window)
 
         let openItem = menu.addItem(
             withTitle: L10n.tr("common.open"),
@@ -2805,6 +2809,8 @@ private final class FolderGridView: NSView {
         guard let app = store.app(withID: appID) else { return nil }
 
         let menu = NSMenu()
+        store.renameEditor.addMenuItem(to: menu, app: app, window: window)
+        store.noteEditor.addMenuItem(to: menu, app: app, window: window)
         let openItem = menu.addItem(
             withTitle: L10n.tr("common.open"),
             action: #selector(contextOpenApp(_:)),

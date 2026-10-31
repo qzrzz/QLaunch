@@ -15,12 +15,17 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CMultitouch",
+            path: "Sources/CMultitouch"
+        ),
+        .target(
             name: "QLaunchpadCore",
             path: "Sources/QLaunchpadCore"
         ),
         .executableTarget(
             name: "QLaunchpad",
             dependencies: [
+                "CMultitouch",
                 "QLaunchpadCore",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
