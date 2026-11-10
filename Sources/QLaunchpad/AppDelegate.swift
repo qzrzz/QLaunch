@@ -70,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.load()
         installHotKey()
         installHotCorner()
+        installTrackpadPinch()
         installStatusItem()
         NotificationCenter.default.addObserver(
             self,
@@ -153,6 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         LaunchpadHotKeyCenter.shared.uninstall()
         LaunchpadHotCornerCenter.shared.uninstall()
+        TrackpadPinchMonitor.shared.uninstall()
         if let localHotKeyMonitor { NSEvent.removeMonitor(localHotKeyMonitor) }
         DistributedNotificationCenter.default().removeObserver(
             self,
@@ -290,6 +292,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         center.install()
+    }
+
+    private func installTrackpadPinch() {
+        let monitor = TrackpadPinchMonitor.shared
+        monitor.onPinchIn = { [weak self] in
+            guard let self else { return }
+            if !self.store.isPresented && self.launchpadPanel?.isVisible != true {
+                self.showLaunchpad()
+                self.updateStatusMenu()
+            }
+        }
+        monitor.onPinchOut = { [weak self] in
+            guard let self else { return }
+            if self.store.isPresented || self.launchpadPanel?.isVisible == true {
+                self.dismissLaunchpad()
+                self.updateStatusMenu()
+            }
+        }
+        monitor.install()
     }
 
     @objc private func hotCornerChanged() {

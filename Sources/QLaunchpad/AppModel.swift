@@ -596,7 +596,16 @@ final class AppStore: ObservableObject {
     }
 
     /// Points of scroll delta that equal one full page turn.
-    private let pageScrollUnit: Double = 320
+    /// Points of trackpad travel per page. Larger = less sensitive.
+    private var pageScrollUnit: Double {
+        let v = UserDefaults.standard.double(forKey: "pageScrollUnit")
+        return v > 0 ? v : 560
+    }
+    /// Flick speed (pages/sec) needed to turn a page. Larger = fewer accidental flips.
+    private var trackpadFlickThreshold: Double {
+        let v = UserDefaults.standard.double(forKey: "trackpadFlickThreshold")
+        return v > 0 ? v : 1.5
+    }
     private let scrollAxisLockPoints: Double = 8
 
     private var itemOrderIDs: [String]
@@ -1564,9 +1573,9 @@ final class AppStore: ObservableObject {
         var page = pageOffset
 
         // Flick threshold ≈ 0.85 pages/sec.
-        if velocity > LaunchpadPageSnap.trackpadFlickThreshold {
+        if velocity > trackpadFlickThreshold {
             page = floor(pageOffset + 0.08) + 1
-        } else if velocity < -LaunchpadPageSnap.trackpadFlickThreshold {
+        } else if velocity < -trackpadFlickThreshold {
             page = ceil(pageOffset - 0.08) - 1
         } else {
             page = pageOffset.rounded()
