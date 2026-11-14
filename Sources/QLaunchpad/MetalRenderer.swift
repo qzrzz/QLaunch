@@ -355,6 +355,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDel
     private var pendingAutoLayoutReorderHint = false
     /// View-space origin of the current empty-area page pan (1:1 with the pointer).
     private var panStartPoint: CGPoint = .zero
+    /// False until the pointer leaves the drag dead zone. Until then an
+    /// empty-area press stays a click, so the page does not follow jitter.
+    private var isPagePanActivated = false
+    /// Minimum travel before a press becomes a drag or pan. Direct touch
+    /// jitters more than a mouse, so a tap needs a wider dead zone.
+    private var dragActivationThreshold: CGFloat {
+        touchInteractionActive ? 12 : 6
+    }
     private var contextMenuApp: AppInfo?
     private var contextMenuFolder: AppFolder?
     private var activeFolderRenameAlert: NSAlert?
@@ -958,6 +966,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDel
 
     private func beginEmptyAreaPagePan(from point: CGPoint) {
         isPanningPage = true
+        isPagePanActivated = false
         panStartPoint = point
         if GridLayoutPreset.current.isInfiniteCanvas {
             synchronizeCanvasStateIfNeeded(itemCount: displayedItems.count)
@@ -1013,7 +1022,13 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDel
     }
 
     private func applyPagePan(at point: CGPoint) {
-        if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 { didDrag = true }
+        if !isPagePanActivated {
+            guard hypot(point.x - dragStart.x, point.y - dragStart.y) > dragActivationThreshold else { return }
+            // Keep `panStartPoint`: once past the dead zone the page catches
+            // up and stays 1:1 with the pointer, even after a coalesced jump.
+            isPagePanActivated = true
+            didDrag = true
+        }
         if GridLayoutPreset.current.isInfiniteCanvas {
             let metrics = infiniteCanvasMetrics(itemCount: displayedItems.count)
             let proposed = CGPoint(
@@ -3943,9 +3958,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDel
     private func synchronizeCanvasStateIfNeeded(itemCount: Int) {
         let preset = GridLayoutPreset.current
         guard preset.isInfiniteCanvas else {
+            // This runs on every paged frame. Reset canvas motion only when
+            // leaving the infinite canvas: `resetCanvasMotion` also clears
+            // `isMouseDown`, and doing that mid-click makes `endInteraction`
+            // drop the mouse-up, so a blank click neither dismisses nor ends
+            // its page pan.
             if canvasStatePreset?.isInfiniteCanvas == true {
                 currentPageOffset = store.pageOffset
                 frozenPageOffset = store.pageOffset
+                resetCanvasMotion()
             }
             canvasStatePreset = preset
             canvasStateItemCount = 0
@@ -3953,7 +3974,6 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDel
             canvasStateUsesAdaptiveLayout = false
             canvasStateSize = .zero
             store.setInfiniteCanvasNavigationColumns(InfiniteCanvasMetrics.columns)
-            resetCanvasMotion()
             return
         }
         // Freeze the outgoing geometry while it fades away. Incoming search
@@ -4619,8 +4639,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDel
             touchInteractionActive = true
             let translation = recognizer.translation(in: self)
             beginInteraction(at: CGPoint(x: point.x - translation.x, y: point.y - translation.y))
+            // Do not force `didDrag`: a tap with finger jitter can begin the
+            // pan recognizer, and must still exit like a blank click.
             continueInteraction(at: point)
-            didDrag = true
         case .changed:
             guard touchInteractionActive else { return }
             continueInteraction(at: point)
@@ -5516,7 +5537,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDel
         }
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
         canvasEdgePointer = dragPoint
-        if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 {
+        if hypot(point.x - dragStart.x, point.y - dragStart.y) > dragActivationThreshold {
             didDrag = true
             if draggedAppID != nil && store.usesFreePlacement {
                 store.setFreePlacementDragActive(true)
