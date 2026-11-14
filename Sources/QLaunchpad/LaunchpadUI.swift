@@ -18,12 +18,63 @@ extension Notification.Name {
 }
 
 /// Overlay hosting view that only intercepts hits in the search / chrome regions.
-final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
+final class PassthroughHostingView<Content: View>: NSHostingView<Content>, NSGestureRecognizerDelegate {
     var pageCount = 0
     var currentPage = 0
     var isSearching = false
     var onSelectPageAt: ((NSPoint) -> Void)?
     private var isScrubbingPages = false
+    private var touchPagePan: NSPanGestureRecognizer?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard #available(macOS 27.0, *), window != nil, touchPagePan == nil else { return }
+        let click = NSClickGestureRecognizer(target: self, action: #selector(touchSelectPage(_:)))
+        click.buttonMask = 0
+        let pan = NSPanGestureRecognizer(target: self, action: #selector(touchScrubPages(_:)))
+        pan.buttonMask = 0
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
+        touchPagePan = pan
+        for recognizer in [click, pan] as [NSGestureRecognizer] {
+            recognizer.allowedTouchTypes = .direct
+            recognizer.delegate = self
+            addGestureRecognizer(recognizer)
+        }
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                           shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        event.type == .directTouch
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
+        var origin = gestureRecognizer.location(in: self)
+        if let pan = gestureRecognizer as? NSPanGestureRecognizer {
+            let translation = pan.translation(in: self)
+            origin.x -= translation.x
+            origin.y -= translation.y
+        }
+        return pageIndicatorEnabled && pageIndicatorRect.contains(origin)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                           shouldRequireFailureOf other: NSGestureRecognizer) -> Bool {
+        gestureRecognizer is NSClickGestureRecognizer && other === touchPagePan
+    }
+
+    @objc private func touchSelectPage(_ recognizer: NSClickGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        onSelectPageAt?(recognizer.location(in: self))
+    }
+
+    @objc private func touchScrubPages(_ recognizer: NSPanGestureRecognizer) {
+        switch recognizer.state {
+        case .began, .changed, .ended:
+            onSelectPageAt?(recognizer.location(in: self))
+        default: break
+        }
+    }
 
     private var pageIndicatorEnabled: Bool {
         LaunchpadPageIndicatorHitArea.isEnabled(pageCount: pageCount, isSearching: isSearching)

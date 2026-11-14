@@ -4,6 +4,49 @@ import XCTest
 final class InfiniteCanvasMetricsTests: XCTestCase {
     private let viewport = CGSize(width: 1440, height: 900)
 
+    func testTouchZoomKeepsWorldPointUnderOffCenterFinger() {
+        let metrics = InfiniteCanvasMetrics(size: viewport, itemCount: 128, maximumScale: 2)
+        let anchor = CGPoint(x: 810, y: 370)
+        let original = metrics.worldPoint(atScreenPoint: anchor, scale: 1, pan: CGPoint(x: 20, y: -15))
+        let zoomed = metrics.cameraZoomed(
+            scale: 1, pan: CGPoint(x: 20, y: -15), factor: 1.4, anchor: anchor,
+            minimumScale: 0.12, maximumScale: 2
+        )
+        let after = metrics.worldPoint(atScreenPoint: anchor, scale: zoomed.scale, pan: zoomed.pan)
+        XCTAssertEqual(zoomed.scale, 1.4, accuracy: 0.0001)
+        XCTAssertEqual(after.x, original.x, accuracy: 0.0001)
+        XCTAssertEqual(after.y, original.y, accuracy: 0.0001)
+    }
+
+    func testTouchZoomClampsScaleAndPanAtBothLimits() {
+        let metrics = InfiniteCanvasMetrics(size: viewport, itemCount: 128, maximumScale: 2)
+        for (factor, expectedScale) in [(0.01, 0.25), (100.0, 2.0)] {
+            let camera = metrics.cameraZoomed(
+                scale: 1, pan: CGPoint(x: 10_000, y: -10_000), factor: factor,
+                anchor: CGPoint(x: 90, y: 80), minimumScale: 0.25, maximumScale: 2
+            )
+            XCTAssertEqual(camera.scale, expectedScale, accuracy: 0.0001)
+            XCTAssertEqual(camera.pan, metrics.clampedPan(camera.pan, scale: camera.scale))
+        }
+    }
+
+    func testTouchZoomCanReverseWithoutCameraDrift() {
+        let metrics = InfiniteCanvasMetrics(size: viewport, itemCount: 128, maximumScale: 2)
+        let anchor = CGPoint(x: 820, y: 410)
+        let initialPan = CGPoint(x: 30, y: -10)
+        let enlarged = metrics.cameraZoomed(
+            scale: 1, pan: initialPan, factor: 1.5, anchor: anchor,
+            minimumScale: 0.12, maximumScale: 2
+        )
+        let restored = metrics.cameraZoomed(
+            scale: enlarged.scale, pan: enlarged.pan, factor: 1 / 1.5, anchor: anchor,
+            minimumScale: 0.12, maximumScale: 2
+        )
+        XCTAssertEqual(restored.scale, 1, accuracy: 0.0001)
+        XCTAssertEqual(restored.pan.x, initialPan.x, accuracy: 0.0001)
+        XCTAssertEqual(restored.pan.y, initialPan.y, accuracy: 0.0001)
+    }
+
     func testReorderDoesNotChangeWorldSize() {
         let before = InfiniteCanvasMetrics(size: viewport, itemCount: 40)
         let after = InfiniteCanvasMetrics(size: viewport, itemCount: 40)

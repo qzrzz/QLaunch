@@ -32,6 +32,11 @@ public struct TrackpadTouch: Sendable {
     }
 }
 
+public enum TrackpadPinchDirection: Sendable {
+    case inward
+    case outward
+}
+
 /// One recognizer per physical device. Coordinates use the normalized trackpad surface.
 public struct TrackpadPinchRecognizer {
     private var identifiers: [Int] = []
@@ -41,11 +46,12 @@ public struct TrackpadPinchRecognizer {
     private var beganAt = 0.0
     private var lastTimestamp: Double?
     private var blockedUntilLift = false
+    private var direction: TrackpadPinchDirection?
 
     public init() {}
 
-    public mutating func update(touches: [TrackpadTouch], timestamp: Double, mode: TrackpadGestureMode) -> Bool {
-        guard timestamp.isFinite else { return false }
+    public mutating func update(touches: [TrackpadTouch], timestamp: Double, mode: TrackpadGestureMode) -> TrackpadPinchDirection? {
+        guard timestamp.isFinite else { return nil }
         // Recover from a lost lift-off frame or a device timestamp reset.
         if let lastTimestamp, timestamp < lastTimestamp || timestamp - lastTimestamp > 0.25 {
             self = Self()
@@ -53,21 +59,22 @@ public struct TrackpadPinchRecognizer {
         lastTimestamp = timestamp
         if touches.isEmpty {
             self = Self()
-            return false
+            return nil
         }
-        guard !blockedUntilLift, mode != .disabled else { return false }
+        guard !blockedUntilLift, mode != .disabled else { return nil }
         guard touches.allSatisfy({ $0.x.isFinite && $0.y.isFinite && (0...1).contains($0.x) && (0...1).contains($0.y) }),
               Set(touches.map(\.id)).count == touches.count else {
             blockedUntilLift = true
-            return false
+            return nil
         }
         if touches.count > mode.maximumCount {
             blockedUntilLift = true
-            return false
+            return nil
         }
         guard mode.accepts(touches.count) else {
             identifiers = []
-            return false
+            direction = nil
+            return nil
         }
         let ids = touches.map(\.id).sorted()
         let x = touches.map(\.x).reduce(0, +) / Double(touches.count)
@@ -79,18 +86,31 @@ public struct TrackpadPinchRecognizer {
             initialX = x
             initialY = y
             beganAt = timestamp
-            return false
+            direction = nil
+            return nil
         }
         let elapsed = timestamp - beganAt
-        // An outward gesture belongs to Show Desktop; do not recognize its rebound.
-        guard elapsed <= 1.5, radius <= initialRadius * 1.15 else {
+        guard elapsed <= 1.5 else {
             blockedUntilLift = true
-            return false
+            return nil
+        }
+        // Commit to the first meaningful direction, so a spread cannot rebound
+        // into an opening pinch (or vice versa) within the same contact sequence.
+        if direction == nil {
+            if radius <= initialRadius * 0.85 { direction = .inward }
+            else if radius >= initialRadius * 1.15 { direction = .outward }
         }
         guard elapsed >= 0.12, initialRadius >= 0.08,
-              radius <= initialRadius * 0.72, initialRadius - radius >= 0.055,
-              hypot(x - initialX, y - initialY) <= initialRadius * 0.8 else { return false }
+              hypot(x - initialX, y - initialY) <= initialRadius * 0.8 else { return nil }
+        let recognized: TrackpadPinchDirection
+        if direction == .inward, radius <= initialRadius * 0.72, initialRadius - radius >= 0.055 {
+            recognized = .inward
+        } else if direction == .outward, radius >= initialRadius / 0.72, radius - initialRadius >= 0.055 {
+            recognized = .outward
+        } else {
+            return nil
+        }
         blockedUntilLift = true
-        return true
+        return recognized
     }
 }

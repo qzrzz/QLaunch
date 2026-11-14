@@ -308,9 +308,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installTrackpadGesture() {
         let center = LaunchpadGestureCenter.shared
-        center.onTrigger = { [weak self] in
-            guard let self, !self.store.isPresented, self.launchpadPanel?.isVisible != true else { return }
-            self.showLaunchpad()
+        center.onTrigger = { [weak self] direction in
+            guard let self else { return }
+            switch direction {
+            case .inward:
+                guard !self.store.isPresented, self.launchpadPanel?.isVisible != true else { return }
+                self.showLaunchpad()
+            case .outward:
+                guard self.launchpadPanel?.isVisible == true,
+                      self.launchpadPanel.attachedSheet == nil else { return }
+                self.containerView.hideOrganizer()
+                self.dismissLaunchpad()
+            }
             self.updateStatusMenu()
         }
         center.install()

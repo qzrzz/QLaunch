@@ -228,9 +228,9 @@
 "appNote.description" = "Notes are included in search.";
 
 "settings.trackpad.title" = "Trackpad Gesture";
-"settings.trackpad.detail" = "Pinch to open QLaunch.";
+"settings.trackpad.detail" = "Pinch to open, spread to close.";
 "settings.trackpad.disabled" = "Off";
-"settings.trackpad.fourOrFive" = "Four- or five-finger pinch (default)";
+"settings.trackpad.fourOrFive" = "Four- or five-finger pinch";
 "settings.trackpad.three" = "Three-finger pinch";
 "settings.trackpad.five" = "Five-finger pinch";
 "settings.trackpad.compatibility" = "If the system app launcher also opens, try three or five fingers.";

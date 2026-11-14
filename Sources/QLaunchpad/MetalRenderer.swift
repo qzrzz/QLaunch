@@ -205,7 +205,7 @@ private final class SelectionOverlayView: NSView {
 // MARK: - Launchpad Metal view
 
 @MainActor
-final class LaunchpadMetalView: MTKView, MTKViewDelegate {
+final class LaunchpadMetalView: MTKView, MTKViewDelegate, NSGestureRecognizerDelegate {
     private let store: AppStore
     private let commandQueue: MTLCommandQueue
     private let iconPipelineFloat16: MTLRenderPipelineState
@@ -340,6 +340,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     private let canvasRippleMaximumStrength: CGFloat = 0.28
     private let canvasRippleBurstGap: CFTimeInterval = 0.28
     private let canvasRippleFadeDuration: CFTimeInterval = 0.24
+    private var touchInteractionActive = false
+    private var touchCanvasInteraction = TouchCanvasInteraction()
+    private var touchClickRecognizer: NSClickGestureRecognizer?
+    private var touchPressRecognizer: NSPressGestureRecognizer?
+    private var touchPanRecognizer: NSPanGestureRecognizer?
+    private var touchCanvasPanRecognizer: NSPanGestureRecognizer?
+    private var touchMagnificationRecognizer: NSMagnificationGestureRecognizer?
+    private var touchMagnification: CGFloat = 0
+    private var touchCanvasTranslation: CGPoint = .zero
     private var pageIndicatorClick = false
     /// True when this gesture started on an icon in automatic layout and was
     /// converted to a page pan because reorder is disabled.
@@ -519,6 +528,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
         super.init(frame: .zero, device: device)
         delegate = self
+        if #available(macOS 27.0, *) {
+            installDirectTouchGestures()
+        }
         enableSetNeedsDisplay = true
         isPaused = true
         preferredFramesPerSecond = min(120, NSScreen.main?.maximumFramesPerSecond ?? 60)
@@ -970,7 +982,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// on every display-link tick so the page never waits for the next
     /// delivered event before moving.
     private func syncPagePanToMouse() {
-        guard isPanningPage, let window else { return }
+        guard isPanningPage, !touchInteractionActive, let window else { return }
         guard (NSEvent.pressedMouseButtons & 1) != 0 else {
             finishPagePanAfterMissedMouseUp()
             return
@@ -980,6 +992,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     private func finishPagePanAfterMissedMouseUp() {
+        guard isMouseDown, isPanningPage, !touchInteractionActive,
+              !touchCanvasInteraction.isActive, let window else { return }
+        // The live button state can observe release before AppKit delivers
+        // mouseUp. Use the same completion path so a blank click is not lost.
+        let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        endInteraction(at: convert(windowPoint, from: nil))
+    }
+
+    private func cancelPagePan() {
         guard isPanningPage else { return }
         if !GridLayoutPreset.current.isInfiniteCanvas {
             store.endPagePan()
@@ -1037,6 +1058,9 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// next delivered event before moving.
     private func syncDragPointToMouse() -> CGPoint? {
         guard didDrag, draggedAppID != nil, let window else { return nil }
+        if touchInteractionActive {
+            return CGPoint(x: dragPoint.x, y: bounds.height - dragPoint.y)
+        }
         let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
         let point = convert(windowPoint, from: nil)
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
@@ -1428,6 +1452,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
                 prune: IconRenderQuality.current.usesLazyTextureLoading
             )
         } else {
+            cancelDirectTouchGestures()
             if folderTransition != nil {
                 finishFolderTransition()
             }
@@ -1546,6 +1571,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     /// Stop background baking and display-link draws so first-page icons are
     /// not painted at rest while the wallpaper is already on screen.
     func beginPresentationHold() {
+        cancelDirectTouchGestures()
         pauseResourcePrewarming()
         isResourcePrewarmingPaused = true
         canvasEdgePointer = nil
@@ -4113,6 +4139,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
               contentTransitionPhase == .idle,
               !isFolderTransitionActive,
               !isPanningPage,
+              !touchCanvasInteraction.isActive,
               canvasEdgePanArmed,
               let pointer = canvasEdgePointer else {
             return .zero
@@ -4368,6 +4395,24 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     private func layoutItemIndex(at point: CGPoint, hitRadiusScale: CGFloat = 0.62) -> Int? {
+        if touchInteractionActive, hitRadiusScale == 0.62 {
+            let metrics = GridMetrics(size: bounds.size)
+            let iconSize = interactionIconPointSize(metrics: metrics)
+            let canvas = infiniteCanvasMetrics(itemCount: displayedItems.count)
+            let cellWidth = GridLayoutPreset.current.isInfiniteCanvas ? canvas.cellWidth * canvasScale : metrics.cellWidth
+            let cellHeight = GridLayoutPreset.current.isInfiniteCanvas ? canvas.cellHeight * canvasScale : metrics.cellHeight
+            let halfWidth = min(max(iconSize * hitRadiusScale, 18), cellWidth / 2)
+            let halfHeight = min(max(iconSize * hitRadiusScale, 18), cellHeight / 2)
+            let topLeft = CGPoint(x: point.x, y: bounds.height - point.y)
+            return displayedItems.indices.filter { index in
+                let center = interactionIconCenter(globalIndex: Double(store.slot(for: displayedItems[index], fallback: index)), metrics: metrics)
+                return abs(topLeft.x - center.x) <= halfWidth && abs(topLeft.y - center.y) <= halfHeight
+            }.min { lhs, rhs in
+                let l = interactionIconCenter(globalIndex: Double(store.slot(for: displayedItems[lhs], fallback: lhs)), metrics: metrics)
+                let r = interactionIconCenter(globalIndex: Double(store.slot(for: displayedItems[rhs], fallback: rhs)), metrics: metrics)
+                return hypot(topLeft.x - l.x, topLeft.y - l.y) < hypot(topLeft.x - r.x, topLeft.y - r.y)
+            }
+        }
         guard GridLayoutPreset.current.isInfiniteCanvas else {
             let metrics = GridMetrics(size: bounds.size)
             guard let hit = metrics.hitTest(
@@ -4479,7 +4524,226 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
 
     // MARK: - Input
 
+    // Recognizers opt into direct touch only. Mouse and trackpad events keep
+    // their existing responder paths, including trackpad magnification.
+    @available(macOS 27.0, *)
+    private func installDirectTouchGestures() {
+        let click = NSClickGestureRecognizer(target: self, action: #selector(touchClick(_:)))
+        click.buttonMask = 0
+        let press = NSPressGestureRecognizer(target: self, action: #selector(touchPress(_:)))
+        press.buttonMask = 0
+        press.minimumPressDuration = 0.5
+        press.allowableMovement = 8
+        let pan = NSPanGestureRecognizer(target: self, action: #selector(touchPan(_:)))
+        pan.buttonMask = 0
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
+        let canvasPan = NSPanGestureRecognizer(target: self, action: #selector(touchCanvasPan(_:)))
+        canvasPan.buttonMask = 0
+        canvasPan.minimumNumberOfTouches = 2
+        canvasPan.maximumNumberOfTouches = 2
+        let magnify = NSMagnificationGestureRecognizer(target: self, action: #selector(touchMagnify(_:)))
+        touchClickRecognizer = click
+        touchPressRecognizer = press
+        touchPanRecognizer = pan
+        touchCanvasPanRecognizer = canvasPan
+        touchMagnificationRecognizer = magnify
+        for recognizer in [click, press, pan, canvasPan, magnify] as [NSGestureRecognizer] {
+            recognizer.allowedTouchTypes = .direct
+            recognizer.delegate = self
+            addGestureRecognizer(recognizer)
+        }
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                           shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        event.type == .directTouch && window?.attachedSheet == nil
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
+        guard contentTransitionPhase == .idle, !isFolderTransitionActive,
+              window?.attachedSheet == nil else { return false }
+        if gestureRecognizer === touchCanvasPanRecognizer || gestureRecognizer === touchMagnificationRecognizer {
+            return GridLayoutPreset.current.isInfiniteCanvas
+        }
+        return !touchCanvasInteraction.isActive
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                           shouldRequireFailureOf other: NSGestureRecognizer) -> Bool {
+        // A long press or movement consumes the tap, so lifting a finger cannot
+        // launch an app after opening its menu or moving its icon.
+        gestureRecognizer === touchClickRecognizer &&
+            (other === touchPressRecognizer || other === touchPanRecognizer ||
+             other === touchCanvasPanRecognizer || other === touchMagnificationRecognizer)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: NSGestureRecognizer) -> Bool {
+        guard GridLayoutPreset.current.isInfiniteCanvas, gestureRecognizer !== other else { return false }
+        // Keep the two-finger recognizers observing when a one-finger pan wins.
+        // The latter cancels at its one-touch limit; a canvas recognizer then
+        // takes ownership without committing an icon drop or requiring a lift.
+        let pansAndPinch: [NSGestureRecognizer?] = [
+            touchPanRecognizer, touchCanvasPanRecognizer, touchMagnificationRecognizer
+        ]
+        return pansAndPinch.contains { $0 === gestureRecognizer }
+            && pansAndPinch.contains { $0 === other }
+    }
+
+    @objc private func touchClick(_ recognizer: NSClickGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        touchInteractionActive = true
+        defer { finishTouchInput() }
+        let point = recognizer.location(in: self)
+        beginInteraction(at: point)
+        endInteraction(at: point)
+    }
+
+    @objc private func touchPress(_ recognizer: NSPressGestureRecognizer) {
+        guard recognizer.state == .began else { return }
+        cancelTouchInteraction()
+        touchInteractionActive = true
+        defer { finishTouchInput() }
+        let point = recognizer.location(in: self)
+        guard let menu = contextMenu(at: point) else { return }
+        // Location-based presentation does not manufacture a mouse event.
+        menu.popUp(positioning: nil, at: point, in: self)
+    }
+
+    @objc private func touchPan(_ recognizer: NSPanGestureRecognizer) {
+        let point = recognizer.location(in: self)
+        switch recognizer.state {
+        case .began:
+            guard !touchCanvasInteraction.isActive else { return }
+            touchInteractionActive = true
+            let translation = recognizer.translation(in: self)
+            beginInteraction(at: CGPoint(x: point.x - translation.x, y: point.y - translation.y))
+            continueInteraction(at: point)
+            didDrag = true
+        case .changed:
+            guard touchInteractionActive else { return }
+            continueInteraction(at: point)
+        case .ended:
+            guard touchInteractionActive else { return }
+            continueInteraction(at: point)
+            endInteraction(at: point)
+            finishTouchInput()
+        case .cancelled, .failed:
+            cancelTouchInteraction()
+        default: break
+        }
+    }
+
+    private func finishTouchInput() {
+        touchInteractionActive = false
+        clearCanvasEdgePointer()
+    }
+
+    private func clearCanvasEdgePointer() {
+        canvasEdgePointer = nil
+        canvasEdgePanArmed = false
+        canvasEdgePanVelocity = .zero
+    }
+
+    private func cancelDirectTouchGestures() {
+        for recognizer in [touchClickRecognizer, touchPressRecognizer, touchPanRecognizer,
+                           touchCanvasPanRecognizer, touchMagnificationRecognizer] as [NSGestureRecognizer?] {
+            recognizer?.isEnabled = false
+            recognizer?.isEnabled = true
+        }
+        cancelTouchInteraction()
+        touchCanvasInteraction.reset()
+        clearCanvasEdgePointer()
+    }
+
+    private func cancelTouchInteraction() {
+        guard touchInteractionActive else { return }
+        // Existing reordering is live; cancellation keeps that order but never
+        // commits grouping, launches an app, or dismisses the window.
+        cancelPagePan()
+        discardCancelledDrag()
+        store.setFreePlacementDragActive(false)
+        isMouseDown = false
+        isPanningPage = false
+        pageIndicatorClick = false
+        pendingAutoLayoutReorderHint = false
+        dragPoint = .zero
+        dragGrabOffset = .zero
+        edgePageDirection = 0
+        canvasPanVelocity = .zero
+        finishTouchInput()
+        needsDisplay = true
+    }
+
+    private func beginTouchCanvasTransform(_ gesture: TouchCanvasInteraction.Gesture) {
+        guard touchCanvasInteraction.begin(gesture) else { return }
+        cancelTouchInteraction()
+        // Clear pointer state even when there was no preceding single-finger
+        // interaction. Two fingers may start while the mouse rests at an edge.
+        clearCanvasEdgePointer()
+        synchronizeCanvasStateIfNeeded(itemCount: displayedItems.count)
+        canvasZoomVelocity = 0
+        canvasPanVelocity = .zero
+        canvasRippleActiveUntil = 0
+        canvasTransformHistory.removeAll(keepingCapacity: true)
+    }
+
+    @objc private func touchCanvasPan(_ recognizer: NSPanGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            beginTouchCanvasTransform(.pan)
+            touchCanvasTranslation = .zero
+            fallthrough
+        case .changed, .ended:
+            let translation = recognizer.translation(in: self)
+            let metrics = infiniteCanvasMetrics(itemCount: displayedItems.count)
+            canvasPan = metrics.clampedPan(CGPoint(
+                x: canvasPan.x + translation.x - touchCanvasTranslation.x,
+                y: canvasPan.y - translation.y + touchCanvasTranslation.y
+            ), scale: canvasScale)
+            touchCanvasTranslation = translation
+            if recognizer.state == .ended { touchCanvasInteraction.end(.pan) }
+            startDisplayLink()
+            needsDisplay = true
+        case .cancelled, .failed:
+            touchCanvasInteraction.end(.pan)
+            touchCanvasTranslation = .zero
+            canvasPanVelocity = .zero
+        default: break
+        }
+    }
+
+    @objc private func touchMagnify(_ recognizer: NSMagnificationGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            beginTouchCanvasTransform(.magnification)
+            touchMagnification = 0
+            fallthrough
+        case .changed, .ended:
+            let metrics = infiniteCanvasMetrics(itemCount: displayedItems.count)
+            let point = recognizer.location(in: self)
+            let anchor = CGPoint(x: point.x, y: bounds.height - point.y)
+            let ratio = max(0.01, 1 + recognizer.magnification) / max(0.01, 1 + touchMagnification)
+            let camera = metrics.cameraZoomed(
+                scale: canvasScale, pan: canvasPan, factor: ratio, anchor: anchor,
+                minimumScale: max(metrics.fittedScale, 0.12), maximumScale: canvasMaximumScale
+            )
+            canvasScale = camera.scale
+            canvasPan = camera.pan
+            touchMagnification = recognizer.magnification
+            if recognizer.state == .ended { touchCanvasInteraction.end(.magnification) }
+            startDisplayLink()
+            needsDisplay = true
+        case .cancelled, .failed:
+            touchCanvasInteraction.end(.magnification)
+            touchMagnification = 0
+        default: break
+        }
+    }
+
     private func updateCanvasEdgePointer(with event: NSEvent) {
+        guard !touchCanvasInteraction.isActive else { return }
         let point = convert(event.locationInWindow, from: nil)
         let pointer = CGPoint(x: point.x, y: bounds.height - point.y)
         canvasEdgePointer = pointer
@@ -4499,7 +4763,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        if isPanningPage && (NSEvent.pressedMouseButtons & 1) == 0 {
+        if isPanningPage && !touchInteractionActive && (NSEvent.pressedMouseButtons & 1) == 0 {
             finishPagePanAfterMissedMouseUp()
         }
         updateCanvasEdgePointer(with: event)
@@ -4599,13 +4863,18 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !touchInteractionActive, !touchCanvasInteraction.isActive else { return }
+        updateCanvasEdgePointer(with: event)
+        beginInteraction(at: convert(event.locationInWindow, from: nil), modifiers: event.modifierFlags)
+    }
+
+    private func beginInteraction(at point: CGPoint, modifiers: NSEvent.ModifierFlags = []) {
         if window?.isKeyWindow == false {
             NSApp.activate(ignoringOtherApps: true)
             window?.makeKey()
         }
-        updateCanvasEdgePointer(with: event)
         isMouseDown = true
-        dragStart = convert(event.locationInWindow, from: nil)
+        dragStart = point
         draggedAppID = nil
         dragGeneration = store.dragGeneration
         dragPoint = CGPoint(x: dragStart.x, y: bounds.height - dragStart.y)
@@ -4652,7 +4921,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
             return
         }
 
-        if isSpacePanActive {
+        if isSpacePanActive && !touchInteractionActive {
             isSpacePanning = true
             beginEmptyAreaPagePan(from: dragStart)
             updateSpaceCursor()
@@ -4660,7 +4929,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         }
 
         if !store.isSearching,
-           !event.modifierFlags.intersection([.shift, .command]).isEmpty {
+           !modifiers.intersection([.shift, .command]).isEmpty {
             marqueeClickItemID = layoutItemIndex(at: dragStart).flatMap {
                 displayedItems.indices.contains($0) ? displayedItems[$0].id : nil
             }
@@ -4754,8 +5023,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenu(at: convert(event.locationInWindow, from: nil))
+    }
+
+    private func contextMenu(at point: CGPoint) -> NSMenu? {
         guard contentTransitionPhase == .idle, !isFolderTransitionActive, !isSpacePanActive else { return nil }
-        let point = convert(event.locationInWindow, from: nil)
         if LaunchpadFieldHitArea.rect(in: bounds).contains(point) {
             return nil
         }
@@ -5233,11 +5505,15 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !touchInteractionActive, !touchCanvasInteraction.isActive else { return }
+        continueInteraction(at: convert(event.locationInWindow, from: nil))
+    }
+
+    private func continueInteraction(at point: CGPoint) {
         if isDragCancelledByLayout {
             discardCancelledDrag()
             return
         }
-        let point = convert(event.locationInWindow, from: nil)
         dragPoint = CGPoint(x: point.x, y: bounds.height - point.y)
         canvasEdgePointer = dragPoint
         if hypot(point.x - dragStart.x, point.y - dragStart.y) > 6 {
@@ -5299,6 +5575,14 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !touchInteractionActive, !touchCanvasInteraction.isActive else { return }
+        endInteraction(at: convert(event.locationInWindow, from: nil))
+    }
+
+    private func endInteraction(at point: CGPoint) {
+        // A display-link release recovery may have already finished this
+        // interaction before the queued mouseUp reaches the responder.
+        guard isMouseDown else { return }
         isMouseDown = false
         defer {
             store.setFreePlacementDragActive(false)
@@ -5355,12 +5639,11 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
            store.openedFolderID == nil,
            contentTransitionPhase == .idle,
            !isFolderTransitionActive {
-            let releasePoint = convert(event.locationInWindow, from: nil)
+            let releasePoint = point
             dragPoint = CGPoint(x: releasePoint.x, y: bounds.height - releasePoint.y)
             updateReorderDestination(at: releasePoint)
         }
         if pageIndicatorClick {
-            let point = convert(event.locationInWindow, from: nil)
             store.selectPage(at: point, in: bounds, scrubbing: true)
             startDisplayLink()
             return
@@ -5570,6 +5853,7 @@ final class LaunchpadMetalView: MTKView, MTKViewDelegate {
         if window != nil {
             installSpaceKeyMonitor()
         } else {
+            cancelDirectTouchGestures()
             removeSpaceKeyMonitor()
             isSpaceKeyDown = false
             isSpacePanning = false

@@ -6,7 +6,7 @@ import QLaunchpadCore
 
 enum TrackpadGesturePreferences {
     static let modeKey = "launchpadTrackpadGestureMode"
-    static let defaultMode = TrackpadGestureMode.fourOrFive
+    static let defaultMode = TrackpadGestureMode.disabled
 
     static var mode: TrackpadGestureMode {
         UserDefaults.standard.string(forKey: modeKey).flatMap(TrackpadGestureMode.init(rawValue:)) ?? defaultMode
@@ -39,9 +39,9 @@ private final class TrackpadFrameProcessor: @unchecked Sendable {
         let triggered = recognizers[device, default: TrackpadPinchRecognizer()].update(touches: touches, timestamp: timestamp, mode: mode)
         let token = generation
         lock.unlock()
-        if triggered {
+        if let triggered {
             DispatchQueue.main.async {
-                LaunchpadGestureCenter.shared.trigger(generation: token)
+                LaunchpadGestureCenter.shared.trigger(triggered, generation: token)
             }
         }
     }
@@ -51,7 +51,7 @@ private final class TrackpadFrameProcessor: @unchecked Sendable {
 final class LaunchpadGestureCenter: ObservableObject {
     static let shared = LaunchpadGestureCenter()
     @Published private(set) var unavailable = false
-    var onTrigger: (() -> Void)?
+    var onTrigger: ((TrackpadPinchDirection) -> Void)?
     private var generation = 0
     private var installed = false
     private var sleeping = false
@@ -138,9 +138,9 @@ final class LaunchpadGestureCenter: ObservableObject {
         unavailable = count <= 0
     }
 
-    fileprivate func trigger(generation: Int) {
+    fileprivate func trigger(_ direction: TrackpadPinchDirection, generation: Int) {
         guard installed, self.generation == generation, activeMode != .disabled else { return }
-        onTrigger?()
+        onTrigger?(direction)
     }
 
     fileprivate func scheduleReload() {

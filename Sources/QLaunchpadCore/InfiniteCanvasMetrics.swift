@@ -136,6 +136,24 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
         )
     }
 
+    /// Zoom around a finger's screen location, keeping the same world point
+    /// beneath it unless a canvas boundary requires clamping.
+    public func cameraZoomed(
+        scale: CGFloat,
+        pan: CGPoint,
+        factor: CGFloat,
+        anchor: CGPoint,
+        minimumScale: CGFloat,
+        maximumScale: CGFloat
+    ) -> (scale: CGFloat, pan: CGPoint) {
+        let newScale = min(max(scale * factor, minimumScale), maximumScale)
+        let world = worldPoint(atScreenPoint: anchor, scale: scale, pan: pan)
+        return (newScale, clampedPan(
+            self.pan(placing: world, atScreenPoint: anchor, scale: newScale),
+            scale: newScale
+        ))
+    }
+
     /// Keep the same grid location under the previous viewport center after
     /// the world size, cell pitch, or item count changes. Reorder, grouping,
     /// and window resize must not rewrite the user's zoom.

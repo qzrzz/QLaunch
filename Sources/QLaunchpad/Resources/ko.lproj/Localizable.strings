@@ -228,9 +228,9 @@
 "appNote.description" = "메모는 검색에 사용됩니다.";
 
 "settings.trackpad.title" = "트랙패드 제스처";
-"settings.trackpad.detail" = "손가락을 오므려 QLaunch를 엽니다.";
+"settings.trackpad.detail" = "손가락을 오므려 열고, 펼쳐 닫습니다.";
 "settings.trackpad.disabled" = "끔";
-"settings.trackpad.fourOrFive" = "네 손가락 또는 다섯 손가락 오므리기 (기본)";
+"settings.trackpad.fourOrFive" = "네 손가락 또는 다섯 손가락 오므리기";
 "settings.trackpad.three" = "세 손가락 오므리기";
 "settings.trackpad.five" = "다섯 손가락 오므리기";
 "settings.trackpad.compatibility" = "시스템 앱 목록도 열리면 세 손가락 또는 다섯 손가락을 사용해 보세요.";
