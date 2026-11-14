@@ -26,18 +26,145 @@ private extension NSImage {
     }
 }
 
+/// Icon cache for the organizer.
+///
+/// Fetching `NSWorkspace` icons and drawing the multi-representation icns
+/// images synchronously for every app made entering the organizer stall for a
+/// noticeable time. Icons are now rasterized to small bitmaps on a background
+/// queue; views draw a placeholder until the bitmap arrives and are redrawn in
+/// coalesced batches. The bitmaps are shared across organizer sessions so the
+/// second entry is instant.
 @MainActor
 private final class OrganizerIconCache {
-    private var images: [String: NSImage] = [:]
+    static let shared = OrganizerIconCache()
 
+    private static let pixelSize = 128
+    private static let workQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "com.qzrzz.qlaunchpad.organizer-icons"
+        queue.maxConcurrentOperationCount = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1))
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+
+    private var images: [String: NSImage] = [:]
+    private var pending: Set<String> = []
+    private let requesters = NSHashTable<NSView>.weakObjects()
+    private var flushScheduled = false
+    private var clearObserver: NSObjectProtocol?
+
+    private init() {
+        clearObserver = NotificationCenter.default.addObserver(
+            forName: .qlaunchpadCacheClearRequested,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { OrganizerIconCache.shared.clear() }
+        }
+    }
+
+    /// Placeholder drawn while an icon is still being loaded.
+    static let placeholder: NSImage = {
+        let size = NSSize(width: 64, height: 64)
+        return NSImage(size: size, flipped: false) { rect in
+            let inset = rect.insetBy(dx: 6, dy: 6)
+            let path = NSBezierPath(roundedRect: inset, xRadius: 13, yRadius: 13)
+            NSColor.white.withAlphaComponent(0.07).setFill()
+            path.fill()
+            NSColor.white.withAlphaComponent(0.10).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            return true
+        }
+    }()
+
+    func clear() {
+        images.removeAll()
+        pending.removeAll()
+    }
+
+    /// Returns the cached bitmap, or a placeholder while loading in the background.
     func image(for app: AppInfo, requester: NSView? = nil) -> NSImage? {
         let key = app.url.path
         if let image = images[key] { return image }
-        let source = NSWorkspace.shared.icon(forFile: key)
-        let image = (source.copy() as? NSImage) ?? source
-        image.size = NSSize(width: 128, height: 128)
+        if let requester { requesters.add(requester) }
+        enqueue(path: key, priority: .high)
+        return Self.placeholder
+    }
+
+    /// Warms the cache for apps that are not on screen yet.
+    func prefetch(_ apps: [AppInfo]) {
+        for app in apps where images[app.url.path] == nil {
+            enqueue(path: app.url.path, priority: .low)
+        }
+    }
+
+    private func enqueue(path: String, priority: Operation.QueuePriority) {
+        guard !pending.contains(path) else { return }
+        pending.insert(path)
+        let operation = BlockOperation {
+            let image = Self.rasterize(path: path)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    OrganizerIconCache.shared.finish(path: path, image: image)
+                }
+            }
+        }
+        operation.queuePriority = priority
+        Self.workQueue.addOperation(operation)
+    }
+
+    private func finish(path: String, image: NSImage?) {
+        guard pending.remove(path) != nil else { return }
+        if let image { images[path] = image }
+        scheduleFlush()
+    }
+
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        // Coalesce many completions into one redraw per frame or so.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.flushScheduled = false
+                for view in self.requesters.allObjects {
+                    view.needsDisplay = true
+                }
+                if self.pending.isEmpty {
+                    self.requesters.removeAllObjects()
+                }
+            }
+        }
+    }
+
+    private nonisolated static func rasterize(path: String) -> NSImage? {
+        let source = NSWorkspace.shared.icon(forFile: path)
+        let px = pixelSize
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil,
+                  width: px,
+                  height: px,
+                  bitsPerComponent: 8,
+                  bytesPerRow: 0,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return nil }
+        context.interpolationQuality = .high
+        let rect = CGRect(x: 0, y: 0, width: px, height: px)
+        var proposed = rect
+        if let cgImage = source.cgImage(forProposedRect: &proposed, context: nil, hints: nil) {
+            context.draw(cgImage, in: rect)
+        } else {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        guard let output = context.makeImage() else { return nil }
+        let image = NSImage(cgImage: output, size: NSSize(width: 64, height: 64))
         image.isTemplate = false
-        images[key] = image
         return image
     }
 }
@@ -54,13 +181,30 @@ final class OrganizeModeView: NSView {
     )
     private let done = NSButton(title: L10n.tr("organize.done"), target: nil, action: nil)
     private let scrollView = NSScrollView()
-    private let iconCache = OrganizerIconCache()
+    private let iconCache = OrganizerIconCache.shared
     private let canvas: OrganizeCanvasView
     private let bottomPanel: OrganizeBottomHiddenPanel
     private let dragOverlay: OrganizeDragOverlayView
     private let store: AppStore
     private let onClose: () -> Void
     private var folderModal: OrganizeFolderModalView?
+
+    private static let bottomPanelHeightKey = "organizeHiddenPanelHeight"
+    private static let minBottomPanelHeight: CGFloat = 116
+    private let headerHeight: CGFloat = 88
+    private var bottomPanelHeight: CGFloat = {
+        let saved = CGFloat(UserDefaults.standard.double(forKey: OrganizeModeView.bottomPanelHeightKey))
+        return saved > 0 ? saved : OrganizeModeView.minBottomPanelHeight
+    }()
+    private var resizeStartHeight: CGFloat = 0
+
+    private var maxBottomPanelHeight: CGFloat {
+        max(Self.minBottomPanelHeight, bounds.height - headerHeight - 160)
+    }
+
+    private func clampedBottomPanelHeight(_ height: CGFloat) -> CGFloat {
+        min(max(height, Self.minBottomPanelHeight), maxBottomPanelHeight)
+    }
 
     init(store: AppStore, onClose: @escaping () -> Void) {
         self.store = store
@@ -138,6 +282,25 @@ final class OrganizeModeView: NSView {
             } else {
                 self?.dragOverlay.clearDrag()
             }
+        }
+
+        bottomPanel.onResizeBegan = { [weak self] in
+            guard let self else { return }
+            self.resizeStartHeight = self.clampedBottomPanelHeight(self.bottomPanelHeight)
+        }
+
+        bottomPanel.onResizeDragged = { [weak self] delta in
+            guard let self else { return }
+            let height = self.clampedBottomPanelHeight(self.resizeStartHeight + delta)
+            guard height != self.bottomPanelHeight else { return }
+            self.bottomPanelHeight = height
+            self.needsLayout = true
+            self.layoutSubtreeIfNeeded()
+        }
+
+        bottomPanel.onResizeEnded = { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(Double(self.bottomPanelHeight), forKey: Self.bottomPanelHeightKey)
         }
 
         bottomPanel.onHideAll = { [weak self] in
@@ -229,6 +392,16 @@ final class OrganizeModeView: NSView {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        // Let the first frame show with placeholders, then warm the remaining icons.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window != nil else { return }
+            self.iconCache.prefetch(self.store.apps)
+        }
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard bounds.contains(local) else { return nil }
@@ -275,8 +448,7 @@ final class OrganizeModeView: NSView {
 
     override func layout() {
         super.layout()
-        let headerHeight: CGFloat = 88
-        let bottomPanelHeight: CGFloat = 116
+        let bottomPanelHeight = clampedBottomPanelHeight(self.bottomPanelHeight)
         let headerCenterY = bounds.height - headerHeight / 2
         let doneWidth: CGFloat = 100
         let doneHeight: CGFloat = 36
@@ -384,6 +556,13 @@ private final class OrganizeBottomHiddenPanel: NSView {
     private let emptyDropZone = OrganizeEmptyDropZone()
     private let scrollView = NSScrollView()
     private let shelfGridView: HiddenShelfGridView
+    private let resizeHandle = OrganizePanelResizeHandle()
+
+    /// Called while the top edge is dragged; the argument is the vertical
+    /// distance (in points, up is positive) since the drag began.
+    var onResizeBegan: (() -> Void)?
+    var onResizeDragged: ((CGFloat) -> Void)?
+    var onResizeEnded: (() -> Void)?
 
     var onHideAll: (() -> Void)?
     var onUnhideAll: (() -> Void)?
@@ -453,11 +632,16 @@ private final class OrganizeBottomHiddenPanel: NSView {
 
         scrollView.drawsBackground = false
         scrollView.scrollerStyle = .overlay
-        scrollView.hasHorizontalScroller = true
-        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.documentView = shelfGridView
         addSubview(scrollView)
+
+        addSubview(resizeHandle)
+        resizeHandle.onBegan = { [weak self] in self?.onResizeBegan?() }
+        resizeHandle.onDragged = { [weak self] delta in self?.onResizeDragged?(delta) }
+        resizeHandle.onEnded = { [weak self] in self?.onResizeEnded?() }
 
         shelfGridView.isPointInPanel = { [weak self] loc in
             self?.isPointInPanel(loc) ?? false
@@ -538,10 +722,12 @@ private final class OrganizeBottomHiddenPanel: NSView {
             currentRight -= (hideW + spacing)
         }
 
-        let contentRect = CGRect(x: padX, y: 8, width: bounds.width - padX * 2, height: bounds.height - 36)
+        resizeHandle.frame = CGRect(x: 0, y: bounds.height - 8, width: bounds.width, height: 8)
+
+        let contentRect = CGRect(x: padX, y: 8, width: bounds.width - padX * 2, height: max(0, bounds.height - 36))
         emptyDropZone.frame = contentRect
         scrollView.frame = contentRect
-        shelfGridView.updateHeight(contentRect.height)
+        shelfGridView.updateViewport(scrollView.contentSize)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -552,6 +738,67 @@ private final class OrganizeBottomHiddenPanel: NSView {
         OrganizerColor.stroke.setStroke()
         separator.lineWidth = 1
         separator.stroke()
+    }
+}
+
+// MARK: - Panel Resize Handle
+
+@MainActor
+private final class OrganizePanelResizeHandle: NSView {
+    var onBegan: (() -> Void)?
+    var onDragged: ((CGFloat) -> Void)?
+    var onEnded: (() -> Void)?
+
+    private var startY: CGFloat?
+    private var isHovered = false {
+        didSet { if oldValue != isHovered { needsDisplay = true } }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { if startY == nil { isHovered = false } }
+
+    override func mouseDown(with event: NSEvent) {
+        startY = event.locationInWindow.y
+        isHovered = true
+        onBegan?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let startY else { return }
+        onDragged?(event.locationInWindow.y - startY)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        startY = nil
+        let local = convert(event.locationInWindow, from: nil)
+        isHovered = bounds.contains(local)
+        onEnded?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let gripWidth: CGFloat = 36
+        let grip = CGRect(x: bounds.midX - gripWidth / 2, y: bounds.midY - 2, width: gripWidth, height: 4)
+        let path = NSBezierPath(roundedRect: grip, xRadius: 2, yRadius: 2)
+        NSColor.white.withAlphaComponent(isHovered || startY != nil ? 0.45 : 0.18).setFill()
+        path.fill()
     }
 }
 
@@ -644,7 +891,9 @@ private final class HiddenShelfGridView: NSView {
     }
 
     private let cellWidth: CGFloat = 68
-    private var cellHeight: CGFloat = 76
+    private let cellHeight: CGFloat = 76
+    private let gridInset: CGFloat = 8
+    private var viewportSize: CGSize = .zero
 
     private var selectedIDs = Set<String>()
     private var clickedIndex: Int?
@@ -678,9 +927,19 @@ private final class HiddenShelfGridView: NSView {
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    func updateHeight(_ height: CGFloat) {
-        self.cellHeight = height
+    /// The shelf wraps into rows that fit the visible width and scrolls vertically.
+    func updateViewport(_ size: CGSize) {
+        viewportSize = size
         updateSize()
+        needsDisplay = true
+    }
+
+    private var columns: Int {
+        max(1, Int((max(viewportSize.width, cellWidth + gridInset * 2) - gridInset * 2) / cellWidth))
+    }
+
+    private var rows: Int {
+        appIDs.isEmpty ? 0 : (appIDs.count + columns - 1) / columns
     }
 
     func update(appIDs: [String]) {
@@ -691,16 +950,25 @@ private final class HiddenShelfGridView: NSView {
     }
 
     private func updateSize() {
-        let width = max(CGFloat(appIDs.count) * cellWidth + 16, 1)
-        if frame.size != CGSize(width: width, height: cellHeight) {
-            frame.size = CGSize(width: width, height: cellHeight)
+        let width = max(viewportSize.width, 1)
+        let contentHeight = CGFloat(rows) * cellHeight + gridInset
+        let height = max(viewportSize.height, contentHeight, 1)
+        let size = CGSize(width: width, height: height)
+        if frame.size != size {
+            frame.size = size
         }
     }
 
+    private var gridOriginX: CGFloat {
+        let used = CGFloat(columns) * cellWidth
+        return max(gridInset, (bounds.width - used) / 2)
+    }
+
     private func cellRect(for index: Int) -> CGRect {
-        CGRect(
-            x: 8 + CGFloat(index) * cellWidth,
-            y: 0,
+        let cols = columns
+        return CGRect(
+            x: gridOriginX + CGFloat(index % cols) * cellWidth,
+            y: 4 + CGFloat(index / cols) * cellHeight,
             width: cellWidth,
             height: cellHeight
         )
@@ -710,7 +978,7 @@ private final class HiddenShelfGridView: NSView {
         let size: CGFloat = 40
         return CGRect(
             x: cell.midX - size / 2,
-            y: 4,
+            y: cell.minY + 4,
             width: size,
             height: size
         )
@@ -744,15 +1012,16 @@ private final class HiddenShelfGridView: NSView {
         )
     }
 
-    private func insertionIndex(at x: CGFloat) -> Int {
+    private func insertionIndex(at point: CGPoint) -> Int {
         guard !appIDs.isEmpty else { return 0 }
-        for i in 0..<appIDs.count {
-            let cell = cellRect(for: i)
-            if x < cell.midX {
-                return i
-            }
+        let cols = columns
+        let row = min(max(0, Int((point.y - 4) / cellHeight)), rows - 1)
+        let rowStart = row * cols
+        let rowEnd = min(rowStart + cols, appIDs.count)
+        for i in rowStart..<rowEnd where point.x < cellRect(for: i).midX {
+            return i
         }
-        return appIDs.count
+        return rowEnd
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -822,6 +1091,7 @@ private final class HiddenShelfGridView: NSView {
                 didDrag = true
             }
             marqueeCurrent = point
+            autoscroll(with: event)
             if didDrag {
                 let rect = selectionRect(from: marqueeStart, to: marqueeCurrent)
                 var newSelection = marqueeBaseSelection
@@ -849,7 +1119,8 @@ private final class HiddenShelfGridView: NSView {
                 isExternalDragging = false
                 onExternalDragCancel?()
             }
-            dropInsertIndex = insertionIndex(at: point.x)
+            autoscroll(with: event)
+            dropInsertIndex = insertionIndex(at: convert(event.locationInWindow, from: nil))
         } else {
             dropInsertIndex = nil
             let movingIDs = appIDs.filter { selectedIDs.contains($0) }
@@ -1042,7 +1313,7 @@ private final class HiddenShelfGridView: NSView {
         super.draw(dirtyRect)
 
         if isDropTargetActive {
-            let activeRect = bounds.insetBy(dx: 2, dy: 2)
+            let activeRect = visibleRect.insetBy(dx: 2, dy: 2)
             let path = NSBezierPath(roundedRect: activeRect, xRadius: 8, yRadius: 8)
             OrganizerColor.danger.withAlphaComponent(0.12).setFill()
             path.fill()
@@ -1052,7 +1323,7 @@ private final class HiddenShelfGridView: NSView {
         }
 
         for (i, id) in appIDs.enumerated() {
-            guard let app = store.apps.first(where: { $0.id == id }) else { continue }
+            guard let app = store.app(withID: id) else { continue }
             let cell = cellRect(for: i)
             guard cell.intersects(dirtyRect) else { continue }
 
@@ -1095,23 +1366,23 @@ private final class HiddenShelfGridView: NSView {
             }
         }
 
-        if let insertIdx = dropInsertIndex {
-            let insertX: CGFloat = {
-                if insertIdx <= 0 {
-                    return 8
-                } else if insertIdx >= appIDs.count {
-                    return cellRect(for: appIDs.count - 1).maxX + 4
-                } else {
-                    return cellRect(for: insertIdx).minX - 1
-                }
-            }()
-            let barRect = CGRect(x: insertX - 1.5, y: 6, width: 3, height: cellHeight - 12)
+        if let insertIdx = dropInsertIndex, !appIDs.isEmpty {
+            let anchorCell: CGRect
+            let insertX: CGFloat
+            if insertIdx >= appIDs.count {
+                anchorCell = cellRect(for: appIDs.count - 1)
+                insertX = anchorCell.maxX + 1
+            } else {
+                anchorCell = cellRect(for: max(insertIdx, 0))
+                insertX = anchorCell.minX + 1
+            }
+            let barRect = CGRect(x: insertX - 1.5, y: anchorCell.minY + 6, width: 3, height: cellHeight - 12)
             let bar = NSBezierPath(roundedRect: barRect, xRadius: 1.5, yRadius: 1.5)
             OrganizerColor.accent.setFill()
             bar.fill()
 
-            let topDot = NSBezierPath(ovalIn: CGRect(x: insertX - 3.5, y: 3, width: 7, height: 7))
-            let botDot = NSBezierPath(ovalIn: CGRect(x: insertX - 3.5, y: cellHeight - 10, width: 7, height: 7))
+            let topDot = NSBezierPath(ovalIn: CGRect(x: insertX - 3.5, y: anchorCell.minY + 3, width: 7, height: 7))
+            let botDot = NSBezierPath(ovalIn: CGRect(x: insertX - 3.5, y: anchorCell.maxY - 10, width: 7, height: 7))
             topDot.fill()
             botDot.fill()
         }

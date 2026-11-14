@@ -1107,13 +1107,13 @@ final class AppStore: ObservableObject {
         var result: [AppInfo] = []
         var seen = Set<String>()
         for id in hiddenAppOrderIDs where hiddenAppIDs.contains(id) {
-            if let app = apps.first(where: { $0.id == id }) {
+            if let app = appsByID[id] {
                 result.append(app)
                 seen.insert(id)
             }
         }
         for id in hiddenAppIDs where !seen.contains(id) {
-            if let app = apps.first(where: { $0.id == id }) {
+            if let app = appsByID[id] {
                 result.append(app)
                 seen.insert(id)
             }
