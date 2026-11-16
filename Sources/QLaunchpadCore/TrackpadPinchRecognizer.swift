@@ -32,85 +32,125 @@ public struct TrackpadTouch: Sendable {
     }
 }
 
-public enum TrackpadPinchDirection: Sendable {
+public enum TrackpadPinchDirection: Equatable, Sendable {
     case inward
     case outward
 }
 
-/// One recognizer per physical device. Coordinates use the normalized trackpad surface.
+public struct TrackpadPinchMotion: Equatable, Sendable {
+    public let direction: TrackpadPinchDirection
+    public let progress: Double
+    public let shouldComplete: Bool
+}
+
+/// Reports motion and lift separately. A pause or a partial lift preserves the
+/// last visual progress until the remaining contacts leave the trackpad.
 public struct TrackpadPinchRecognizer {
-    private var identifiers: [Int] = []
-    private var initialRadius = 0.0
-    private var initialX = 0.0
-    private var initialY = 0.0
-    private var beganAt = 0.0
+    public enum Event: Equatable, Sendable {
+        case began
+        case changed(TrackpadPinchMotion)
+        case ended(TrackpadPinchMotion?)
+        case cancelled
+    }
+
+    private var identifiers: Set<Int> = []
+    private var baselineCenter = (x: 0.0, y: 0.0)
+    private var baselineRadius = 0.0
     private var lastTimestamp: Double?
+    private var isTracking = false
     private var blockedUntilLift = false
-    private var direction: TrackpadPinchDirection?
+    private var motion: TrackpadPinchMotion?
+    private var trackedTravel = 0.0
 
     public init() {}
 
-    public mutating func update(touches: [TrackpadTouch], timestamp: Double, mode: TrackpadGestureMode) -> TrackpadPinchDirection? {
-        guard timestamp.isFinite else { return nil }
-        // Recover from a lost lift-off frame or a device timestamp reset.
-        if let lastTimestamp, timestamp < lastTimestamp || timestamp - lastTimestamp > 0.25 {
+    public mutating func update(
+        touches: [TrackpadTouch], timestamp: Double, mode: TrackpadGestureMode
+    ) -> [Event] {
+        guard timestamp.isFinite, mode != .disabled else { return [] }
+        if touches.isEmpty {
+            let events: [Event] = isTracking ? [.ended(motion)] : []
+            self = Self()
+            return events
+        }
+
+        var events: [Event] = []
+        let ids = Set(touches.map(\.id))
+        if let lastTimestamp,
+           timestamp < lastTimestamp
+           || (timestamp - lastTimestamp > 0.25 && ids.isDisjoint(with: identifiers)) {
+            if isTracking { events.append(.cancelled) }
             self = Self()
         }
         lastTimestamp = timestamp
-        if touches.isEmpty {
-            self = Self()
-            return nil
+
+        if !isTracking, touches.count >= 3 {
+            isTracking = true
+            events.append(.began)
         }
-        guard !blockedUntilLift, mode != .disabled else { return nil }
-        guard touches.allSatisfy({ $0.x.isFinite && $0.y.isFinite && (0...1).contains($0.x) && (0...1).contains($0.y) }),
-              Set(touches.map(\.id)).count == touches.count else {
+        guard !blockedUntilLift else { return events }
+        guard touches.count <= mode.maximumCount, ids.count == touches.count,
+              touches.allSatisfy({ (0...1).contains($0.x) && (0...1).contains($0.y) }) else {
             blockedUntilLift = true
-            return nil
+            if motion != nil {
+                motion = nil
+                events.append(.cancelled)
+            }
+            return events
         }
-        if touches.count > mode.maximumCount {
-            blockedUntilLift = true
-            return nil
+
+        if !mode.accepts(touches.count) {
+            if motion == nil { identifiers.removeAll() }
+            return events
         }
-        guard mode.accepts(touches.count) else {
-            identifiers = []
-            direction = nil
-            return nil
-        }
-        let ids = touches.map(\.id).sorted()
-        let x = touches.map(\.x).reduce(0, +) / Double(touches.count)
-        let y = touches.map(\.y).reduce(0, +) / Double(touches.count)
-        let radius = touches.reduce(0.0) { $0 + hypot($1.x - x, $1.y - y) } / Double(touches.count)
+        let center = (
+            x: touches.reduce(0) { $0 + $1.x } / Double(touches.count),
+            y: touches.reduce(0) { $0 + $1.y } / Double(touches.count)
+        )
+        let radius = touches.reduce(0) {
+            $0 + hypot($1.x - center.x, $1.y - center.y)
+        } / Double(touches.count)
         if identifiers != ids {
-            identifiers = ids
-            initialRadius = radius
-            initialX = x
-            initialY = y
-            beganAt = timestamp
-            direction = nil
-            return nil
+            // The first matching contact set sets the baseline. If a finger
+            // leaves after motion is underway, hold rather than jumping.
+            if motion == nil {
+                identifiers = ids
+                baselineCenter = center
+                baselineRadius = radius
+            }
+            return events
         }
-        let elapsed = timestamp - beganAt
-        guard elapsed <= 1.5 else {
-            blockedUntilLift = true
-            return nil
+        guard baselineRadius >= 0.08 else { return events }
+
+        let change = radius - baselineRadius
+        let slop = max(0.008, baselineRadius * 0.06)
+        if motion == nil {
+            guard abs(change) > slop,
+                  hypot(center.x - baselineCenter.x, center.y - baselineCenter.y)
+                    <= baselineRadius * 0.8 else { return events }
         }
-        // Commit to the first meaningful direction, so a spread cannot rebound
-        // into an opening pinch (or vice versa) within the same contact sequence.
-        if direction == nil {
-            if radius <= initialRadius * 0.85 { direction = .inward }
-            else if radius >= initialRadius * 1.15 { direction = .outward }
-        }
-        guard elapsed >= 0.12, initialRadius >= 0.08,
-              hypot(x - initialX, y - initialY) <= initialRadius * 0.8 else { return nil }
-        let recognized: TrackpadPinchDirection
-        if direction == .inward, radius <= initialRadius * 0.72, initialRadius - radius >= 0.055 {
-            recognized = .inward
-        } else if direction == .outward, radius >= initialRadius / 0.72, radius - initialRadius >= 0.055 {
-            recognized = .outward
-        } else {
-            return nil
-        }
-        blockedUntilLift = true
-        return recognized
+        let direction = motion?.direction ?? (change < 0 ? .inward : .outward)
+        let travel = max(0, direction == .inward ? -change : change)
+        // Keep the visual position through small reversals. Once a reversal
+        // leaves the dead band, move at the same rate as the original pinch.
+        // Taper the band near the origin so a full reversal can reach zero.
+        let reversalSlop = min(travel * 0.75, max(0.015, baselineRadius * 0.075))
+        trackedTravel = max(travel, min(trackedTravel, travel + reversalSlop))
+        let releaseFraction = direction == .inward ? 0.16 : 0.23
+        let previewFraction = direction == .inward ? 0.30 : 0.38
+        let threshold = max(0.036, baselineRadius * releaseFraction)
+        let previewDistance = max(0.074, baselineRadius * previewFraction)
+        let progress = min(0.96, max(0, (trackedTravel - slop) / (previewDistance - slop)))
+        let updated = TrackpadPinchMotion(
+            direction: direction, progress: progress, shouldComplete: trackedTravel >= threshold
+        )
+        let minimumReportedChange = direction == .inward ? 0.0008 : 0.012
+        if let motion, progress != 0,
+           motion.shouldComplete == updated.shouldComplete,
+           abs(progress - motion.progress) < minimumReportedChange { return events }
+        if motion == updated { return events }
+        motion = updated
+        events.append(.changed(updated))
+        return events
     }
 }

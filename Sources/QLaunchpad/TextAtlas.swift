@@ -2,6 +2,27 @@ import AppKit
 import CoreText
 import Metal
 
+enum AppLabelSize: String, CaseIterable {
+    case small
+    case medium
+    case large
+
+    static let defaultsKey = "appLabelSize"
+    static let defaultSize: Self = .small
+
+    static var current: Self {
+        UserDefaults.standard.string(forKey: defaultsKey).flatMap(Self.init(rawValue:)) ?? defaultSize
+    }
+
+    var pointSize: CGFloat {
+        switch self {
+        case .small: 14
+        case .medium: 16
+        case .large: 18
+        }
+    }
+}
+
 /// One rasterized app name: tight UV + on-screen size in **points**.
 struct LabelLayout: Sendable {
     var sheet: Int
@@ -27,6 +48,7 @@ final class TextAtlas: @unchecked Sendable {
         var maxWidth: Int
         var maxHeight: Int
         var fitToContent: Bool
+        var labelSize: AppLabelSize = .defaultSize
 
         /// Quality: fixed 2048² float16.
         static let standard = Options(
@@ -50,7 +72,6 @@ final class TextAtlas: @unchecked Sendable {
     /// replacements can then use CoreText exclusively while building off-main.
     private let fontName: String
 
-    static let pointSize: CGFloat = 14
     static let maxWidthPoints: CGFloat = 152
     static let shadowOffsetPoints = CGSize(width: 0, height: 1)
     static let shadowBlurPoints: CGFloat = 2
@@ -61,7 +82,7 @@ final class TextAtlas: @unchecked Sendable {
 
     init(device: MTLDevice) {
         self.device = device
-        fontName = NSFont.systemFont(ofSize: Self.pointSize, weight: .medium).fontName
+        fontName = NSFont.systemFont(ofSize: AppLabelSize.defaultSize.pointSize, weight: .medium).fontName
     }
 
     private init(device: MTLDevice, fontName: String) {
@@ -94,7 +115,7 @@ final class TextAtlas: @unchecked Sendable {
         guard !apps.isEmpty else { return }
 
         let scale = max(1, scale.rounded())
-        let pixelFontSize = Self.pointSize * scale
+        let pixelFontSize = options.labelSize.pointSize * scale
         let maxWidthPixels = Self.maxWidthPoints * scale
         let shadowOffsetPx = CGSize(
             width: Self.shadowOffsetPoints.width * scale,

@@ -17,6 +17,13 @@ enum GridLayoutPreset: String, CaseIterable, Identifiable {
 
     static let defaultsKey = LaunchpadPersistence.gridLayoutPresetKey
     static let defaultPreset: Self = .sixByFour
+    static let canvasHoverMagnificationKey = "canvasHoverMagnification"
+    static let defaultCanvasHoverMagnification = true
+
+    static var canvasHoverMagnificationEnabled: Bool {
+        UserDefaults.standard.object(forKey: canvasHoverMagnificationKey) as? Bool
+            ?? defaultCanvasHoverMagnification
+    }
     static let menuGroups: [[Self]] = [
         [.fourByTwo, .infiniteCanvas256],
         [.fiveByFour, .sixByFour, .sevenByFive, .infiniteCanvas],
@@ -32,7 +39,7 @@ enum GridLayoutPreset: String, CaseIterable, Identifiable {
         case .sixByFour: 6
         case .sevenByFive, .sevenByFiveCompact: 7
         case .eightBySevenCompact: 8
-        case .infiniteCanvas, .infiniteCanvas256: 16
+        case .infiniteCanvas, .infiniteCanvas256: InfiniteCanvasMetrics.maximumColumns
         }
     }
 
@@ -144,9 +151,19 @@ struct GridMetrics {
     let gridTop: CGFloat
     let iconSize: CGFloat
 
-    init(size: CGSize) {
+    init(size: CGSize, minimumGridTop: CGFloat) {
         self.size = size
-        iconSize = Self.iconPointSize
+        let requestedIconSize = Self.iconPointSize
+        let vertical = Self.verticalPlacement(
+            screenHeight: size.height, iconSize: requestedIconSize, minimumGridTop: minimumGridTop
+        )
+        let availableHeight = max(size.height - vertical.insetTop - vertical.insetBottom, 1)
+        let idealRow = availableHeight / CGFloat(Self.rows)
+        let extraLabelHeight = AppLabelSize.current.pointSize - AppLabelSize.defaultSize.pointSize
+        let labelGap = min(26, vertical.minCellExtra * Self.current.spacingScale) + extraLabelHeight
+        iconSize = vertical.centerInChromeBand && !Self.current.isInfiniteCanvas
+            ? min(requestedIconSize, max(1, idealRow - labelGap))
+            : requestedIconSize
 
         // Horizontal: 128pt icon + breathing room for 6 columns on typical displays.
         let hInset: CGFloat = 80
@@ -158,15 +175,15 @@ struct GridMetrics {
         cellWidth = iconSize
             + (unscaledCellWidth - iconSize) * Self.current.spacingScale
 
-        let vertical = Self.verticalPlacement(screenHeight: size.height, iconSize: iconSize)
-        let availableHeight = max(size.height - vertical.insetTop - vertical.insetBottom, 1)
-        let idealRow = availableHeight / CGFloat(Self.rows)
         let unscaledCellHeight = min(
-            max(idealRow, iconSize + vertical.minCellExtra),
+            max(idealRow, iconSize + vertical.minCellExtra + extraLabelHeight),
             vertical.maxCell
         )
-        cellHeight = iconSize
+        let preferredCellHeight = iconSize
             + (unscaledCellHeight - iconSize) * Self.current.spacingScale
+        cellHeight = vertical.centerInChromeBand
+            ? max(iconSize, min(preferredCellHeight, idealRow))
+            : preferredCellHeight
 
         gridWidth = cellWidth * CGFloat(Self.columns)
         gridHeight = cellHeight * CGFloat(Self.rows)
@@ -199,32 +216,27 @@ struct GridMetrics {
 
     private static func verticalPlacement(
         screenHeight: CGFloat,
-        iconSize: CGFloat
+        iconSize: CGFloat,
+        minimumGridTop: CGFloat
     ) -> VerticalPlacement {
         let comfortable = VerticalPlacement(
-            insetTop: 120,
+            insetTop: max(120, minimumGridTop),
             insetBottom: 96,
             minCellExtra: 48,
             maxCell: max(220, iconSize + 48),
             opticalLift: 12,
             centerInChromeBand: false
         )
-        guard current == .sevenByFive else { return comfortable }
-
-        let comfortableBlock = (iconSize + comfortable.minCellExtra) * CGFloat(rows)
+        let comfortableBlock = (iconSize + comfortable.minCellExtra * current.spacingScale) * CGFloat(rows)
             + comfortable.insetTop
             + comfortable.insetBottom
         guard screenHeight + 0.5 < comfortableBlock else { return comfortable }
 
-        // Search field occupies 36…74; page capsule sits ~36pt from the bottom.
-        let chromeTop = LaunchpadFieldHitArea.topInset
-            + LaunchpadFieldHitArea.fieldSize.height
-            + 6
         let chromeBottom = LaunchpadPageIndicatorHitArea.bottomInset
             + LaunchpadPageIndicatorHitArea.dotHeight
             + LaunchpadPageIndicatorHitArea.verticalPadding * 2
         return VerticalPlacement(
-            insetTop: chromeTop,
+            insetTop: minimumGridTop,
             insetBottom: chromeBottom,
             minCellExtra: 40,
             maxCell: comfortable.maxCell,

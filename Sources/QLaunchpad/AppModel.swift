@@ -589,9 +589,9 @@ final class AppStore: ObservableObject {
     private var pagePanOrigin: Double = 0
     /// The renderer owns adaptive infinite-canvas geometry because it depends
     /// on the live viewport. Keyboard navigation reads the same column count.
-    private var infiniteCanvasNavigationColumns = InfiniteCanvasMetrics.columns
+    private var infiniteCanvasNavigationColumns = InfiniteCanvasMetrics.maximumColumns
     /// Root-grid page captured when a folder opens, restored when it closes.
-    private var pageBeforeFolder: Double?
+    private(set) var pageBeforeFolder: Double?
     /// Root-grid page captured when search starts, restored when search clears.
     private var pageBeforeSearch: Double?
     private var scanTask: Task<Void, Never>?
@@ -622,14 +622,22 @@ final class AppStore: ObservableObject {
         "\(Self.freePlacementKey).\(activeLayoutProfileID)"
     }
 
-    var usesFreePlacement: Bool {
+    var usesFreePlacementOnRoot: Bool {
         UserDefaults.standard.bool(forKey: Self.freePlacementEnabledKey)
             && !GridLayoutPreset.current.isInfiniteCanvas
-            && layoutMode.isUser && !isSearching && openedFolderID == nil
+            && layoutMode.isUser
+    }
+
+    var usesFreePlacement: Bool {
+        usesFreePlacementOnRoot && !isSearching && openedFolderID == nil
+    }
+
+    func storedRootSlot(for item: LaunchpadItem, fallback index: Int) -> Int {
+        freePlacementSlots[item.id] ?? index
     }
 
     func slot(for item: LaunchpadItem, fallback index: Int) -> Int {
-        usesFreePlacement ? (freePlacementSlots[item.id] ?? index) : index
+        usesFreePlacement ? storedRootSlot(for: item, fallback: index) : index
     }
 
     func itemIndex(atSlot slot: Int) -> Int? {
@@ -1121,15 +1129,31 @@ final class AppStore: ObservableObject {
         return result
     }
 
-    private func syncOrganizedOrder() {
+    private func syncOrganizedOrder(useStoredSlots: Bool = false) {
+        let useSlots = useStoredSlots || usesFreePlacement
+        func position(of entry: (offset: Int, element: LaunchpadItem)) -> Int {
+            useSlots ? (freePlacementSlots[entry.element.id] ?? entry.offset) : entry.offset
+        }
         let sorted = launchpadItems.enumerated().sorted {
-            slot(for: $0.element, fallback: $0.offset)
-                < slot(for: $1.element, fallback: $1.offset)
+            position(of: $0) < position(of: $1)
         }.map { $0.element.id }
         guard sorted != itemOrderIDs else { return }
         itemOrderIDs = sorted
         rebuildLaunchpadItems()
         persistItemOrder()
+    }
+
+    func setFreePlacementEnabled(_ enabled: Bool) {
+        guard enabled != UserDefaults.standard.bool(forKey: Self.freePlacementEnabledKey) else { return }
+        if !enabled, !GridLayoutPreset.current.isInfiniteCanvas {
+            syncOrganizedOrder(useStoredSlots: true)
+        }
+        UserDefaults.standard.set(enabled, forKey: Self.freePlacementEnabledKey)
+        if enabled {
+            enableFreePlacementForOrganizing()
+        } else {
+            NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
+        }
     }
 
     func enableFreePlacementForOrganizing() {
@@ -1241,10 +1265,14 @@ final class AppStore: ObservableObject {
 
     var pageCount: Int {
         if usesFreePlacement {
-            return max(1, (freePlacementSlots.values.max() ?? 0) / max(pageCapacity, 1) + 1)
-                + (freePlacementDragActive ? 1 : 0)
+            return freePlacementPageCount
         }
         return max(1, Int(ceil(Double(max(activeDisplayItems.count, 1)) / Double(pageCapacity))))
+    }
+
+    var freePlacementPageCount: Int {
+        max(1, (freePlacementSlots.values.max() ?? 0) / max(pageCapacity, 1) + 1)
+            + (freePlacementDragActive ? 1 : 0)
     }
 
     var currentPage: Int {
@@ -1799,6 +1827,8 @@ final class AppStore: ObservableObject {
     }
 
     func applyGridLayoutChange() {
+        cancelActiveDrag()
+        freePlacementDragActive = false
         pageOffset = 0
         targetPage = 0
         pageVelocity = 0
@@ -1849,7 +1879,7 @@ final class AppStore: ObservableObject {
     func setInfiniteCanvasNavigationColumns(_ columns: Int) {
         infiniteCanvasNavigationColumns = min(
             max(columns, 1),
-            InfiniteCanvasMetrics.columns
+            InfiniteCanvasMetrics.maximumColumns
         )
     }
 
@@ -1963,9 +1993,8 @@ final class AppStore: ObservableObject {
         } ?? fallback
         let pageEnd = min(pageStart + pageCapacity, items.count)
         let local = current - pageStart
-        let navigationColumns = GridLayoutPreset.current.isInfiniteCanvas
-            ? infiniteCanvasNavigationColumns
-            : GridMetrics.columns
+        let isInfiniteCanvas = GridLayoutPreset.current.isInfiniteCanvas
+        let navigationColumns = isInfiniteCanvas ? infiniteCanvasNavigationColumns : GridMetrics.columns
         let row = local / navigationColumns
         let column = local % navigationColumns
         var destination = current
@@ -1987,13 +2016,17 @@ final class AppStore: ObservableObject {
                 let nextStart = (page + 1) * pageCapacity
                 destination = min(nextStart + row * navigationColumns, items.count - 1)
             }
-        case .up:
-            if row > 0 {
-                destination = current - navigationColumns
-            }
-        case .down:
-            if current + navigationColumns < pageEnd {
-                destination = current + navigationColumns
+        case .up, .down:
+            let rowOffset = direction == .up ? -1 : 1
+            if isInfiniteCanvas {
+                destination = InfiniteCanvasMetrics.verticalNeighbor(
+                    from: current, rowOffset: rowOffset, itemCount: items.count, columns: navigationColumns
+                ) ?? current
+            } else {
+                let next = current + rowOffset * navigationColumns
+                if (pageStart..<pageEnd).contains(next) {
+                    destination = next
+                }
             }
         }
 
@@ -2602,15 +2635,20 @@ final class AppStore: ObservableObject {
         guard allowsUserLayoutEditing,
               draggedAppID != targetAppID,
               launchpadItems.contains(where: { $0.id == draggedAppID && isApp($0) }),
-              launchpadItems.contains(where: { $0.id == targetAppID && isApp($0) }) else {
+              let targetSlotIndex = launchpadItems.firstIndex(where: { $0.id == targetAppID && isApp($0) }) else {
             return nil
         }
 
         let folder = AppFolder(name: L10n.tr("launchpad.folder"), appIDs: [targetAppID, draggedAppID])
+        if usesFreePlacement {
+            let targetSlot = slot(for: launchpadItems[targetSlotIndex], fallback: targetSlotIndex)
+            freePlacementSlots.removeValue(forKey: draggedAppID)
+            freePlacementSlots.removeValue(forKey: targetAppID)
+            freePlacementSlots[folder.id] = targetSlot
+        }
         folders.append(folder)
         let targetIndex = itemOrderIDs.firstIndex(of: targetAppID)
-            ?? launchpadItems.firstIndex(where: { $0.id == targetAppID })
-            ?? itemOrderIDs.endIndex
+            ?? targetSlotIndex
         let draggedIndex = itemOrderIDs.firstIndex(of: draggedAppID)
         let insertionIndex = targetIndex - ((draggedIndex ?? targetIndex) < targetIndex ? 1 : 0)
         itemOrderIDs.removeAll { $0 == draggedAppID || $0 == targetAppID }
@@ -2620,14 +2658,6 @@ final class AppStore: ObservableObject {
         reconcileLaunchpadItems()
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
         return folder
-    }
-
-    /// Move a top-level app into an existing folder. Nested folders are not
-    /// created; dragging a folder remains a top-level reorder operation.
-    func moveAppIntoFolder(appID: String, folderID: String) {
-        guard !isSearching,
-              launchpadItems.contains(where: { $0.id == appID && isApp($0) }) else { return }
-        _ = moveAppToFolder(appID: appID, folderID: folderID)
     }
 
     func moveApp(from source: Int, to destination: Int) {

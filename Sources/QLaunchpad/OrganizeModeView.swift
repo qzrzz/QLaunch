@@ -489,15 +489,7 @@ final class OrganizeModeView: NSView {
     @objc private func close() { onClose() }
 
     @objc private func toggleFreePlacement() {
-        UserDefaults.standard.set(
-            freePlacementToggle.state == .on,
-            forKey: AppStore.freePlacementEnabledKey
-        )
-        if freePlacementToggle.state == .on {
-            store.enableFreePlacementForOrganizing()
-        } else {
-            NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
-        }
+        store.setFreePlacementEnabled(freePlacementToggle.state == .on)
     }
 
     @objc private func layoutChanged() {

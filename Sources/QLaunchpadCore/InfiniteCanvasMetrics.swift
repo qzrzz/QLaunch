@@ -1,10 +1,10 @@
 import CoreGraphics
 import Foundation
 
-/// World-space geometry for the non-paged 16 × N canvas. Its unscaled cell
+/// World-space geometry for the non-paged canvas, with at most 16 columns. Its unscaled cell
 /// pitch deliberately matches the existing 6 × 4 layout.
 public struct InfiniteCanvasMetrics: Equatable, Sendable {
-    public static let columns = 16
+    public static let maximumColumns = 16
     public static let panBoundaryPadding: CGFloat = 200
 
     public let size: CGSize
@@ -18,44 +18,37 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
     public let availableSize: CGSize
     public let maximumScale: CGFloat
 
-    private let centersIncompleteLastRow: Bool
-
     public init(
         size: CGSize,
         itemCount: Int,
-        adaptsToItemCount: Bool = false,
-        maximumScale: CGFloat = 1
+        maximumScale: CGFloat = 1,
+        topInset: CGFloat = 120
     ) {
         self.size = size
         self.itemCount = max(itemCount, 0)
         self.maximumScale = max(maximumScale, 1)
-        centersIncompleteLastRow = adaptsToItemCount
 
         let iconSize: CGFloat = 128
         let hInset: CGFloat = 80
-        let vInsetTop: CGFloat = 120
         let vInsetBottom: CGFloat = 96
         let availableWidth = max(size.width - hInset * 2, 1)
-        let availableHeight = max(size.height - vInsetTop - vInsetBottom, 1)
+        let availableHeight = max(size.height - topInset - vInsetBottom, 1)
         availableSize = CGSize(width: availableWidth, height: availableHeight)
         viewportCenter = CGPoint(
             x: size.width * 0.5,
-            y: vInsetTop + availableHeight * 0.5
+            y: topInset + availableHeight * 0.5
         )
 
         let idealCellWidth = availableWidth / 6
         cellWidth = min(max(idealCellWidth, iconSize + 28), 220)
         let idealCellHeight = availableHeight / 4
         cellHeight = min(max(idealCellHeight, iconSize + 48), 220)
-        columnCount = adaptsToItemCount
-            ? Self.bestFittingColumnCount(
-                itemCount: itemCount,
-                availableSize: availableSize,
-                cellWidth: cellWidth,
-                cellHeight: cellHeight,
-                maximumScale: self.maximumScale
-            )
-            : Self.columns
+        columnCount = Self.bestFittingColumnCount(
+            itemCount: self.itemCount,
+            availableSize: availableSize,
+            cellWidth: cellWidth,
+            cellHeight: cellHeight
+        )
         rows = max(1, Int(ceil(Double(max(itemCount, 1)) / Double(columnCount))))
         worldSize = CGSize(
             width: cellWidth * CGFloat(columnCount),
@@ -114,9 +107,7 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
         guard column >= 0, column < columnCount, row >= 0, row < rows else { return nil }
         let rowStart = row * columnCount
         let itemsInRow = min(columnCount, max(itemCount - rowStart, 0))
-        let rowOffset = centersIncompleteLastRow
-            ? CGFloat(columnCount - itemsInRow) * cellWidth * 0.5
-            : 0
+        let rowOffset = rowLeadingOffset(itemsInRow: itemsInRow)
         let adjustedColumn = Int(floor((worldX - rowOffset) / cellWidth))
         guard adjustedColumn >= 0, adjustedColumn < itemsInRow else { return nil }
         let index = rowStart + adjustedColumn
@@ -210,33 +201,52 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
         let column = index % columnCount
         let rowStart = row * columnCount
         let itemsInRow = min(columnCount, max(itemCount - rowStart, 0))
-        let rowOffset = centersIncompleteLastRow
-            ? CGFloat(columnCount - itemsInRow) * cellWidth * 0.5
-            : 0
+        let rowOffset = rowLeadingOffset(itemsInRow: itemsInRow)
         return CGPoint(
             x: rowOffset + cellWidth * (CGFloat(column) + 0.5),
             y: cellHeight * (CGFloat(row) + 0.5)
         )
     }
 
+    private func rowLeadingOffset(itemsInRow: Int) -> CGFloat {
+        Self.leadingColumns(columns: columnCount, itemsInRow: itemsInRow) * cellWidth
+    }
+
+    private static func leadingColumns(columns: Int, itemsInRow: Int) -> CGFloat {
+        CGFloat(columns - itemsInRow) * 0.5
+    }
+
+    public static func verticalNeighbor(
+        from index: Int, rowOffset: Int, itemCount: Int, columns: Int
+    ) -> Int? {
+        let currentRow = index / columns
+        let currentStart = currentRow * columns
+        let nextStart = (currentRow + rowOffset) * columns
+        guard nextStart >= 0, nextStart < itemCount else { return nil }
+        let currentCount = min(columns, itemCount - currentStart)
+        let nextCount = min(columns, itemCount - nextStart)
+        let currentColumn = CGFloat(index - currentStart)
+            + leadingColumns(columns: columns, itemsInRow: currentCount)
+        let nextColumn = Int((currentColumn - leadingColumns(columns: columns, itemsInRow: nextCount)).rounded())
+        return nextStart + min(max(nextColumn, 0), nextCount - 1)
+    }
+
     private static func bestFittingColumnCount(
         itemCount: Int,
         availableSize: CGSize,
         cellWidth: CGFloat,
-        cellHeight: CGFloat,
-        maximumScale: CGFloat
+        cellHeight: CGFloat
     ) -> Int {
-        let maximum = min(max(itemCount, 1), columns)
+        let maximum = min(max(itemCount, 1), maximumColumns)
         var bestColumns = 1
         var bestScale: CGFloat = 0
         for candidate in 1...maximum {
             let candidateRows = max(1, Int(ceil(Double(max(itemCount, 1)) / Double(candidate))))
+            // Compare the grids before applying the icon size ceiling. Sparse
+            // grids can all hit that ceiling without using the space equally.
             let scale = min(
-                maximumScale,
-                0.92 * min(
-                    availableSize.width / max(cellWidth * CGFloat(candidate), 1),
-                    availableSize.height / max(cellHeight * CGFloat(candidateRows), 1)
-                )
+                availableSize.width / (cellWidth * CGFloat(candidate)),
+                availableSize.height / (cellHeight * CGFloat(candidateRows))
             )
             if scale > bestScale + 0.0001
                 || (abs(scale - bestScale) <= 0.0001 && candidate > bestColumns) {

@@ -4,6 +4,54 @@ import XCTest
 final class InfiniteCanvasMetricsTests: XCTestCase {
     private let viewport = CGSize(width: 1440, height: 900)
 
+    func testSparseCanvasUsesFewerColumnsAndCentersTheIncompleteRow() {
+        let metrics = InfiniteCanvasMetrics(size: viewport, itemCount: 5)
+        XCTAssertEqual(metrics.columnCount, 3)
+        XCTAssertEqual(metrics.rows, 2)
+
+        let left = metrics.screenCenter(globalIndex: 3, scale: 1, pan: .zero)
+        let right = metrics.screenCenter(globalIndex: 4, scale: 1, pan: .zero)
+        XCTAssertEqual((left.x + right.x) / 2, metrics.viewportCenter.x, accuracy: 0.001)
+        XCTAssertEqual(metrics.itemIndex(atTopLeftPoint: left, scale: 1, pan: .zero), 3)
+        XCTAssertEqual(metrics.itemIndex(atTopLeftPoint: right, scale: 1, pan: .zero), 4)
+        XCTAssertEqual(InfiniteCanvasMetrics.verticalNeighbor(from: 2, rowOffset: 1, itemCount: 5, columns: 3), 4)
+        XCTAssertEqual(InfiniteCanvasMetrics.verticalNeighbor(from: 4, rowOffset: -1, itemCount: 5, columns: 3), 2)
+    }
+
+    func testCanvasKeepsSixteenAsTheColumnLimit() {
+        let empty = InfiniteCanvasMetrics(size: viewport, itemCount: 0)
+        XCTAssertEqual(empty.columnCount, 1)
+        XCTAssertNil(empty.itemIndex(atTopLeftPoint: empty.viewportCenter, scale: 1, pan: .zero))
+
+        let dense = InfiniteCanvasMetrics(size: viewport, itemCount: 800)
+        XCTAssertEqual(dense.columnCount, InfiniteCanvasMetrics.maximumColumns)
+        XCTAssertGreaterThanOrEqual(dense.columnCount * dense.rows, dense.itemCount)
+    }
+
+    func testHoverMagnifiesTheFocusAndMakesRoomAroundIt() {
+        let anchor = CGPoint(x: 500, y: 500)
+        let lens = CanvasHoverMagnification(anchor: anchor, strength: 1)
+        func transform(_ x: CGFloat, _ y: CGFloat) -> (center: CGPoint, scale: CGFloat) {
+            lens.transform(center: CGPoint(x: x, y: y), scale: 1, cellWidth: 200, cellHeight: 180)
+        }
+
+        let focus = transform(500, 500)
+        let left = transform(300, 500)
+        let right = transform(700, 500)
+        let below = transform(500, 680)
+        let distant = transform(900, 500)
+
+        XCTAssertEqual(focus.center, anchor)
+        XCTAssertEqual(focus.scale, 1.18, accuracy: 0.001)
+        XCTAssertGreaterThan(right.scale, 1)
+        XCTAssertLessThan(right.scale, focus.scale)
+        XCTAssertGreaterThan(right.center.x, 700)
+        XCTAssertGreaterThan(below.center.y, 680)
+        XCTAssertEqual(anchor.x - left.center.x, right.center.x - anchor.x, accuracy: 0.001)
+        XCTAssertEqual(distant.center, CGPoint(x: 900, y: 500))
+        XCTAssertEqual(distant.scale, 1)
+    }
+
     func testTouchZoomKeepsWorldPointUnderOffCenterFinger() {
         let metrics = InfiniteCanvasMetrics(size: viewport, itemCount: 128, maximumScale: 2)
         let anchor = CGPoint(x: 810, y: 370)
