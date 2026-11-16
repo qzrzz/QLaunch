@@ -17,7 +17,18 @@
 "settings.menuBarIcon" = "菜单栏图标";
 "settings.section.display" = "显示";
 "settings.showAppNames" = "显示应用名称";
+"settings.appLabelSize" = "应用名称字号";
+"settings.appLabelSize.small" = "小";
+"settings.appLabelSize.medium" = "中";
+"settings.appLabelSize.large" = "大";
+"settings.searchFieldSize" = "搜索框大小";
+"settings.searchFieldSize.compact" = "小";
+"settings.searchFieldSize.standard" = "中";
+"settings.searchFieldSize.large" = "大";
 "settings.layout" = "布局";
+"settings.canvasHoverMagnification" = "鼠标悬停时放大图标";
+"settings.iconArrangement" = "图标排列";
+"settings.compactPlacement" = "自动紧凑排列";
 "settings.freePlacement" = "自由放置图标";
 "organize.menu" = "整理页面…";
 "organize.title" = "整理页面";
@@ -234,6 +245,8 @@
 "settings.trackpad.three" = "三指捏合";
 "settings.trackpad.five" = "五指捏合";
 "settings.trackpad.compatibility" = "若与系统启动台冲突，请尝试三指或五指。";
+"settings.trackpad.desktopPermission" = "在辅助功能中允许 QLaunch 后，启动台打开时，张开手指只会退出启动台。";
+"settings.trackpad.openAccessibility" = "打开辅助功能设置";
 "settings.trackpad.unavailable" = "未检测到可用的触摸板，或当前系统不支持。";
 
 "appRename.description" = "自定义名称用于显示和搜索。";

@@ -23,25 +23,42 @@ private final class TrackpadFrameProcessor: @unchecked Sendable {
     private let lock = NSLock()
     private var mode = TrackpadGestureMode.disabled
     private var generation = 0
-    private var recognizers: [UInt: TrackpadPinchRecognizer] = [:]
+    private var sequences: [UInt: TrackpadPinchRecognizer] = [:]
+    private var devicesWithFiveContacts: Set<UInt> = []
 
     func configure(mode: TrackpadGestureMode) -> Int {
         lock.lock()
         defer { lock.unlock() }
         self.mode = mode
         generation += 1
-        recognizers.removeAll()
+        sequences.removeAll()
+        devicesWithFiveContacts.removeAll()
         return generation
+    }
+
+    var hasFiveContacts: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !devicesWithFiveContacts.isEmpty
     }
 
     func receive(device: UInt, touches: [TrackpadTouch], timestamp: Double) {
         lock.lock()
-        let triggered = recognizers[device, default: TrackpadPinchRecognizer()].update(touches: touches, timestamp: timestamp, mode: mode)
+        if touches.count == 5 {
+            devicesWithFiveContacts.insert(device)
+        } else {
+            devicesWithFiveContacts.remove(device)
+        }
+        let events = sequences[device, default: TrackpadPinchRecognizer()].update(
+            touches: touches, timestamp: timestamp, mode: mode
+        )
         let token = generation
         lock.unlock()
-        if let triggered {
+        if !events.isEmpty {
             DispatchQueue.main.async {
-                LaunchpadGestureCenter.shared.trigger(triggered, generation: token)
+                for event in events {
+                    LaunchpadGestureCenter.shared.receive(event, device: device, generation: token)
+                }
             }
         }
     }
@@ -51,11 +68,29 @@ private final class TrackpadFrameProcessor: @unchecked Sendable {
 final class LaunchpadGestureCenter: ObservableObject {
     static let shared = LaunchpadGestureCenter()
     @Published private(set) var unavailable = false
-    var onTrigger: ((TrackpadPinchDirection) -> Void)?
+    @Published private(set) var canInterceptSystemSpread = false
+    var onProgress: ((TrackpadPinchDirection, CGFloat) -> Bool)?
+    var onRelease: ((TrackpadPinchDirection, Bool) -> Void)?
+    var visibleLaunchpadGeneration: (() -> UInt?)?
+    var launchpadGeneration: (() -> UInt?)?
+
+    private struct GestureStart {
+        let desktopWasActive: Bool?
+        let launchpadGeneration: UInt?
+    }
+    private var gestureStarts: [UInt: GestureStart] = [:]
+    private var activeGesture: (device: UInt, direction: TrackpadPinchDirection)?
+    private var desktopRestoreTask: Task<Void, Never>?
+    private var dockPinchTap: CFMachPort?
+    private var dockPinchSource: CFRunLoopSource?
+    private var isInterceptingDockPinch = false
+    private var interceptedDockPinchSinceTouchDown = false
+
     private var generation = 0
     private var installed = false
     private var sleeping = false
     private var preferenceObserver: NSObjectProtocol?
+    private var activationObserver: NSObjectProtocol?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var notificationPort: IONotificationPortRef?
     private var addedIterator: io_iterator_t = 0
@@ -90,6 +125,11 @@ final class LaunchpadGestureCenter: ObservableObject {
                 self?.stop()
             }
         })
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.installDockPinchTapIfNeeded() }
+        }
         observeDevices()
         reload()
     }
@@ -101,6 +141,8 @@ final class LaunchpadGestureCenter: ObservableObject {
         stop()
         if let preferenceObserver { NotificationCenter.default.removeObserver(preferenceObserver) }
         preferenceObserver = nil
+        if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+        activationObserver = nil
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         workspaceObservers.removeAll()
         if addedIterator != 0 { IOObjectRelease(addedIterator); addedIterator = 0 }
@@ -117,7 +159,14 @@ final class LaunchpadGestureCenter: ObservableObject {
 
     private func stop() {
         QLMultitouchStop()
+        removeDockPinchTap()
+        desktopRestoreTask?.cancel()
+        desktopRestoreTask = nil
         generation = TrackpadFrameProcessor.shared.configure(mode: .disabled)
+        gestureStarts.removeAll()
+        let direction = activeGesture?.direction
+        activeGesture = nil
+        if let direction { onRelease?(direction, false) }
     }
 
     private func reload() {
@@ -136,11 +185,138 @@ final class LaunchpadGestureCenter: ObservableObject {
             TrackpadFrameProcessor.shared.receive(device: device, touches: touches, timestamp: timestamp)
         }
         unavailable = count <= 0
+        installDockPinchTapIfNeeded()
     }
 
-    fileprivate func trigger(_ direction: TrackpadPinchDirection, generation: Int) {
+    fileprivate func receive(_ event: TrackpadPinchRecognizer.Event, device: UInt, generation: Int) {
         guard installed, self.generation == generation, activeMode != .disabled else { return }
-        onTrigger?(direction)
+        switch event {
+        case .began:
+            desktopRestoreTask?.cancel()
+            desktopRestoreTask = nil
+            if gestureStarts.isEmpty {
+                interceptedDockPinchSinceTouchDown = isInterceptingDockPinch
+            }
+            let visibleGeneration = visibleLaunchpadGeneration?()
+            gestureStarts[device] = GestureStart(
+                desktopWasActive: visibleGeneration != nil && activeMode == .three
+                    ? nil : SystemDesktopReveal.isActive(),
+                launchpadGeneration: visibleGeneration
+            )
+        case .changed(let motion):
+            guard let start = gestureStarts[device] else { return }
+            if let activeGesture {
+                guard activeGesture.device == device else { return }
+            } else {
+                switch motion.direction {
+                case .inward:
+                    guard start.launchpadGeneration == nil, start.desktopWasActive != true,
+                          SystemDesktopReveal.isActive() != true else {
+                        gestureStarts.removeValue(forKey: device)
+                        return
+                    }
+                case .outward:
+                    guard let launchpadGeneration = start.launchpadGeneration,
+                          visibleLaunchpadGeneration?() == launchpadGeneration else { return }
+                }
+            }
+            if onProgress?(motion.direction, CGFloat(motion.progress)) == true {
+                activeGesture = (device, motion.direction)
+            }
+        case .ended(let motion):
+            endGesture(on: device, shouldComplete: motion?.shouldComplete == true)
+        case .cancelled:
+            endGesture(on: device, shouldComplete: false)
+        }
+    }
+
+    private func endGesture(on device: UInt, shouldComplete: Bool) {
+        let start = gestureStarts.removeValue(forKey: device)
+        guard let activeGesture, activeGesture.device == device else { return }
+        self.activeGesture = nil
+        onRelease?(activeGesture.direction, shouldComplete)
+        if activeGesture.direction == .outward, activeMode != .three,
+           start?.desktopWasActive == false, let presentation = start?.launchpadGeneration,
+           !interceptedDockPinchSinceTouchDown {
+            restoreDesktopAfterSpread(in: presentation)
+        }
+    }
+
+    private func restoreDesktopAfterSpread(in presentation: UInt) {
+        // Some systems don't expose a writable event tap. If the system acted
+        // on this stroke, restore its previous state outside the animation clock.
+        desktopRestoreTask?.cancel()
+        desktopRestoreTask = Task { [weak self] in
+            for delay in [130, 150] {
+                try? await Task.sleep(for: .milliseconds(delay))
+                guard !Task.isCancelled, let self,
+                      self.launchpadGeneration?() == presentation,
+                      !self.interceptedDockPinchSinceTouchDown else { return }
+                SystemDesktopReveal.restoreWindowsIfDesktopIsActive()
+            }
+        }
+    }
+
+    private func installDockPinchTapIfNeeded() {
+        guard installed, !sleeping, !unavailable,
+              activeMode == .fourOrFive || activeMode == .five,
+              dockPinchTap == nil else { return }
+
+        // CGEvent type 30 is DockControl. Subscribe only to this stream.
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+            eventsOfInterest: 1 << 30,
+            callback: { _, type, event, _ in
+                MainActor.assumeIsolated { LaunchpadGestureCenter.shared.filterDockPinch(type, event) }
+            }, userInfo: nil
+        ), let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else { return }
+        dockPinchTap = tap
+        dockPinchSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        canInterceptSystemSpread = true
+    }
+
+    private func removeDockPinchTap() {
+        if let source = dockPinchSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        if let tap = dockPinchTap { CFMachPortInvalidate(tap) }
+        dockPinchTap = nil
+        dockPinchSource = nil
+        isInterceptingDockPinch = false
+        interceptedDockPinchSinceTouchDown = false
+        if canInterceptSystemSpread { canInterceptSystemSpread = false }
+    }
+
+    private func filterDockPinch(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            isInterceptingDockPinch = false
+            interceptedDockPinchSinceTouchDown = false
+            if let tap = dockPinchTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                canInterceptSystemSpread = CGEvent.tapIsEnabled(tap: tap)
+            }
+            return .passUnretained(event)
+        }
+
+        // DockSwipe (field 110) with the pinch axis (field 123).
+        // Horizontal Spaces and vertical Mission Control swipes pass through.
+        guard type.rawValue == 30,
+              event.getIntegerValueField(CGEventField(rawValue: 110)!) == 23,
+              event.getIntegerValueField(CGEventField(rawValue: 123)!) == 3 else {
+            return .passUnretained(event)
+        }
+        // Hold ownership through the final phase even if the panel has closed.
+        let phase = event.getIntegerValueField(CGEventField(rawValue: 132)!)
+        if phase == 1 {
+            isInterceptingDockPinch = (activeGesture?.direction == .outward || visibleLaunchpadGeneration?() != nil)
+                && (activeMode != .five || TrackpadFrameProcessor.shared.hasFiveContacts)
+            if isInterceptingDockPinch { interceptedDockPinchSinceTouchDown = true }
+        }
+        guard isInterceptingDockPinch else { return .passUnretained(event) }
+        if phase == 4 || phase == 8 { isInterceptingDockPinch = false }
+        return nil
     }
 
     fileprivate func scheduleReload() {

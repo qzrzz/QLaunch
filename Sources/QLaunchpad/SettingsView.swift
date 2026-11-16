@@ -102,8 +102,13 @@ private struct GeneralSettingsView: View {
     @AppStorage(QLaunchpadPreferences.showDockIconKey)
     private var showDockIcon = QLaunchpadPreferences.defaultShowDockIcon
     @AppStorage("showLabels") private var showLabels = true
+    @AppStorage(AppLabelSize.defaultsKey) private var appLabelSize = AppLabelSize.defaultSize
+    @AppStorage(LaunchpadSearchFieldSize.defaultsKey)
+    private var searchFieldSize = LaunchpadSearchFieldSize.defaultSize.rawValue
     @AppStorage(GridLayoutPreset.defaultsKey)
     private var gridLayoutPreset = GridLayoutPreset.defaultPreset.rawValue
+    @AppStorage(GridLayoutPreset.canvasHoverMagnificationKey)
+    private var canvasHoverMagnification = GridLayoutPreset.defaultCanvasHoverMagnification
     @AppStorage(AppStore.freePlacementEnabledKey)
     private var freePlacementEnabled = false
     @AppStorage(IconRenderQuality.defaultsKey)
@@ -222,10 +227,42 @@ private struct GeneralSettingsView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if !trackpadGestures.unavailable, !trackpadGestures.canInterceptSystemSpread,
+                   let mode = TrackpadGestureMode(rawValue: trackpadGestureMode),
+                   mode == .fourOrFive || mode == .five {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L10n.tr("settings.trackpad.desktopPermission"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button(L10n.tr("settings.trackpad.openAccessibility")) {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                }
             }
 
             Section(L10n.tr("settings.section.display")) {
                 Toggle(L10n.tr("settings.showAppNames"), isOn: $showLabels)
+                Picker(L10n.tr("settings.appLabelSize"), selection: $appLabelSize) {
+                    ForEach(AppLabelSize.allCases, id: \.self) { size in
+                        Text(L10n.tr("settings.appLabelSize." + size.rawValue)).tag(size)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(!showLabels)
+                Picker(L10n.tr("settings.searchFieldSize"), selection: $searchFieldSize) {
+                    ForEach(LaunchpadSearchFieldSize.allCases, id: \.self) { size in
+                        Text(L10n.tr("settings.searchFieldSize." + size.rawValue)).tag(size.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: searchFieldSize) { _, _ in
+                    NotificationCenter.default.post(name: .qlaunchpadSearchFieldSizeChanged, object: nil)
+                }
+
                 Picker(L10n.tr("settings.layout"), selection: $gridLayoutPreset) {
                     ForEach(GridLayoutPreset.menuGroups.indices, id: \.self) { groupIndex in
                         if groupIndex > 0 {
@@ -240,12 +277,19 @@ private struct GeneralSettingsView: View {
                 .onChange(of: gridLayoutPreset) { _, _ in
                     NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
                 }
+                if GridLayoutPreset(rawValue: gridLayoutPreset)?.isInfiniteCanvas == true {
+                    Toggle(L10n.tr("settings.canvasHoverMagnification"), isOn: $canvasHoverMagnification)
+                }
 
-                Toggle(L10n.tr("settings.freePlacement"), isOn: $freePlacementEnabled)
-                    .toggleStyle(.switch)
-                    .onChange(of: freePlacementEnabled) { _, _ in
-                        NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
-                    }
+                Picker(L10n.tr("settings.iconArrangement"), selection: Binding(
+                    get: { !GridLayoutPreset.current.isInfiniteCanvas && freePlacementEnabled },
+                    set: { store.setFreePlacementEnabled($0) }
+                )) {
+                    Text(L10n.tr("settings.compactPlacement")).tag(false)
+                    Text(L10n.tr("settings.freePlacement")).tag(true)
+                }
+                .pickerStyle(.menu)
+                .disabled(GridLayoutPreset.current.isInfiniteCanvas)
 
                 Picker(selection: $iconRenderQuality) {
                     ForEach(IconRenderQuality.allCases) { quality in
