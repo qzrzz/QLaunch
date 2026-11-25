@@ -62,7 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var destination: CGFloat?
     }
     private var trackpadPresentation: TrackpadPresentation?
-    private var canvasPinchSubscription: AnyCancellable?
+    private var gesturePresentationSubscription: AnyCancellable?
     private var launchReason: LaunchpadLaunchReason = .user
     private var ignoreReopenUntil: Date?
     /// Ignore Dock reopen until the first homepage icons are on screen.
@@ -352,7 +352,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         center.install()
-        canvasPinchSubscription = store.$presentation.removeDuplicates().sink { presentation in
+        gesturePresentationSubscription = store.$presentation.removeDuplicates().sink { presentation in
+            center.setDockPinchEnabled(presentation == .visible || presentation == .dismissing)
             center.setCanvasPinchEnabled(presentation == .visible && GridLayoutPreset.current.isInfiniteCanvas)
         }
     }

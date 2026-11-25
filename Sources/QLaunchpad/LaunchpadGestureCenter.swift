@@ -24,7 +24,7 @@ private final class TrackpadFrameProcessor: @unchecked Sendable {
     private var mode = TrackpadGestureMode.disabled
     private var generation = 0
     private var sequences: [UInt: TrackpadPinchRecognizer] = [:]
-    private var devicesWithFiveContacts: Set<UInt> = []
+    private var devicesWithDockPinchContacts: Set<UInt> = []
     private var canvasPinchEnabled = false
     private var canvasGeneration = 0
     private var canvasPinches: [UInt: TrackpadCanvasPinch] = [:]
@@ -35,7 +35,7 @@ private final class TrackpadFrameProcessor: @unchecked Sendable {
         self.mode = mode
         generation += 1
         sequences.removeAll()
-        devicesWithFiveContacts.removeAll()
+        devicesWithDockPinchContacts.removeAll()
         canvasGeneration += 1
         canvasPinches.removeAll()
         return generation
@@ -53,18 +53,16 @@ private final class TrackpadFrameProcessor: @unchecked Sendable {
         lock.withLock { canvasPinchEnabled && canvasGeneration == generation }
     }
 
-    var hasFiveContacts: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return !devicesWithFiveContacts.isEmpty
+    var hasDockPinchContacts: Bool {
+        lock.withLock { !devicesWithDockPinchContacts.isEmpty }
     }
 
     func receive(device: UInt, touches: [TrackpadTouch], timestamp: Double) {
         lock.lock()
-        if touches.count == 5 {
-            devicesWithFiveContacts.insert(device)
+        if (mode == .fourOrFive || mode == .five), mode.accepts(touches.count) {
+            devicesWithDockPinchContacts.insert(device)
         } else {
-            devicesWithFiveContacts.remove(device)
+            devicesWithDockPinchContacts.remove(device)
         }
         let events = sequences[device, default: TrackpadPinchRecognizer()].update(
             touches: touches, timestamp: timestamp, mode: mode
@@ -108,6 +106,7 @@ final class LaunchpadGestureCenter: ObservableObject {
     private var desktopRestoreTask: Task<Void, Never>?
     private var dockPinchTap: CFMachPort?
     private var dockPinchSource: CFRunLoopSource?
+    private var dockPinchEnabled = false
     private var isInterceptingDockPinch = false
 
     private var generation = 0
@@ -180,6 +179,15 @@ final class LaunchpadGestureCenter: ObservableObject {
     private var isListeningToTrackpad = false
 
     var handlesCanvasPinch: Bool { canvasPinchEnabled && isListeningToTrackpad }
+
+    func setDockPinchEnabled(_ enabled: Bool) {
+        guard dockPinchEnabled != enabled else { return }
+        dockPinchEnabled = enabled
+        // Release the session-level filter when the launcher is offscreen,
+        // including any stale gesture whose terminal event was never delivered.
+        if !enabled { isInterceptingDockPinch = false }
+        if let tap = dockPinchTap { CGEvent.tapEnable(tap: tap, enable: enabled) }
+    }
 
     func setCanvasPinchEnabled(_ enabled: Bool) {
         guard canvasPinchEnabled != enabled else { return }
@@ -322,8 +330,8 @@ final class LaunchpadGestureCenter: ObservableObject {
         ), let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else { return }
         dockPinchTap = tap
         dockPinchSource = source
+        CGEvent.tapEnable(tap: tap, enable: dockPinchEnabled)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
         canInterceptSystemSpread = true
     }
 
@@ -339,6 +347,7 @@ final class LaunchpadGestureCenter: ObservableObject {
     }
 
     private func filterDockPinch(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard dockPinchEnabled else { return .passUnretained(event) }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             isInterceptingDockPinch = false
             if let tap = dockPinchTap {
@@ -358,8 +367,8 @@ final class LaunchpadGestureCenter: ObservableObject {
         // Hold ownership through the final phase even if the panel has closed.
         let phase = event.getIntegerValueField(CGEventField(rawValue: 132)!)
         if phase == 1 {
-            isInterceptingDockPinch = (activeGesture?.direction == .outward || visibleLaunchpad?() != nil)
-                && (activeMode != .five || TrackpadFrameProcessor.shared.hasFiveContacts)
+            isInterceptingDockPinch = TrackpadFrameProcessor.shared.hasDockPinchContacts
+                && (activeGesture?.direction == .outward || visibleLaunchpad?() != nil)
         }
         guard isInterceptingDockPinch else { return .passUnretained(event) }
         if phase == 4 || phase == 8 { isInterceptingDockPinch = false }
