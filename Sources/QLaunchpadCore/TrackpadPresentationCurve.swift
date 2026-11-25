@@ -1,6 +1,18 @@
 import Foundation
 
 public enum TrackpadPresentationCurve {
+    /// Fade the remaining sliver of a downward-flying icon at the screen edge.
+    public static func bottomEdgeFlightOpacity(
+        centerY: CGFloat, restingCenterY: CGFloat, iconSize: CGFloat, viewportHeight: CGFloat
+    ) -> CGFloat {
+        guard centerY > restingCenterY, iconSize > 0 else { return 1 }
+        let radius = iconSize * 0.5
+        let fadeStart = max(viewportHeight - radius, restingCenterY)
+        let fadeEnd = max(viewportHeight, fadeStart + radius * 0.5)
+        let t = min(1, max(0, (fadeEnd - centerY) / (fadeEnd - fadeStart)))
+        return t * t * (3 - 2 * t)
+    }
+
     /// A gentle start followed by progressively stronger blur, normalized
     /// so the last gesture frame matches the configured blur exactly.
     public static func blurProgress(_ progress: CGFloat) -> CGFloat {

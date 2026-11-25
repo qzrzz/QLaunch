@@ -27,6 +27,9 @@
 "settings.searchFieldSize.large" = "Large";
 "settings.layout" = "Layout";
 "settings.canvasHoverMagnification" = "Magnify Icons on Hover";
+"settings.canvasArrangement" = "Canvas Arrangement";
+"settings.canvasArrangement.grid" = "Grid";
+"settings.canvasArrangement.starRing" = "Star Rings";
 "settings.iconArrangement" = "Icon Arrangement";
 "settings.compactPlacement" = "Automatically Fill Gaps";
 "settings.freePlacement" = "Freely arrange icons";
@@ -65,7 +68,7 @@
 "settings.background.custom.unavailable" = "This image is no longer available. Choose another one.";
 "settings.section.animation" = "Animation";
 "settings.animation" = "Transition Animation";
-"settings.animation.detail" = "The icon animation used when showing or hiding the page.";
+"settings.animation.detail" = "Choose how icons enter and exit. When motion is enabled, icons fly in from the hot corner that opens QLaunch.";
 "settings.section.keyboard" = "Keyboard";
 "settings.keyboard.toggle" = "Open / Close";
 "settings.keyboard.close" = "Close";
@@ -145,6 +148,7 @@
 "sources.rescan.accessibility" = "Rescan application sources";
 "launchpad.search" = "Search";
 "launchpad.searchApps" = "Search applications";
+"launchpad.searchResultLocation" = "Location of %1$@: %2$@";
 "launchpad.clearSearch" = "Clear search";
 "launchpad.openSettings" = "Open Settings";
 "launchpad.folder" = "Folder";
@@ -190,6 +194,7 @@
 "animation.fly" = "Fly In (iOS Home Screen)";
 "animation.classic" = "Classic";
 "animation.zoom" = "Zoom";
+"animation.lift" = "Rise";
 "animation.fade" = "Fade";
 "animation.none" = "None";
 "grid.infiniteCanvas.128" = "Infinite Canvas (128pt)";

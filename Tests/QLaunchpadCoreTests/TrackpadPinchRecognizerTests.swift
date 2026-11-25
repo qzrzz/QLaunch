@@ -2,6 +2,24 @@ import XCTest
 @testable import QLaunchpadCore
 
 final class TrackpadPinchRecognizerTests: XCTestCase {
+    func testFourFingerSpreadCanFinishVisuallyBeforeReleaseAndReverse() throws {
+        var detector = TrackpadPinchRecognizer()
+        _ = detector.update(touches: touches(4, radius: 0.2), timestamp: 1, mode: .fourOrFive)
+        let spread = try XCTUnwrap(motion(in: detector.update(
+            touches: touches(4, radius: 0.34), timestamp: 1.1, mode: .fourOrFive
+        )))
+        XCTAssertEqual(spread.progress, 1)
+        XCTAssertTrue(spread.shouldComplete)
+        XCTAssertEqual(detector.update(
+            touches: touches(4, radius: 0.34), timestamp: 2, mode: .fourOrFive
+        ), [])
+        let reversed = try XCTUnwrap(motion(in: detector.update(
+            touches: touches(4, radius: 0.2), timestamp: 2.1, mode: .fourOrFive
+        )))
+        XCTAssertEqual(reversed.progress, 0)
+        XCTAssertFalse(reversed.shouldComplete)
+    }
+
     private func touches(
         _ count: Int, radius: Double, offset: Double = 0, firstID: Int = 0
     ) -> [TrackpadTouch] {

@@ -27,6 +27,9 @@
 "settings.searchFieldSize.large" = "大";
 "settings.layout" = "布局";
 "settings.canvasHoverMagnification" = "鼠标悬停时放大图标";
+"settings.canvasArrangement" = "画布排列";
+"settings.canvasArrangement.grid" = "网格";
+"settings.canvasArrangement.starRing" = "星环";
 "settings.iconArrangement" = "图标排列";
 "settings.compactPlacement" = "自动紧凑排列";
 "settings.freePlacement" = "自由放置图标";
@@ -65,7 +68,7 @@
 "settings.background.custom.unavailable" = "找不到这张图片，请重新选择";
 "settings.section.animation" = "动画";
 "settings.animation" = "切换动画";
-"settings.animation.detail" = "页面显示/隐藏时图标的出入场动画。";
+"settings.animation.detail" = "设置图标的出入场动画。启用动效时，图标会从触发的热角飞入。";
 "settings.section.keyboard" = "键盘";
 "settings.keyboard.toggle" = "打开 / 关闭";
 "settings.keyboard.close" = "关闭";
@@ -145,6 +148,7 @@
 "sources.rescan.accessibility" = "重新扫描应用来源";
 "launchpad.search" = "搜索";
 "launchpad.searchApps" = "搜索应用";
+"launchpad.searchResultLocation" = "%1$@ 的位置：%2$@";
 "launchpad.clearSearch" = "清除搜索";
 "launchpad.openSettings" = "打开设置";
 "launchpad.folder" = "文件夹";
@@ -190,6 +194,7 @@
 "animation.fly" = "飞入（iOS 桌面）";
 "animation.classic" = "经典";
 "animation.zoom" = "放大";
+"animation.lift" = "升起";
 "animation.fade" = "渐入";
 "animation.none" = "无";
 "grid.infiniteCanvas.128" = "无限画布 (128pt)";

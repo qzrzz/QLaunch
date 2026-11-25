@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import QLaunchpadCore
 
 public enum HotCornerPosition: String, CaseIterable, Identifiable {
     case none
@@ -116,7 +117,7 @@ private final class HotCornerWindow: NSWindow {
 final class LaunchpadHotCornerCenter: ObservableObject {
     static let shared = LaunchpadHotCornerCenter()
 
-    var onTrigger: (() -> Void)?
+    var onTrigger: ((NSScreen, LaunchpadPresentationCorner) -> Void)?
     private var cornerWindows: [HotCornerWindow] = []
     private var screenObserver: NSObjectProtocol?
     private let cornerSize: CGFloat = 4.0
@@ -148,12 +149,12 @@ final class LaunchpadHotCornerCenter: ObservableObject {
         tearDownWindows()
 
         let position = HotCornerPreferences.position
-        guard position != .none else { return }
+        guard let corner = LaunchpadPresentationCorner(rawValue: position.rawValue) else { return }
 
         for screen in NSScreen.screens {
             guard let windowFrame = frame(for: position, on: screen) else { continue }
             let window = HotCornerWindow(frame: windowFrame) { [weak self] in
-                self?.onTrigger?()
+                self?.onTrigger?(screen, corner)
             }
             window.orderFrontRegardless()
             cornerWindows.append(window)

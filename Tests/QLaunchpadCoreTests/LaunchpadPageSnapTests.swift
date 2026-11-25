@@ -137,4 +137,16 @@ final class LaunchpadPageSnapTests: XCTestCase {
         )
         XCTAssertEqual(page, 2)
     }
+
+    func testMousePanInterruptedDuringAnimationStillLandsOnWholePage() {
+        let page = LaunchpadPageSnap.settledPage(
+            offset: 2.55,
+            origin: 2.25,
+            velocity: 0,
+            pageCount: 4,
+            flickThreshold: LaunchpadPageSnap.mouseFlickThreshold,
+            commitThreshold: LaunchpadPageSnap.mouseCommitThreshold
+        )
+        XCTAssertEqual(page, 3)
+    }
 }

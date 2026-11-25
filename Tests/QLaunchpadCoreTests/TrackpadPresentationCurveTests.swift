@@ -2,6 +2,22 @@ import XCTest
 @testable import QLaunchpadCore
 
 final class TrackpadPresentationCurveTests: XCTestCase {
+    func testDownwardFlightKeepsItsOpacityUntilTheIconReachesTheBottomEdge() {
+        let opacity = TrackpadPresentationCurve.bottomEdgeFlightOpacity
+        XCTAssertEqual(opacity(700, 748, 128, 832), 1)
+        XCTAssertEqual(opacity(768, 748, 128, 832), 1)
+        XCTAssertEqual(opacity(800, 748, 128, 832), 0.5)
+        XCTAssertEqual(opacity(832, 748, 128, 832), 0)
+        XCTAssertEqual(opacity(860, 748, 128, 832), 0)
+    }
+
+    func testDownwardFlightAlsoFadesIconsThatRestPartlyOutsideTheViewport() {
+        let opacity = TrackpadPresentationCurve.bottomEdgeFlightOpacity
+        XCTAssertEqual(opacity(840, 840, 128, 832), 1)
+        XCTAssertEqual(opacity(856, 840, 128, 832), 0.5)
+        XCTAssertEqual(opacity(872, 840, 128, 832), 0)
+    }
+
     func testBlurStartsGentlyAndEndsAtConfiguredStrength() {
         let blur = TrackpadPresentationCurve.blurProgress
         XCTAssertEqual(blur(0), 0)

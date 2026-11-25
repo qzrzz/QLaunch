@@ -332,7 +332,6 @@ final class LaunchpadContainerView: NSView {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                self.metalView.needsDisplay = true
                 NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: self)
                 self.syncOverlayAlpha()
                 self.syncPageIndicatorHitState()
@@ -476,6 +475,14 @@ final class LaunchpadContainerView: NSView {
 
     override func becomeFirstResponder() -> Bool { true }
 
+    override func magnify(with event: NSEvent) {
+        if GridLayoutPreset.current.isInfiniteCanvas, !isOrganizing, window?.attachedSheet == nil {
+            metalView.magnify(with: event)
+        } else {
+            super.magnify(with: event)
+        }
+    }
+
     override func keyDown(with event: NSEvent) {
         // Esc
         if event.keyCode == 53 {
@@ -569,11 +576,15 @@ final class LaunchpadContainerView: NSView {
         if searchField.trackpadProgress != progress {
             searchField.trackpadProgress = progress
         }
-        if metalView.alphaValue > 0 {
+        if direction == .outward || metalView.alphaValue > 0 {
             metalView.setTrackpadPresentationProgress(progress, direction: direction)
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        if direction == .outward {
+            // A retained drawable must not leave an icon visible at a held endpoint.
+            metalView.alphaValue = progress > 0 ? 1 : 0
+        }
         overlayView.alphaValue = progress
         organizeView?.alphaValue = progress
         backgroundView.setTrackpadPresentationProgress(progress, opening: direction == .inward)
@@ -827,6 +838,15 @@ private struct SearchField: View {
 
     private var scale: CGFloat { layout.fontSize / 16 }
 
+    private var focusedAppWithNameConflict: AppInfo? {
+        guard store.isSearching, let focused = store.focusedApp else { return nil }
+        let hasConflict = store.displayItems.contains { item in
+            guard case .app(let app) = item else { return false }
+            return app.id != focused.id && app.name == focused.name
+        }
+        return hasConflict ? focused : nil
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
@@ -895,6 +915,26 @@ private struct SearchField: View {
         .modifier(LaunchpadGlassFieldChrome(size: layout.size, isEmphasized: !store.searchText.isEmpty))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(L10n.tr("launchpad.searchApps"))
+        .overlay(alignment: .bottom) {
+            if let app = focusedAppWithNameConflict {
+                let path = (app.resourceSourcePath as NSString).abbreviatingWithTildeInPath
+                Label {
+                    Text(verbatim: path)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } icon: {
+                    Image(systemName: "folder")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 7)
+                .frame(height: 16)
+                .background(.black.opacity(0.58), in: .capsule)
+                .offset(y: 18)
+                .allowsHitTesting(false)
+                .accessibilityLabel(L10n.tr("launchpad.searchResultLocation", app.name, path))
+            }
+        }
     }
 }
 

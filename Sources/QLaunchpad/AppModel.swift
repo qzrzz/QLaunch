@@ -185,7 +185,10 @@ enum AppScanner {
         ]
     }
 
-    static func scan(additionalRoots: [URL] = []) -> [AppInfo] {
+    static func scan(
+        additionalRoots: [URL] = [],
+        recordPath: ((String) -> Void)? = nil
+    ) -> [AppInfo] {
         struct Candidate {
             let url: URL
             let bundleIdentifier: String
@@ -194,7 +197,8 @@ enum AppScanner {
         }
 
         let appURLs = collectApplicationURLs(
-            from: defaultRoots + implicitRoots + additionalRoots
+            from: defaultRoots + implicitRoots + additionalRoots,
+            recordPath: recordPath
         )
 
         var candidates: [Candidate] = []
@@ -203,6 +207,8 @@ enum AppScanner {
         for url in appURLs {
             let standardizedPath = url.standardizedFileURL.path
             guard seenPaths.insert(standardizedPath).inserted else { continue }
+            // An installer may create the bundle directory before its Info.plist.
+            recordPath?(url.appendingPathComponent("Contents/Info.plist").path)
             guard let identity = bundleIdentity(at: url) else { continue }
             // Skip background-only / agent helpers without a UI when possible.
             if identity.isBackgroundOnly {
@@ -261,7 +267,10 @@ enum AppScanner {
     /// `FileManager.enumerator` does not yield symbolic-link packages, so
     /// `/Applications/Safari.app` (a cryptex symlink) is invisible to it.
     /// Walk with `contentsOfDirectory` and resolve `.app` links ourselves.
-    private static func collectApplicationURLs(from roots: [URL]) -> [URL] {
+    private static func collectApplicationURLs(
+        from roots: [URL],
+        recordPath: ((String) -> Void)?
+    ) -> [URL] {
         let fileManager = FileManager.default
         var urls: [URL] = []
         var seenDirectories = Set<String>()
@@ -269,6 +278,7 @@ enum AppScanner {
         var stack: [URL] = []
 
         for root in roots {
+            recordPath?(root.path)
             let resolved = root.resolvingSymlinksInPath().standardizedFileURL
             guard fileManager.fileExists(atPath: resolved.path) else { continue }
             if resolved.pathExtension == "app" {
@@ -286,6 +296,7 @@ enum AppScanner {
         while let directory = stack.popLast() {
             let directoryPath = directory.standardizedFileURL.path
             guard seenDirectories.insert(directoryPath).inserted else { continue }
+            recordPath?(directoryPath)
             // Do not pass `.skipsHiddenFiles`: `/Applications/Safari.app` is a
             // cryptex symlink that reports `isHidden == true` and would be dropped.
             guard let entries = try? fileManager.contentsOfDirectory(
@@ -299,11 +310,15 @@ enum AppScanner {
                 let isSymlink = values?.isSymbolicLink == true
                 let resolved = (isSymlink ? entry.resolvingSymlinksInPath() : entry)
                     .standardizedFileURL
+                let isApp = entry.pathExtension == "app" || resolved.pathExtension == "app"
+                if isSymlink || isApp || (values?.isHidden == true && values?.isDirectory == true) {
+                    recordPath?(entry.path)
+                }
                 // Preserve the previous hidden-file behavior for ordinary
                 // bundles. Hidden symbolic-link apps are inspected because
                 // cryptex front doors such as Safari report themselves hidden.
                 if values?.isHidden == true, !isSymlink { continue }
-                if entry.pathExtension == "app" || resolved.pathExtension == "app" {
+                if isApp {
                     if seenApps.insert(resolved.path).inserted {
                         urls.append(resolved)
                     }
@@ -454,12 +469,16 @@ enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
     case fly
     case classic
     case zoom
+    case lift
     case fade
     case none
+    case corner
 
     static let defaultsKey = "presentationAnimationStyle"
 
     var id: Self { self }
+
+    static let selectableStyles = allCases.filter { $0 != .corner }
 
     var title: String {
         L10n.tr("animation.\(rawValue)")
@@ -470,8 +489,10 @@ enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
         case .fly: 1.2
         case .classic: 0.33
         case .zoom: 0.57
+        case .lift: 0.36
         case .fade: 0.24
         case .none: 0
+        case .corner: 0.50
         }
     }
 
@@ -480,17 +501,26 @@ enum LaunchpadAnimationStyle: String, CaseIterable, Identifiable {
         case .fly: 0.48
         case .classic: 0.26
         case .zoom: 0.22
+        case .lift: 0.22
         case .fade: 0.25
         case .none: 0
+        case .corner: 0.29
         }
     }
 
     static var current: Self {
         guard let rawValue = UserDefaults.standard.string(forKey: defaultsKey),
-              let style = Self(rawValue: rawValue) else {
+              let style = Self(rawValue: rawValue), style != .corner else {
             return .fly
         }
         return style
+    }
+
+    static func resolved(forHotCorner: Bool = false) -> Self {
+        let preferred = current
+        if preferred == .none { return .none }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return .fade }
+        return forHotCorner ? .corner : preferred
     }
 }
 
@@ -507,10 +537,9 @@ enum GridNavigationDirection {
 final class AppStore: ObservableObject {
     @Published private(set) var apps: [AppInfo] = []
     /// Stable-ID lookup used heavily by folder previews and texture planning.
-    /// `apps` is only replaced by catalog scans; reordering does not invalidate
-    /// the values stored here.
+    /// Updated by catalog scans and renames. Reordering keeps these values valid.
     private var appsByID: [String: AppInfo] = [:]
-    @Published private(set) var filteredApps: [AppInfo] = []
+    @Published private var searchResults: [LaunchpadItem] = []
     @Published private(set) var launchpadItems: [LaunchpadItem] = []
     @Published private(set) var folders: [AppFolder] = []
     @Published private(set) var openedFolderID: String?
@@ -540,7 +569,7 @@ final class AppStore: ObservableObject {
         }
     }
 
-    /// Continuous page position (0 = first page). Driven by scroll + spring settle.
+    /// Continuous page position (0 = first page). Driven by the active gesture.
     ///
     /// Not `@Published`: Metal reads this every frame during a drag, and
     /// publishing would rebuild the SwiftUI overlay on every pointer sample.
@@ -561,6 +590,7 @@ final class AppStore: ObservableObject {
 
     /// Horizontal page velocity in pages/second (trackpad momentum).
     private(set) var pageVelocity: Double = 0
+    private(set) var pageSettlementVelocity: Double?
 
     /// `true` while the user is actively scrolling (finger / wheel phase).
     @Published private(set) var isPageGestureActive = false
@@ -589,12 +619,14 @@ final class AppStore: ObservableObject {
     private var pagePanOrigin: Double = 0
     /// The renderer owns adaptive infinite-canvas geometry because it depends
     /// on the live viewport. Keyboard navigation reads the same column count.
-    private var infiniteCanvasNavigationColumns = InfiniteCanvasMetrics.maximumColumns
+    private var infiniteCanvasNavigationMetrics: InfiniteCanvasMetrics?
     /// Root-grid page captured when a folder opens, restored when it closes.
     private(set) var pageBeforeFolder: Double?
     /// Root-grid page captured when search starts, restored when search clears.
     private var pageBeforeSearch: Double?
     private var scanTask: Task<Void, Never>?
+    private var catalogCheckTask: Task<Void, Never>?
+    private var catalogSnapshot: ApplicationCatalogSnapshot?
     private var layoutGeneration: UInt64 = 0
     /// Bumped by import / external reload so Metal can drop an in-flight drag.
     private(set) var dragGeneration: UInt64 = 0
@@ -646,20 +678,23 @@ final class AppStore: ObservableObject {
         }?.offset
     }
 
-    func placeItem(at source: Int, intoSlot destination: Int) {
-        guard usesFreePlacement, launchpadItems.indices.contains(source),
-              destination >= 0, destination < pageCount * pageCapacity else { return }
-        let item = launchpadItems[source]
-        let oldSlot = slot(for: item, fallback: source)
-        guard oldSlot != destination else { return }
-        if let displaced = itemIndex(atSlot: destination) {
-            freePlacementSlots[launchpadItems[displaced].id] = oldSlot
-        }
-        freePlacementSlots[item.id] = destination
-        freePlacementRevision &+= 1
-        persistFreePlacementSlots()
-        objectWillChange.send()
-        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+    func freePlacementChanges(
+        _ selectedIDs: Set<String>,
+        anchoredAt source: Int,
+        intoSlot destination: Int,
+        allowNextPage: Bool = false
+    ) -> [String: Int]? {
+        guard usesFreePlacement, launchpadItems.indices.contains(source) else { return nil }
+        let slots = Dictionary(uniqueKeysWithValues: launchpadItems.enumerated().map { index, item in
+            (item.id, slot(for: item, fallback: index))
+        })
+        return LaunchpadGridReorder.placements(
+            selectedIDs,
+            in: slots,
+            anchorID: launchpadItems[source].id,
+            destination: destination,
+            slotLimit: (pageCount + (allowNextPage ? 1 : 0)) * pageCapacity
+        )
     }
 
     func placeItems(
@@ -668,33 +703,10 @@ final class AppStore: ObservableObject {
         intoSlot destination: Int,
         allowNextPage: Bool = false
     ) {
-        guard usesFreePlacement, launchpadItems.indices.contains(source),
-              selectedIDs.contains(launchpadItems[source].id) else { return }
-        let anchor = launchpadItems[source]
-        let delta = destination - slot(for: anchor, fallback: source)
-        guard delta != 0 else { return }
-        let selected = launchpadItems.enumerated().filter { selectedIDs.contains($0.element.id) }
-        let oldSlots = selected.map { slot(for: $0.element, fallback: $0.offset) }
-        let newSlots = oldSlots.map { $0 + delta }
-        let slotLimit = (pageCount + (allowNextPage ? 1 : 0)) * pageCapacity
-        guard newSlots.allSatisfy({ $0 >= 0 && $0 < slotLimit }) else { return }
-        let oldSet = Set(oldSlots)
-        let newSet = Set(newSlots)
-        let vacated = oldSet.subtracting(newSet).sorted()
-        let displaced = launchpadItems.enumerated().filter {
-            !selectedIDs.contains($0.element.id)
-                && newSet.contains(slot(for: $0.element, fallback: $0.offset))
-        }.sorted {
-            slot(for: $0.element, fallback: $0.offset)
-                < slot(for: $1.element, fallback: $1.offset)
-        }
-        guard displaced.count <= vacated.count else { return }
-        for (item, slot) in zip(displaced, vacated) {
-            freePlacementSlots[item.element.id] = slot
-        }
-        for (item, slot) in zip(selected, newSlots) {
-            freePlacementSlots[item.element.id] = slot
-        }
+        guard let changes = freePlacementChanges(
+            selectedIDs, anchoredAt: source, intoSlot: destination, allowNextPage: allowNextPage
+        ) else { return }
+        freePlacementSlots.merge(changes) { _, new in new }
         freePlacementRevision &+= 1
         persistFreePlacementSlots()
         objectWillChange.send()
@@ -937,7 +949,7 @@ final class AppStore: ObservableObject {
                     appIDsToHide.formUnion(folder.appIDs)
                     folderIDsToRemove.append(folder.id)
                 }
-            } else if let app = apps.first(where: { $0.id == id }) {
+            } else if let app = appsByID[id] {
                 appIDsToHide.insert(app.id)
             }
         }
@@ -1259,6 +1271,7 @@ final class AppStore: ObservableObject {
 
     deinit {
         scanTask?.cancel()
+        catalogCheckTask?.cancel()
         iconColorTask?.cancel()
         autoLayoutTasks.values.forEach { $0.cancel() }
     }
@@ -1327,7 +1340,7 @@ final class AppStore: ObservableObject {
     /// app list so a result can always be launched without opening a folder.
     var displayItems: [LaunchpadItem] {
         if isSearching {
-            return filteredApps.map(LaunchpadItem.app)
+            return searchResults
         }
         switch layoutMode {
         case .user:
@@ -1383,6 +1396,26 @@ final class AppStore: ObservableObject {
         isFolderRemovalTargeted = targeted
     }
 
+    func reloadCatalogIfChanged() {
+        guard scanTask == nil, catalogCheckTask == nil else { return }
+        // Usage metadata and in-place writes inside app bundles may not
+        // change a scanned directory. Refresh them on a later presentation.
+        guard let snapshot = catalogSnapshot,
+              snapshot.capturedAt.duration(to: .now) < .seconds(30) else {
+            load()
+            return
+        }
+        catalogCheckTask = Task { @MainActor [weak self] in
+            let unchanged = await Task.detached(priority: .userInitiated) {
+                snapshot.matchesDisk()
+            }.value
+            guard let self else { return }
+            catalogCheckTask = nil
+            guard !unchanged, catalogSnapshot?.capturedAt == snapshot.capturedAt else { return }
+            load()
+        }
+    }
+
     func load() {
         // A detached scan cannot be stopped reliably once it has started.
         // Ignore duplicate requests instead of allowing two filesystem scans
@@ -1391,16 +1424,30 @@ final class AppStore: ObservableObject {
         guard scanTask == nil else { return }
 
         isLoading = true
+        catalogSnapshot = nil
         let generationAtStart = layoutGeneration
-        let additionalRoots = customApplicationSourcePaths.map { URL(fileURLWithPath: $0) }
+        let sourcePaths = customApplicationSourcePaths
+        let additionalRoots = sourcePaths.map { URL(fileURLWithPath: $0) }
         scanTask = Task { @MainActor [weak self] in
-            let scanned = await Task.detached(priority: .userInitiated) {
-                AppScanner.scan(additionalRoots: additionalRoots)
+            let (scanned, snapshot) = await Task.detached(priority: .userInitiated) {
+                var snapshot = ApplicationCatalogSnapshot()
+                let apps = AppScanner.scan(additionalRoots: additionalRoots) { snapshot.record($0) }
+                return (apps, snapshot)
             }.value
             guard let self else { return }
+            guard sourcePaths == customApplicationSourcePaths else {
+                // Drop a result from obsolete sources and keep first-page
+                // waiters waiting until the replacement scan has finished.
+                scanTask = nil
+                load()
+                await scanTask?.value
+                return
+            }
+            catalogSnapshot = snapshot
             // Apply the latest names after scanning, including edits made while it ran.
             let result = scanned.map { app in
-                app.withCustomName(self.appCustomNames[app.id])
+                guard let name = self.appCustomNames[app.id] else { return app }
+                return app.withCustomName(name)
             }
             let catalogChanged = apps != result
             let affectedAutoLayouts: Set<LaunchpadAutoLayoutKind> = catalogChanged
@@ -1876,11 +1923,8 @@ final class AppStore: ObservableObject {
 
     // MARK: Keyboard focus
 
-    func setInfiniteCanvasNavigationColumns(_ columns: Int) {
-        infiniteCanvasNavigationColumns = min(
-            max(columns, 1),
-            InfiniteCanvasMetrics.maximumColumns
-        )
+    func setInfiniteCanvasNavigationMetrics(_ metrics: InfiniteCanvasMetrics?) {
+        infiniteCanvasNavigationMetrics = metrics
     }
 
     func focusApp(id: String) {
@@ -1994,7 +2038,23 @@ final class AppStore: ObservableObject {
         let pageEnd = min(pageStart + pageCapacity, items.count)
         let local = current - pageStart
         let isInfiniteCanvas = GridLayoutPreset.current.isInfiniteCanvas
-        let navigationColumns = isInfiniteCanvas ? infiniteCanvasNavigationColumns : GridMetrics.columns
+        if isInfiniteCanvas, let metrics = infiniteCanvasNavigationMetrics,
+           metrics.arrangement == .starRing, metrics.itemCount == items.count {
+            let vector: CGVector
+            switch direction {
+            case .left: vector = CGVector(dx: -1, dy: 0)
+            case .right: vector = CGVector(dx: 1, dy: 0)
+            case .up: vector = CGVector(dx: 0, dy: -1)
+            case .down: vector = CGVector(dx: 0, dy: 1)
+            }
+            if let next = metrics.starRingNeighbor(from: current, direction: vector) {
+                keyboardFocusID = items[next].id
+                NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
+            }
+            return
+        }
+        let navigationColumns = isInfiniteCanvas
+            ? infiniteCanvasNavigationMetrics?.columnCount ?? InfiniteCanvasMetrics.maximumColumns : GridMetrics.columns
         let row = local / navigationColumns
         let column = local % navigationColumns
         var destination = current
@@ -2042,13 +2102,13 @@ final class AppStore: ObservableObject {
     // MARK: Paging
 
     /// Discrete page step (keyboard / indicator).
-    /// Logical offset updates immediately; Metal springs the visual position.
+    /// Logical offset updates immediately; Metal animates the visual position.
     func goToPage(_ page: Int, animated: Bool = true) {
         let clamped = min(max(page, 0), pageCount - 1)
-        targetPage = Double(clamped)
         pageVelocity = 0
         resetPageScrollGesture()
-        pageOffset = targetPage
+        pageOffset = Double(clamped)
+        targetPage = pageOffset
         ensureKeyboardFocus(onPage: clamped)
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
@@ -2085,9 +2145,10 @@ final class AppStore: ObservableObject {
     // MARK: Mouse drag pan (empty area)
 
     /// Begin a click-drag page pan on empty background.
-    func beginPagePan() {
+    func beginPagePan(from displayedOffset: Double) {
         isKeyboardNavigationActive = false
         ignoreScrollMomentum = false
+        pageOffset = displayedOffset
         isPageGestureActive = true
         pageVelocity = 0
         lastScrollTime = CACurrentMediaTime()
@@ -2105,11 +2166,11 @@ final class AppStore: ObservableObject {
         let now = CACurrentMediaTime()
         let dt = now - lastScrollTime
         let proposed = pagePanOrigin + translationPages
-        let previousPage = currentPage
+        let previousPage = pageOffset.rounded()
         let newOffset = clampedPageOffset(proposed)
         let moved = newOffset - pageOffset
         pageOffset = newOffset
-        isPageGestureActive = true
+        if !isPageGestureActive { isPageGestureActive = true }
         scrollAccumulated = translationPages
 
         // Skip velocity on duplicate same-frame samples (mouse event + display link).
@@ -2120,14 +2181,13 @@ final class AppStore: ObservableObject {
             pageVelocity = pageVelocity * 0.25 + instant * 0.75
         }
 
-        if currentPage != previousPage {
+        if pageOffset.rounded() != previousPage {
             objectWillChange.send()
         }
     }
 
     /// End pan and snap to a page (velocity-biased, mouse-drag thresholds).
     func endPagePan() {
-        isPageGestureActive = false
         settleMousePagePan(withVelocity: pageVelocity)
     }
 
@@ -2137,7 +2197,8 @@ final class AppStore: ObservableObject {
         deltaY: CGFloat,
         phase: NSEvent.Phase,
         momentumPhase: NSEvent.Phase,
-        isPrecise: Bool
+        isPrecise: Bool,
+        displayedOffset: Double
     ) {
         if isKeyboardNavigationActive {
             isKeyboardNavigationActive = false
@@ -2181,6 +2242,7 @@ final class AppStore: ObservableObject {
         if began {
             lastDiscreteWheelAcceptedAt = -.infinity
             ignoreScrollMomentum = false
+            pageOffset = displayedOffset
             isPageGestureActive = true
             scrollAccumulated = 0
             pageVelocity = 0
@@ -2236,9 +2298,6 @@ final class AppStore: ObservableObject {
             applyLivePageDelta(pageDelta)
             let instant = pageDelta / dt
             pageVelocity = pageVelocity * 0.55 + instant * 0.45
-            if targetPage != pageOffset {
-                targetPage = pageOffset
-            }
         }
 
         // Snap as soon as the finger lifts. Waiting for momentum parks the
@@ -2256,11 +2315,16 @@ final class AppStore: ObservableObject {
     }
 
     private func applyLivePageDelta(_ pageDelta: Double) {
+        let previousPage = pageOffset.rounded()
         pageOffset = clampedPageOffset(pageOffset + pageDelta)
         scrollAccumulated += pageDelta
+        if pageOffset.rounded() != previousPage {
+            objectWillChange.send()
+        }
     }
 
     private func resetPageScrollGesture() {
+        pageSettlementVelocity = nil
         if isPageGestureActive {
             isPageGestureActive = false
         }
@@ -2271,7 +2335,7 @@ final class AppStore: ObservableObject {
     }
 
     /// Snap to nearest page, biased by flick velocity (Launchpad-style).
-    /// Logical `pageOffset` jumps to the target; the Metal layer springs visually.
+    /// Logical `pageOffset` jumps to the target while Metal settles visually.
     func settlePage(withVelocity velocity: Double = 0) {
         let minPage = 0.0
         let maxPage = Double(max(pageCount - 1, 0))
@@ -2286,7 +2350,8 @@ final class AppStore: ObservableObject {
             page = pageOffset.rounded()
         }
 
-        applySettledPage(min(max(page, minPage), maxPage))
+        let animationVelocity = isPageGestureActive ? velocity : nil
+        applySettledPage(min(max(page, minPage), maxPage), incomingVelocity: animationVelocity)
     }
 
     /// Mouse empty-area pan: lower commit / flick thresholds than trackpad.
@@ -2299,17 +2364,19 @@ final class AppStore: ObservableObject {
                 pageCount: pageCount,
                 flickThreshold: LaunchpadPageSnap.mouseFlickThreshold,
                 commitThreshold: LaunchpadPageSnap.mouseCommitThreshold
-            )
+            ),
+            incomingVelocity: velocity
         )
     }
 
-    private func applySettledPage(_ page: Double) {
-        if targetPage != page {
-            targetPage = page
-        }
+    private func applySettledPage(_ page: Double, incomingVelocity: Double?) {
         pageOffset = page
         pageVelocity = 0
         resetPageScrollGesture()
+        pageSettlementVelocity = incomingVelocity
+        if targetPage != page {
+            targetPage = page
+        }
         ensureKeyboardFocus(onPage: Int(targetPage))
         NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
     }
@@ -2372,53 +2439,24 @@ final class AppStore: ObservableObject {
 
     // MARK: Reorder
 
-    func moveItem(from source: Int, to destination: Int) {
-        guard allowsUserLayoutEditing,
-              launchpadItems.indices.contains(source),
-              launchpadItems.indices.contains(destination),
-              source != destination else {
-            return
-        }
-
-        var ids = launchpadItems.map(\.id)
-        let item = ids.remove(at: source)
-        ids.insert(item, at: min(destination, ids.endIndex))
-        itemOrderIDs = ids
-        if !usesFreePlacement {
-            freePlacementSlots = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($0.element, $0.offset) })
-            persistFreePlacementSlots()
-        }
-        persistItemOrder()
-        reconcileLaunchpadItems()
-        NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: nil)
-    }
-
     /// Move a selection as one ordered block. The destination is an index in
     /// the current list, including the selected items.
     func moveItems(_ selectedIDs: Set<String>, to destination: Int, folderID: String?) {
         guard allowsUserLayoutEditing, !selectedIDs.isEmpty else { return }
         if let folderID {
             guard let index = folders.firstIndex(where: { $0.id == folderID }) else { return }
-            let ids = folders[index].appIDs
-            guard ids.contains(where: { selectedIDs.contains($0) }) else { return }
-            let block = ids.filter { selectedIDs.contains($0) }
-            var remaining = ids.filter { !selectedIDs.contains($0) }
-            let insertion = max(0, min(destination - ids.prefix(destination).filter { selectedIDs.contains($0) }.count, remaining.count))
-            remaining.insert(contentsOf: block, at: insertion)
-            guard remaining != ids else { return }
-            folders[index].appIDs = remaining
+            guard let order = LaunchpadGridReorder.inserting(
+                selectedIDs, in: folders[index].appIDs, at: destination
+            ) else { return }
+            folders[index].appIDs = order
             persistFolders()
         } else {
-            let ids = launchpadItems.map(\.id)
-            guard ids.contains(where: { selectedIDs.contains($0) }) else { return }
-            let block = ids.filter { selectedIDs.contains($0) }
-            var remaining = ids.filter { !selectedIDs.contains($0) }
-            let insertion = max(0, min(destination - ids.prefix(destination).filter { selectedIDs.contains($0) }.count, remaining.count))
-            remaining.insert(contentsOf: block, at: insertion)
-            guard remaining != ids else { return }
-            itemOrderIDs = remaining
+            guard let order = LaunchpadGridReorder.inserting(
+                selectedIDs, in: launchpadItems.map(\.id), at: destination
+            ) else { return }
+            itemOrderIDs = order
             if !usesFreePlacement {
-                freePlacementSlots = Dictionary(uniqueKeysWithValues: remaining.enumerated().map {
+                freePlacementSlots = Dictionary(uniqueKeysWithValues: order.enumerated().map {
                     ($0.element, $0.offset)
                 })
                 persistFreePlacementSlots()
@@ -2661,11 +2699,12 @@ final class AppStore: ObservableObject {
     }
 
     func moveApp(from source: Int, to destination: Int) {
-        guard !isSearching,
-              filteredApps.indices.contains(source), filteredApps.indices.contains(destination),
+        guard !isSearching else { return }
+        let visibleApps = apps.filter { !hiddenAppIDs.contains($0.id) }
+        guard visibleApps.indices.contains(source), visibleApps.indices.contains(destination),
               source != destination,
-              let sourceIndex = apps.firstIndex(of: filteredApps[source]),
-              let destinationIndex = apps.firstIndex(of: filteredApps[destination]) else {
+              let sourceIndex = apps.firstIndex(of: visibleApps[source]),
+              let destinationIndex = apps.firstIndex(of: visibleApps[destination]) else {
             return
         }
         let item = apps.remove(at: sourceIndex)
@@ -2710,40 +2749,27 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func normalized(_ value: String) -> String {
-        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            .lowercased()
-    }
-
     private func refreshFilteredApps(resetPage: Bool) {
         let matcher = AppSearchMatcher(query: searchText)
-        let query = normalized(searchText.trimmingCharacters(in: .whitespacesAndNewlines))
-        // Pinyin input may contain spaces, apostrophes, hyphens, or other
-        // syllable separators; the matcher compacts it before checking metadata.
-        let rankedApps = apps.enumerated().compactMap { index, app -> (Int, Int, AppInfo)? in
-            let isHidden = hiddenAppIDs.contains(app.id)
-            if isHidden && (query.isEmpty || !showHiddenAppsInSearch) {
-                return nil
+        if matcher.isEmpty {
+            if !searchResults.isEmpty { searchResults = [] }
+        } else {
+            // Appending by rank preserves catalog order within each rank.
+            var matchesByRank = Array(repeating: [LaunchpadItem](), count: AppSearchMatchRank.allCases.count)
+            for app in apps where showHiddenAppsInSearch || !hiddenAppIDs.contains(app.id) {
+                if let rank = matcher.rank(
+                    name: app.name,
+                    bundleIdentifier: app.bundleIdentifier,
+                    pinyin: app.pinyin,
+                    note: note(for: app.id),
+                    alternateName: app.appName.custom == nil ? nil : app.appName.original,
+                    alternatePinyin: app.appName.custom == nil ? .empty : app.appName.originalPinyin
+                ) {
+                    matchesByRank[rank.rawValue].append(.app(app))
+                }
             }
-
-            guard !query.isEmpty else { return (0, index, app) }
-            guard let rank = matcher.rank(
-                name: app.name,
-                bundleIdentifier: app.bundleIdentifier,
-                pinyin: app.pinyin,
-                note: note(for: app.id),
-                alternateName: app.appName.custom == nil ? nil : app.appName.original,
-                alternatePinyin: app.appName.custom == nil ? .empty : app.appName.originalPinyin
-            ) else {
-                return nil
-            }
-            return (rank.rawValue, index, app)
+            searchResults = matchesByRank.flatMap { $0 }
         }
-        filteredApps = rankedApps
-            .sorted { lhs, rhs in
-                lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 < rhs.0
-            }
-            .map(\.2)
 
         if resetPage {
             pageOffset = 0
@@ -2828,7 +2854,7 @@ final class AppStore: ObservableObject {
         let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
         launchpadItems = itemOrderIDs.compactMap { id in
             if let folder = folderByID[id] { return .folder(folder) }
-            guard let app = apps.first(where: { $0.id == id }) else { return nil }
+            guard let app = appsByID[id] else { return nil }
             return .app(app)
         }
         if !apps.isEmpty { reconcileFreePlacementSlots() }
@@ -2990,12 +3016,11 @@ final class AppStore: ObservableObject {
     /// Preserve every cached order while replacing its AppInfo payload with the
     /// newest scan result. This is O(n) and performs no comparisons or sorting.
     private func rebindAutoLayoutItemsToCurrentCatalog() {
-        let byID = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0) })
         var reboundByKind: [LaunchpadAutoLayoutKind: [LaunchpadItem]] = [:]
         reboundByKind.reserveCapacity(autoLayoutItemsByKind.count)
         for (kind, items) in autoLayoutItemsByKind {
             let rebound = items.compactMap { item -> LaunchpadItem? in
-                guard let app = byID[item.id] else { return nil }
+                guard let app = appsByID[item.id] else { return nil }
                 return .app(app)
             }
             reboundByKind[kind] = rebound

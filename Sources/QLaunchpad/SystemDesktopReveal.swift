@@ -15,9 +15,8 @@ enum SystemDesktopReveal {
 
     /// The full-screen Show Desktop overlay moved from Dock to WindowManager.
     /// Use window metadata so this works without Screen Recording permission.
-    static func isActive() -> Bool? {
-        guard let screen = NSScreen.main,
-              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+    static func isActive(on screen: NSScreen) -> Bool? {
+        guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
                 as? CGDirectDisplayID,
               let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
                 as? [[String: Any]] else { return nil }
@@ -55,8 +54,9 @@ enum SystemDesktopReveal {
         return stageManagerEnabled && managerPID != nil && !hasStageManagerShield
     }
 
-    static func restoreWindowsIfDesktopIsActive() {
-        guard let sendDockNotification, isActive() == true else { return }
+    static func restoreWindowsIfDesktopIsActive(on screen: NSScreen) -> Bool {
+        guard let sendDockNotification, isActive(on: screen) == true else { return false }
         sendDockNotification("com.apple.showdesktop.awake" as CFString, nil)
+        return true
     }
 }

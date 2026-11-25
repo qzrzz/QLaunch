@@ -140,12 +140,13 @@ public struct TrackpadPinchRecognizer {
         let previewFraction = direction == .inward ? 0.30 : 0.38
         let threshold = max(0.036, baselineRadius * releaseFraction)
         let previewDistance = max(0.074, baselineRadius * previewFraction)
-        let progress = min(0.96, max(0, (trackedTravel - slop) / (previewDistance - slop)))
+        let maximumProgress = direction == .outward ? 1.0 : 0.96
+        let progress = min(maximumProgress, max(0, (trackedTravel - slop) / (previewDistance - slop)))
         let updated = TrackpadPinchMotion(
             direction: direction, progress: progress, shouldComplete: trackedTravel >= threshold
         )
         let minimumReportedChange = direction == .inward ? 0.0008 : 0.012
-        if let motion, progress != 0,
+        if let motion, progress != 0, progress != maximumProgress,
            motion.shouldComplete == updated.shouldComplete,
            abs(progress - motion.progress) < minimumReportedChange { return events }
         if motion == updated { return events }

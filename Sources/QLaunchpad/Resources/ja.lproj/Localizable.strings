@@ -27,6 +27,9 @@
 "settings.searchFieldSize.large" = "大";
 "settings.layout" = "レイアウト";
 "settings.canvasHoverMagnification" = "ポインタを重ねるとアイコンを拡大";
+"settings.canvasArrangement" = "キャンバスの配置";
+"settings.canvasArrangement.grid" = "グリッド";
+"settings.canvasArrangement.starRing" = "スターリング";
 "settings.iconArrangement" = "アイコンの配置";
 "settings.compactPlacement" = "自動で詰めて配置";
 "settings.freePlacement" = "アイコンを自由に配置";
@@ -65,7 +68,7 @@
 "settings.background.custom.unavailable" = "この画像は利用できません。別の画像を選択してください。";
 "settings.section.animation" = "アニメーション";
 "settings.animation" = "切り替えアニメーション";
-"settings.animation.detail" = "画面の表示／非表示時に使うアイコンのアニメーションです。";
+"settings.animation.detail" = "アイコンの表示・非表示時のアニメーションを選びます。モーションが有効な場合、アイコンは QLaunch を開いたホットコーナーから飛び込みます。";
 "settings.section.keyboard" = "キーボード";
 "settings.keyboard.toggle" = "開く／閉じる";
 "settings.keyboard.close" = "閉じる";
@@ -145,6 +148,7 @@
 "sources.rescan.accessibility" = "アプリケーションの場所を再スキャン";
 "launchpad.search" = "検索";
 "launchpad.searchApps" = "アプリを検索";
+"launchpad.searchResultLocation" = "%1$@ の場所：%2$@";
 "launchpad.clearSearch" = "検索を消去";
 "launchpad.openSettings" = "設定を開く";
 "launchpad.folder" = "フォルダ";
@@ -190,6 +194,7 @@
 "animation.fly" = "フライイン（iOS ホーム画面）";
 "animation.classic" = "クラシック";
 "animation.zoom" = "ズーム";
+"animation.lift" = "上昇";
 "animation.fade" = "フェード";
 "animation.none" = "なし";
 "grid.infiniteCanvas.128" = "無限キャンバス (128pt)";

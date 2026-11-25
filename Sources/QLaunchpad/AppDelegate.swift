@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import QLaunchpadCore
 import SwiftUI
 
@@ -61,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var destination: CGFloat?
     }
     private var trackpadPresentation: TrackpadPresentation?
+    private var canvasPinchSubscription: AnyCancellable?
     private var launchReason: LaunchpadLaunchReason = .user
     private var ignoreReopenUntil: Date?
     /// Ignore Dock reopen until the first homepage icons are on screen.
@@ -208,11 +210,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func screensChanged() {
-        guard let screen = NSScreen.main else { return }
-        if launchpadPanel.isVisible {
-            launchpadPanel.setFrame(screen.frame, display: true)
-            containerView.updateSearchFieldLayout(on: screen)
-        }
+        guard launchpadPanel.isVisible,
+              let screen = launchpadPanel.screen ?? NSScreen.main else { return }
+        launchpadPanel.setFrame(screen.frame, display: true)
+        containerView.background.prepare(for: screen)
+        containerView.updateSearchFieldLayout(on: screen)
     }
 
     private func buildLaunchpadPanel() {
@@ -224,7 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         panel.level = .popUpMenu
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        // Keep the current Space when the overlay takes keyboard focus.
+        panel.collectionBehavior = [.moveToActiveSpace, .canJoinAllApplications, .fullScreenAuxiliary, .ignoresCycle]
         if #available(macOS 27.0, *) {
             panel.collectionBehavior.insert(.stationary)
         }
@@ -254,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let isLaunchpadSheet = self.launchpadPanel.attachedSheet != nil
                 || keyWindow?.sheetParent === self.launchpadPanel
             guard self.launchpadPanel.isVisible,
+                  !self.launchpadPanel.isKeyWindow,
                   self.store.presentation != .hidden,
                   self.settingsWindow?.isKeyWindow != true,
                   self.trackpadPresentation == nil,
@@ -271,7 +275,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard self.launchpadPanel?.isVisible == true, self.store.presentation != .hidden else { return }
-                NSApp.activate(ignoringOtherApps: true)
                 self.launchpadPanel?.makeKey()
             }
         }
@@ -309,10 +312,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installHotCorner() {
         let center = LaunchpadHotCornerCenter.shared
-        center.onTrigger = { [weak self] in
+        center.onTrigger = { [weak self] screen, corner in
             guard let self else { return }
             if !self.store.isPresented && self.launchpadPanel?.isVisible != true {
-                self.showLaunchpad()
+                self.showLaunchpad(on: screen, from: corner)
             }
         }
         center.install()
@@ -320,23 +323,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installTrackpadGesture() {
         let center = LaunchpadGestureCenter.shared
-        center.visibleLaunchpadGeneration = { [weak self] in
+        center.visibleLaunchpad = { [weak self] in
             guard let self, self.launchpadPanel?.isVisible == true,
                   self.store.presentation == .visible, !self.isAnimating,
                   self.settingsWindow?.isKeyWindow != true,
-                  self.launchpadPanel.attachedSheet == nil else { return nil }
-            return self.presentationGeneration
+                  self.launchpadPanel.attachedSheet == nil,
+                  let screen = self.launchpadPanel.screen ?? NSScreen.main else { return nil }
+            return (self.presentationGeneration, screen)
         }
         center.launchpadGeneration = { [weak self] in self?.presentationGeneration }
-        center.onProgress = { [weak self] direction, progress in
-            self?.updateTrackpadPresentation(direction: direction, progress: progress) ?? false
+        center.onProgress = { [weak self] direction, progress, screen in
+            self?.updateTrackpadPresentation(direction: direction, progress: progress, on: screen) ?? false
         }
         center.onRelease = { [weak self] direction, completed in
             guard let self, self.trackpadPresentation?.direction == direction else { return }
             let shouldShow = direction == .inward ? completed : !completed
             self.finishTrackpadPresentation(at: shouldShow ? 1 : 0)
         }
+        center.onCanvasPinch = { [weak self] event in
+            guard let self else { return }
+            if event == .ended {
+                self.containerView?.metal.handleCanvasTrackpadPinch(.ended)
+            } else if self.store.presentation == .visible, !self.isAnimating,
+                      self.launchpadPanel.isVisible, !self.launchpadPanel.ignoresMouseEvents,
+                      self.settingsWindow?.isKeyWindow != true, self.launchpadPanel.attachedSheet == nil,
+                      !self.containerView.isOrganizing {
+                self.containerView.metal.handleCanvasTrackpadPinch(event)
+            }
+        }
         center.install()
+        canvasPinchSubscription = store.$presentation.removeDuplicates().sink { presentation in
+            center.setCanvasPinchEnabled(presentation == .visible && GridLayoutPreset.current.isInfiniteCanvas)
+        }
     }
 
     @objc private func hotCornerChanged() {
@@ -562,6 +580,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func gridLayoutChanged() {
         store.applyGridLayoutChange()
+        LaunchpadGestureCenter.shared.setCanvasPinchEnabled(
+            store.presentation == .visible && GridLayoutPreset.current.isInfiniteCanvas
+        )
     }
 
     @objc private func toggleLaunchpad() {
@@ -575,7 +596,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Show / hide with correct fade
 
-    private func updateTrackpadPresentation(direction: TrackpadPinchDirection, progress: CGFloat) -> Bool {
+    private func updateTrackpadPresentation(
+        direction: TrackpadPinchDirection, progress: CGFloat, on screen: NSScreen
+    ) -> Bool {
         let phase = direction == .inward ? progress : 1 - progress
         if let transition = trackpadPresentation {
             guard transition.direction == direction, transition.destination == nil else { return false }
@@ -586,11 +609,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !isAnimating, let panel = launchpadPanel, panel.attachedSheet == nil else { return false }
         switch direction {
         case .inward:
-            guard store.presentation == .hidden, !panel.isVisible, let screen = NSScreen.main else { return false }
+            guard store.presentation == .hidden, !panel.isVisible else { return false }
             isAnimating = true
             presentationGeneration &+= 1
             let generation = presentationGeneration
-            activeAnimationStyle = LaunchpadAnimationStyle.current
+            activeAnimationStyle = LaunchpadAnimationStyle.resolved()
             trackpadPresentation = TrackpadPresentation(direction: direction, isReady: false)
             panel.ignoresMouseEvents = true
             store.beginPresenting()
@@ -638,7 +661,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let initialPosition: CGFloat = isOpening ? 0 : 1
         let distance = abs(destination - containerView.displayedTrackpadProgress)
         let duration: TimeInterval
-        if destination == initialPosition {
+        if distance < 0.0001 {
+            duration = 0.01
+        } else if destination == initialPosition {
             duration = 0.24 + 0.36 * distance
         } else if isOpening {
             duration = 0.16 + 0.45 * distance
@@ -657,28 +682,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else {
                 self.containerView.endTrackpadPresentation()
                 self.store.markVisible()
-                NSApp.activate(ignoringOtherApps: true)
                 self.launchpadPanel.makeKey()
                 self.syncSettingsWindowLevel()
                 self.ignoreReopenUntil = Date().addingTimeInterval(0.8)
                 self.isAnimating = false
                 if isOpening {
                     NotificationCenter.default.post(name: .qlaunchpadFocusSearch, object: nil)
-                    self.store.load()
+                    self.store.reloadCatalogIfChanged()
                 }
                 self.updateStatusMenu()
             }
         }
     }
 
-    private func showLaunchpad() {
+    private func showLaunchpad(
+        on triggerScreen: NSScreen? = nil,
+        from corner: LaunchpadPresentationCorner? = nil
+    ) {
         guard !isAnimating else { return }
-        guard let screen = NSScreen.main else { return }
+        guard let screen = triggerScreen ?? NSScreen.main else { return }
 
         isAnimating = true
         presentationGeneration &+= 1
         let generation = presentationGeneration
-        let animationStyle = LaunchpadAnimationStyle.current
+        let animationStyle = LaunchpadAnimationStyle.resolved(forHotCorner: corner != nil)
         activeAnimationStyle = animationStyle
 
         store.beginPresenting()
@@ -693,11 +720,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if animationStyle == .none {
             containerView.showWallpaperImmediately()
         }
-        NSApp.activate(ignoringOtherApps: true)
+        // Borrow keyboard focus without moving the active app out of its Space.
         launchpadPanel.makeKey()
         syncSettingsWindowLevel()
 
-        containerView.metal.submitFirstPresentationFrame(style: animationStyle) { [weak self] in
+        containerView.metal.submitFirstPresentationFrame(style: animationStyle, from: corner) { [weak self] in
             self?.beginContentPresentation(
                 generation: generation,
                 animationStyle: animationStyle
@@ -733,14 +760,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "animationStyle": animationStyle.rawValue
             ]
         )
-        // Refresh the catalog after the open animation. The first-page bake
+        // Check the catalog after the open animation. The first-page bake
         // already waited for the initial scan so this pass does not block UI.
         DispatchQueue.main.asyncAfter(deadline: .now() + animationStyle.duration) { [weak self] in
             guard let self,
                   generation == self.presentationGeneration,
                   self.store.isPresented,
                   self.launchpadPanel.isVisible else { return }
-            self.store.load()
+            self.store.reloadCatalogIfChanged()
         }
         ignoreLaunchReopen = false
         ignoreReopenUntil = Date().addingTimeInterval(0.8)

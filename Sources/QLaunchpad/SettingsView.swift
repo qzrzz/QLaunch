@@ -107,6 +107,8 @@ private struct GeneralSettingsView: View {
     private var searchFieldSize = LaunchpadSearchFieldSize.defaultSize.rawValue
     @AppStorage(GridLayoutPreset.defaultsKey)
     private var gridLayoutPreset = GridLayoutPreset.defaultPreset.rawValue
+    @AppStorage(GridLayoutPreset.canvasArrangementKey)
+    private var canvasArrangement = InfiniteCanvasMetrics.Arrangement.grid
     @AppStorage(GridLayoutPreset.canvasHoverMagnificationKey)
     private var canvasHoverMagnification = GridLayoutPreset.defaultCanvasHoverMagnification
     @AppStorage(AppStore.freePlacementEnabledKey)
@@ -278,18 +280,22 @@ private struct GeneralSettingsView: View {
                     NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
                 }
                 if GridLayoutPreset(rawValue: gridLayoutPreset)?.isInfiniteCanvas == true {
+                    Picker(L10n.tr("settings.canvasArrangement"), selection: $canvasArrangement) {
+                        Text(L10n.tr("settings.canvasArrangement.grid")).tag(InfiniteCanvasMetrics.Arrangement.grid)
+                        Text(L10n.tr("settings.canvasArrangement.starRing")).tag(InfiniteCanvasMetrics.Arrangement.starRing)
+                    }
+                    .pickerStyle(.menu)
                     Toggle(L10n.tr("settings.canvasHoverMagnification"), isOn: $canvasHoverMagnification)
+                } else {
+                    Picker(L10n.tr("settings.iconArrangement"), selection: Binding(
+                        get: { freePlacementEnabled },
+                        set: { store.setFreePlacementEnabled($0) }
+                    )) {
+                        Text(L10n.tr("settings.compactPlacement")).tag(false)
+                        Text(L10n.tr("settings.freePlacement")).tag(true)
+                    }
+                    .pickerStyle(.menu)
                 }
-
-                Picker(L10n.tr("settings.iconArrangement"), selection: Binding(
-                    get: { !GridLayoutPreset.current.isInfiniteCanvas && freePlacementEnabled },
-                    set: { store.setFreePlacementEnabled($0) }
-                )) {
-                    Text(L10n.tr("settings.compactPlacement")).tag(false)
-                    Text(L10n.tr("settings.freePlacement")).tag(true)
-                }
-                .pickerStyle(.menu)
-                .disabled(GridLayoutPreset.current.isInfiniteCanvas)
 
                 Picker(selection: $iconRenderQuality) {
                     ForEach(IconRenderQuality.allCases) { quality in
@@ -326,7 +332,7 @@ private struct GeneralSettingsView: View {
 
             Section(L10n.tr("settings.section.animation")) {
                 Picker(selection: $presentationAnimationStyle) {
-                    ForEach(LaunchpadAnimationStyle.allCases) { style in
+                    ForEach(LaunchpadAnimationStyle.selectableStyles) { style in
                         Text(style.title).tag(style.rawValue)
                     }
                 } label: {
