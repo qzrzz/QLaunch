@@ -42,13 +42,29 @@ public enum MacOSLaunchpadReader {
     public static func readLayoutDocument(
         from databaseURL: URL? = nil
     ) throws -> LaunchpadLayoutDocument {
-        guard let dbURL = databaseURL ?? defaultDatabaseURL(),
+        try readLayoutDocument(from: databaseURL ?? defaultDatabaseURL(), isBackup: false)
+    }
+
+    public static func readBackupLayoutDocument(from databaseURL: URL) throws -> LaunchpadLayoutDocument {
+        try readLayoutDocument(from: databaseURL, isBackup: true)
+    }
+
+    private static func readLayoutDocument(from databaseURL: URL?, isBackup: Bool) throws -> LaunchpadLayoutDocument {
+        guard let dbURL = databaseURL,
               FileManager.default.fileExists(atPath: dbURL.path) else {
             throw MacOSLaunchpadError.databaseNotFound
         }
 
+        // A SQLite backup can retain the WAL journal mode in its header even
+        // when all pages are already in the file. Open standalone backups
+        // without requiring SQLite to create WAL or shared-memory sidecars.
+        let walPath = dbURL.path + "-wal"
+        let hasWAL = FileManager.default.fileExists(atPath: walPath)
+        let isStandaloneBackup = isBackup && !hasWAL
+        let filename = isStandaloneBackup ? dbURL.absoluteString + "?immutable=1" : dbURL.path
+        let flags = SQLITE_OPEN_READONLY | (isStandaloneBackup ? SQLITE_OPEN_URI : 0)
         var db: OpaquePointer?
-        let openStatus = sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil)
+        let openStatus = sqlite3_open_v2(filename, &db, flags, nil)
         guard openStatus == SQLITE_OK, let db else {
             if let db {
                 sqlite3_close(db)
@@ -57,8 +73,12 @@ public enum MacOSLaunchpadReader {
         }
         defer { sqlite3_close(db) }
 
-        let rootPageID = queryRootPageID(db)
-        let pageIDs = queryChildPages(db, parentID: rootPageID)
+        guard sqlite3_exec(db, "PRAGMA trusted_schema = OFF; BEGIN", nil, nil, nil) == SQLITE_OK else {
+            throw queryError(db)
+        }
+
+        let rootPageID = try queryRootPageID(db)
+        let pageIDs = try queryChildPages(db, parentID: rootPageID)
         guard !pageIDs.isEmpty else {
             throw MacOSLaunchpadError.emptyDatabase
         }
@@ -68,7 +88,7 @@ public enum MacOSLaunchpadReader {
         var seenAppIDs = Set<String>()
 
         for pageID in pageIDs {
-            let pageItems = queryPageItems(db, pageID: pageID)
+            let pageItems = try queryPageItems(db, pageID: pageID)
             for item in pageItems {
                 switch item {
                 case .app(let title, let bundleID, let bookmark):
@@ -77,7 +97,7 @@ public enum MacOSLaunchpadReader {
                     guard seenAppIDs.insert(bundleID).inserted else { continue }
                     items.append(.app(id: bundleID))
                     let name = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let resolvedPath = bookmark.flatMap(resolveBookmarkPath)
+                    let resolvedPath = isBackup ? nil : bookmark.flatMap(resolveBookmarkPath)
                     catalog[bundleID] = LaunchpadLayoutCatalogEntry(
                         id: bundleID,
                         bundleIdentifier: bundleID,
@@ -88,18 +108,18 @@ public enum MacOSLaunchpadReader {
                 case .folder(let folderRowID, let folderTitle):
                     let trimmedTitle = folderTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let folderName = trimmedTitle.isEmpty ? "文件夹" : trimmedTitle
-                    let folderPageIDs = queryChildPages(db, parentID: folderRowID)
+                    let folderPageIDs = try queryChildPages(db, parentID: folderRowID)
                     var folderAppIDs: [String] = []
 
                     for folderPageID in folderPageIDs {
-                        let folderApps = queryFolderPageApps(db, pageID: folderPageID)
+                        let folderApps = try queryFolderPageApps(db, pageID: folderPageID)
                         for (appTitle, appBundleID, appBookmark) in folderApps {
                             guard let appBundleID = appBundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
                                   !appBundleID.isEmpty else { continue }
                             guard seenAppIDs.insert(appBundleID).inserted else { continue }
                             folderAppIDs.append(appBundleID)
                             let name = appTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let resolvedPath = appBookmark.flatMap(resolveBookmarkPath)
+                            let resolvedPath = isBackup ? nil : appBookmark.flatMap(resolveBookmarkPath)
                             catalog[appBundleID] = LaunchpadLayoutCatalogEntry(
                                 id: appBundleID,
                                 bundleIdentifier: appBundleID,
@@ -145,88 +165,85 @@ public enum MacOSLaunchpadReader {
         case folder(folderRowID: Int64, title: String?)
     }
 
-    private static func queryRootPageID(_ db: OpaquePointer) -> Int64 {
+    private static func queryRootPageID(_ db: OpaquePointer) throws -> Int64 {
         let sql = "SELECT rowid FROM items WHERE uuid = 'ROOTPAGE' LIMIT 1"
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
-            defer { sqlite3_finalize(stmt) }
-            if sqlite3_step(stmt) == SQLITE_ROW {
-                return sqlite3_column_int64(stmt, 0)
-            }
-        }
-        return 1
+        return try query(db, sql: sql) { sqlite3_column_int64($0, 0) }.first ?? 1
     }
 
-    private static func queryChildPages(_ db: OpaquePointer, parentID: Int64) -> [Int64] {
-        let sql = "SELECT rowid FROM items WHERE parent_id = ? AND (uuid IS NULL OR uuid != 'HOLDINGPAGE') ORDER BY ordering ASC"
-        var stmt: OpaquePointer?
-        var pages: [Int64] = []
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
-            defer { sqlite3_finalize(stmt) }
-            sqlite3_bind_int64(stmt, 1, parentID)
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                pages.append(sqlite3_column_int64(stmt, 0))
-            }
-        }
-        return pages
+    private static func queryChildPages(_ db: OpaquePointer, parentID: Int64) throws -> [Int64] {
+        let sql = """
+        SELECT rowid FROM items
+        WHERE parent_id = ? AND (uuid IS NULL OR uuid != 'HOLDINGPAGE')
+        ORDER BY ordering, rowid
+        """
+        return try query(db, sql: sql, parentID: parentID) { sqlite3_column_int64($0, 0) }
     }
 
-    private static func queryPageItems(_ db: OpaquePointer, pageID: Int64) -> [RawPageItem] {
+    private static func queryPageItems(_ db: OpaquePointer, pageID: Int64) throws -> [RawPageItem] {
         let sql = """
         SELECT i.rowid, i.type, a.title, a.bundleid, a.bookmark, g.title
         FROM items i
         LEFT JOIN apps a ON i.rowid = a.item_id
         LEFT JOIN groups g ON i.rowid = g.item_id
-        WHERE i.parent_id = ?
-        ORDER BY i.ordering ASC
+        WHERE i.parent_id = ? AND i.type IN (2, 4)
+        ORDER BY i.ordering, i.rowid
         """
-        var stmt: OpaquePointer?
-        var results: [RawPageItem] = []
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
-            defer { sqlite3_finalize(stmt) }
-            sqlite3_bind_int64(stmt, 1, pageID)
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let rowID = sqlite3_column_int64(stmt, 0)
-                let itemType = sqlite3_column_int(stmt, 1)
-                let appTitle = columnString(stmt, index: 2)
-                let appBundleID = columnString(stmt, index: 3)
-                let appBookmark = columnData(stmt, index: 4)
-                let groupTitle = columnString(stmt, index: 5)
-
-                if itemType == 4 { // App
-                    results.append(.app(title: appTitle, bundleID: appBundleID, bookmark: appBookmark))
-                } else if itemType == 2 { // Folder / Group
-                    results.append(.folder(folderRowID: rowID, title: groupTitle))
-                }
+        return try query(db, sql: sql, parentID: pageID) { stmt in
+            if sqlite3_column_int(stmt, 1) == 2 {
+                return .folder(folderRowID: sqlite3_column_int64(stmt, 0), title: columnString(stmt, index: 5))
             }
+            return .app(
+                title: columnString(stmt, index: 2),
+                bundleID: columnString(stmt, index: 3),
+                bookmark: columnData(stmt, index: 4)
+            )
         }
-        return results
     }
 
     private static func queryFolderPageApps(
         _ db: OpaquePointer,
         pageID: Int64
-    ) -> [(title: String?, bundleID: String?, bookmark: Data?)] {
+    ) throws -> [(title: String?, bundleID: String?, bookmark: Data?)] {
         let sql = """
         SELECT a.title, a.bundleid, a.bookmark
         FROM items i
         JOIN apps a ON i.rowid = a.item_id
         WHERE i.parent_id = ?
-        ORDER BY i.ordering ASC
+        ORDER BY i.ordering, i.rowid
         """
-        var stmt: OpaquePointer?
-        var results: [(title: String?, bundleID: String?, bookmark: Data?)] = []
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
-            defer { sqlite3_finalize(stmt) }
-            sqlite3_bind_int64(stmt, 1, pageID)
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let appTitle = columnString(stmt, index: 0)
-                let appBundleID = columnString(stmt, index: 1)
-                let appBookmark = columnData(stmt, index: 2)
-                results.append((title: appTitle, bundleID: appBundleID, bookmark: appBookmark))
-            }
+        return try query(db, sql: sql, parentID: pageID) { stmt in
+            (columnString(stmt, index: 0), columnString(stmt, index: 1), columnData(stmt, index: 2))
         }
-        return results
+    }
+
+    private static func query<Row>(
+        _ db: OpaquePointer,
+        sql: String,
+        parentID: Int64? = nil,
+        readRow: (OpaquePointer) -> Row
+    ) throws -> [Row] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw queryError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+
+        if let parentID, sqlite3_bind_int64(statement, 1, parentID) != SQLITE_OK {
+            throw queryError(db)
+        }
+
+        var rows: [Row] = []
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            rows.append(readRow(statement))
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw queryError(db) }
+        return rows
+    }
+
+    private static func queryError(_ db: OpaquePointer) -> MacOSLaunchpadError {
+        .queryFailed(String(cString: sqlite3_errmsg(db)))
     }
 
     private static func columnString(_ stmt: OpaquePointer, index: Int32) -> String? {

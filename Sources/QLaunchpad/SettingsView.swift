@@ -718,6 +718,19 @@ private struct ApplicationSettingsView: View {
                         .disabled(store.isLoading || store.apps.isEmpty)
                 }
 
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L10n.tr("settings.macosLayoutBackup"))
+                        Text(L10n.tr("settings.macosLayoutBackup.detail"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(L10n.tr("common.import")) { chooseMacOSLayoutBackup() }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isLoading || store.apps.isEmpty)
+                }
+
                 HStack(spacing: 8) {
                     LayoutProfilePopUp(
                         profiles: store.layoutProfiles,
@@ -933,9 +946,12 @@ private struct ApplicationSettingsView: View {
         }
     }
 
-    private func applyImportedLayout(_ document: LaunchpadLayoutDocument) {
+    private func applyImportedLayout(
+        _ document: LaunchpadLayoutDocument,
+        fromMacOSBackup: Bool = false
+    ) {
         do {
-            let report = try store.applyLayout(document, mode: .merge)
+            let report = try store.applyLayout(document, mode: .merge, fromMacOSBackup: fromMacOSBackup)
             importStatusMessage = L10n.tr(
                 "layout.import.result",
                 report.importedRootItems,
@@ -948,26 +964,58 @@ private struct ApplicationSettingsView: View {
         }
     }
 
-    private func importMacOSSystemLayout() {
+    private func chooseMacOSLayoutBackup() {
+        guard !store.isLoading, !store.apps.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.title = L10n.tr("settings.macosLayoutBackup")
+        panel.prompt = L10n.tr("common.open")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        // Apple's database may be named "db", with no extension.
+        presentFilePanel(panel) { url in
+            guard let url else { return }
+            let hasAccess = url.startAccessingSecurityScopedResource()
+            defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+            importMacOSSystemLayout(from: url)
+        }
+    }
+
+    private func importMacOSSystemLayout(from databaseURL: URL? = nil) {
         guard !store.isLoading, !store.apps.isEmpty else { return }
         importStatusMessage = nil
+        let isBackup = databaseURL != nil
 
         let document: LaunchpadLayoutDocument
         do {
-            document = try MacOSLaunchpadReader.readLayoutDocument()
+            if let databaseURL {
+                document = try MacOSLaunchpadReader.readBackupLayoutDocument(from: databaseURL)
+            } else {
+                document = try MacOSLaunchpadReader.readLayoutDocument()
+            }
         } catch {
-            presentAlert(title: L10n.tr("error.macosLayout.read"), message: layoutErrorMessage(error))
+            let message = isBackup && error is MacOSLaunchpadError
+                ? L10n.tr("error.macosLayout.invalidBackup")
+                : layoutErrorMessage(error)
+            presentAlert(title: L10n.tr("error.macosLayout.read"), message: message)
             return
         }
 
         let alert = NSAlert()
-        alert.messageText = L10n.tr("layout.importSystem.confirm.title")
-        alert.informativeText = L10n.tr("layout.importSystem.confirm.detail", layoutBackupDirectoryLabel)
+        alert.messageText = L10n.tr(isBackup ? "layout.importMacOSBackup.confirm.title" : "layout.importSystem.confirm.title")
+        alert.informativeText = L10n.tr(
+            isBackup ? "layout.importMacOSBackup.confirm.detail" : "layout.importSystem.confirm.detail",
+            layoutBackupDirectoryLabel
+        )
         alert.addButton(withTitle: L10n.tr("common.importPlain"))
         alert.addButton(withTitle: L10n.tr("common.cancel"))
         presentAlert(alert) { response in
             guard response == .alertFirstButtonReturn else { return }
-            self.applyImportedMacOSLayout(document)
+            if isBackup {
+                self.applyImportedLayout(document, fromMacOSBackup: true)
+            } else {
+                self.applyImportedMacOSLayout(document)
+            }
         }
     }
 
@@ -1006,6 +1054,9 @@ private struct ApplicationSettingsView: View {
         case .malformed(let reason):
             if reason == "application catalog is empty" {
                 return L10n.tr("error.layout.catalogEmpty")
+            }
+            if reason == "no matching installed apps" {
+                return L10n.tr("error.macosLayout.noMatches")
             }
             return L10n.tr("error.layout.malformed")
         case .limitExceeded(let limit):

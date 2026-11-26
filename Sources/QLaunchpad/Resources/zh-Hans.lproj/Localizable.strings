@@ -88,6 +88,8 @@
 "settings.layoutFile.detail" = "导出或导入当前排序和分组";
 "settings.macosSystemLayout" = "macOS 原系统排列";
 "settings.macosSystemLayout.detail" = "从系统原生启动台（Launchpad）导入历史图标排序与分组";
+"settings.macosLayoutBackup" = "Launchpad 布局备份";
+"settings.macosLayoutBackup.detail" = "从已保存的 SQLite 数据库导入图标顺序与文件夹";
 "settings.appSupportPath" = "应用程序支持/%@";
 "settings.ai.detail" = "把下面的提示词复制给本地的 AI Agent，比如 Codex、Grok Build、Claude Code、Antigravity、Kimi Work 等";
 "settings.ai.copy" = "复制提示词";
@@ -157,6 +159,8 @@
 "layout.importSystem.confirm.title" = "导入 macOS 原系统排列？";
 "layout.importSystem.confirm.detail" = "将读取系统原生 Launchpad 的历史图标排序与文件夹分组并应用到当前布局。未出现在系统中的应用将排在最后。导入前会自动备份当前布局至「%@/layout.backup.json」。";
 "layout.importSystem.result" = "已从系统启动台导入 %d 项，跳过 %d 个未知应用，追加 %d 个新应用";
+"layout.importMacOSBackup.confirm.title" = "导入 Launchpad 布局备份？";
+"layout.importMacOSBackup.confirm.detail" = "将用所选备份的图标顺序和文件夹重排当前布局。未安装的应用会跳过，其余应用会排在最后。导入前会将当前布局备份到「%@/layout.backup.json」。";
 "layout.auto.recentlyUsed" = "最近使用";
 "layout.auto.nameAscending" = "名称正序";
 "layout.auto.nameDescending" = "名称倒序";
@@ -205,6 +209,8 @@
 "error.layout.import" = "无法导入布局";
 "error.macosLayout.notFound" = "未找到 macOS 原生启动台数据库文件。";
 "error.macosLayout.read" = "无法读取 macOS 系统启动台排列";
+"error.macosLayout.noMatches" = "备份中没有与已安装应用匹配的条目。";
+"error.macosLayout.invalidBackup" = "请选择解压后的 Launchpad SQLite 数据库文件，例如 db。";
 "error.layout.invalidKind" = "不是 QLaunch 布局文件。";
 "error.layout.unsupportedVersion" = "不支持的布局文件版本。";
 "error.layout.catalogEmpty" = "应用列表尚未就绪，请等待扫描完成后再导入。";
