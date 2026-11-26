@@ -88,6 +88,8 @@
 "settings.layoutFile.detail" = "Export or import the current order and groups";
 "settings.macosSystemLayout" = "macOS System Layout";
 "settings.macosSystemLayout.detail" = "Import historical icon order and folders from native Launchpad";
+"settings.macosLayoutBackup" = "Launchpad Layout Backup";
+"settings.macosLayoutBackup.detail" = "Import icon order and folders from a saved SQLite database";
 "settings.appSupportPath" = "Application Support/%@";
 "settings.ai.detail" = "Copy the prompt below to a local AI agent, such as Codex, Grok Build, Claude Code, Antigravity, or Kimi Work";
 "settings.ai.copy" = "Copy Prompt";
@@ -157,6 +159,8 @@
 "layout.importSystem.confirm.title" = "Import macOS System Layout?";
 "layout.importSystem.confirm.detail" = "Reads the historical icon order and folders from native Launchpad and applies them to the current layout. Apps not present in the system Launchpad will be placed at the end. Your current layout will be backed up to “%@/layout.backup.json” first.";
 "layout.importSystem.result" = "Imported %d items from system Launchpad, skipped %d unknown apps, and appended %d new apps";
+"layout.importMacOSBackup.confirm.title" = "Import Launchpad Layout Backup?";
+"layout.importMacOSBackup.confirm.detail" = "The selected backup will reorder your icons and folders. Missing apps will be skipped and other apps will be placed at the end. Your current layout will be backed up to “%@/layout.backup.json” first.";
 "layout.auto.recentlyUsed" = "Recently Used";
 "layout.auto.nameAscending" = "Name (Ascending)";
 "layout.auto.nameDescending" = "Name (Descending)";
@@ -205,6 +209,8 @@
 "error.layout.import" = "Couldn’t Import Layout";
 "error.macosLayout.notFound" = "macOS native Launchpad database was not found.";
 "error.macosLayout.read" = "Couldn’t Read macOS Launchpad Layout";
+"error.macosLayout.noMatches" = "No apps in the backup match the installed apps.";
+"error.macosLayout.invalidBackup" = "Choose an extracted Launchpad SQLite database file, such as db.";
 "error.layout.invalidKind" = "This is not a QLaunch layout file.";
 "error.layout.unsupportedVersion" = "This layout file version is not supported.";
 "error.layout.catalogEmpty" = "The app list is not ready. Wait for scanning to finish, then import again.";

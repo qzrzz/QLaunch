@@ -1470,7 +1470,8 @@ final class AppStore: ObservableObject {
     func applyLayout(
         _ document: LaunchpadLayoutDocument,
         mode: LaunchpadLayoutImportMode,
-        writeBackup: Bool = true
+        writeBackup: Bool = true,
+        fromMacOSBackup: Bool = false
     ) throws -> LaunchpadLayoutReport {
         guard !isLoading, !apps.isEmpty else {
             throw LaunchpadLayoutError.malformed("application catalog is empty")
@@ -1482,8 +1483,16 @@ final class AppStore: ObservableObject {
             scanned: knownApps(),
             currentHidden: hiddenAppIDs
         )
+        if fromMacOSBackup && report.resolvedApps == 0 {
+            throw LaunchpadLayoutError.malformed("no matching installed apps")
+        }
         if writeBackup {
-            writeLayoutBackupFailOpen()
+            do {
+                try LaunchpadPreferenceStore.writeLayoutBackup(domain: Self.preferenceDomain, document: exportLayout())
+            } catch {
+                if fromMacOSBackup { throw error }
+                layoutLogger.warning("layout.backup.failed \(error.localizedDescription, privacy: .public)")
+            }
         }
         let hiddenBeforeImport = hiddenAppIDs
         let foldersData = try LaunchpadPreferenceStore.encodeFolders(applied.folders)
@@ -2760,17 +2769,6 @@ final class AppStore: ObservableObject {
         hiddenAppIDs = Set(layout.hiddenIDs)
         hiddenAppOrderIDs = layout.hiddenIDs
         folders = (try? LaunchpadPreferenceStore.decodeFolders(layout.foldersData)) ?? []
-    }
-
-    private func writeLayoutBackupFailOpen() {
-        do {
-            try LaunchpadPreferenceStore.writeLayoutBackup(
-                domain: Self.preferenceDomain,
-                document: exportLayout(includeCatalog: true, includePaths: true)
-            )
-        } catch {
-            layoutLogger.warning("layout.backup.failed \(error.localizedDescription, privacy: .public)")
-        }
     }
 
     private func cancelActiveDrag() {
