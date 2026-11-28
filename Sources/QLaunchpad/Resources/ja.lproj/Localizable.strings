@@ -17,7 +17,21 @@
 "settings.menuBarIcon" = "メニューバーアイコン";
 "settings.section.display" = "表示";
 "settings.showAppNames" = "アプリ名を表示";
+"settings.appLabelSize" = "アプリ名の文字サイズ";
+"settings.appLabelSize.small" = "小";
+"settings.appLabelSize.medium" = "中";
+"settings.appLabelSize.large" = "大";
+"settings.searchFieldSize" = "検索欄のサイズ";
+"settings.searchFieldSize.compact" = "小";
+"settings.searchFieldSize.standard" = "中";
+"settings.searchFieldSize.large" = "大";
 "settings.layout" = "レイアウト";
+"settings.canvasHoverMagnification" = "ポインタを重ねるとアイコンを拡大";
+"settings.canvasArrangement" = "キャンバスの配置";
+"settings.canvasArrangement.grid" = "グリッド";
+"settings.canvasArrangement.starRing" = "スターリング";
+"settings.iconArrangement" = "アイコンの配置";
+"settings.compactPlacement" = "自動で詰めて配置";
 "settings.freePlacement" = "アイコンを自由に配置";
 "organize.menu" = "ページを整理…";
 "organize.title" = "ページを整理";
@@ -54,7 +68,7 @@
 "settings.background.custom.unavailable" = "この画像は利用できません。別の画像を選択してください。";
 "settings.section.animation" = "アニメーション";
 "settings.animation" = "切り替えアニメーション";
-"settings.animation.detail" = "画面の表示／非表示時に使うアイコンのアニメーションです。";
+"settings.animation.detail" = "アイコンの表示・非表示時のアニメーションを選びます。モーションが有効な場合、アイコンは QLaunch を開いたホットコーナーから飛び込みます。";
 "settings.section.keyboard" = "キーボード";
 "settings.keyboard.toggle" = "開く／閉じる";
 "settings.keyboard.close" = "閉じる";
@@ -134,6 +148,7 @@
 "sources.rescan.accessibility" = "アプリケーションの場所を再スキャン";
 "launchpad.search" = "検索";
 "launchpad.searchApps" = "アプリを検索";
+"launchpad.searchResultLocation" = "%1$@ の場所：%2$@";
 "launchpad.clearSearch" = "検索を消去";
 "launchpad.openSettings" = "設定を開く";
 "launchpad.folder" = "フォルダ";
@@ -179,6 +194,7 @@
 "animation.fly" = "フライイン（iOS ホーム画面）";
 "animation.classic" = "クラシック";
 "animation.zoom" = "ズーム";
+"animation.lift" = "上昇";
 "animation.fade" = "フェード";
 "animation.none" = "なし";
 "grid.infiniteCanvas.128" = "無限キャンバス (128pt)";
@@ -234,6 +250,8 @@
 "settings.trackpad.three" = "3 本指でピンチ";
 "settings.trackpad.five" = "5 本指でピンチ";
 "settings.trackpad.compatibility" = "システムのアプリ一覧も開く場合は、3 本指または 5 本指をお試しください。";
+"settings.trackpad.desktopPermission" = "アクセシビリティで QLaunch を許可すると、ランチャーの表示中は指を広げる操作でランチャーだけが閉じます。";
+"settings.trackpad.openAccessibility" = "アクセシビリティ設定を開く";
 "settings.trackpad.unavailable" = "対応するトラックパッドが見つからないか、このシステムでは利用できません。";
 
 "appRename.description" = "カスタム名は表示と検索に使用されます。";

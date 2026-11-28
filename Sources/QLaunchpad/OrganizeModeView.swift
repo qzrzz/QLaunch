@@ -1,4 +1,5 @@
 import AppKit
+import QLaunchpadCore
 import QuartzCore
 
 private enum OrganizerColor {
@@ -489,15 +490,7 @@ final class OrganizeModeView: NSView {
     @objc private func close() { onClose() }
 
     @objc private func toggleFreePlacement() {
-        UserDefaults.standard.set(
-            freePlacementToggle.state == .on,
-            forKey: AppStore.freePlacementEnabledKey
-        )
-        if freePlacementToggle.state == .on {
-            store.enableFreePlacementForOrganizing()
-        } else {
-            NotificationCenter.default.post(name: .qlaunchpadGridLayoutChanged, object: nil)
-        }
+        store.setFreePlacementEnabled(freePlacementToggle.state == .on)
     }
 
     @objc private func layoutChanged() {
@@ -1545,6 +1538,14 @@ private enum DragHoverTarget: Equatable {
     case insertion(targetSlot: Int, after: Bool)
     case folderGroup(targetID: String, targetSlot: Int, isFolder: Bool)
     case hideAction
+
+    var reorderDestination: Int? {
+        switch self {
+        case .slot(let slot): slot
+        case .insertion(let slot, let after): slot + (after ? 1 : 0)
+        case .folderGroup, .hideAction: nil
+        }
+    }
 }
 
 @MainActor
@@ -1583,6 +1584,15 @@ private final class OrganizeCanvasView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // ESC
+            if didDrag, case .draggingIcons(_, let start, let current, _) = dragState {
+                animateIconReturn(start: start, current: current)
+                dragState = .idle
+                didDrag = false
+                initialClickItem = nil
+                onHoverHideActionChanged?(false)
+                onDragUpdate?(false, [], .zero, false)
+                return
+            }
             if !selectedIDs.isEmpty {
                 clearSelection()
                 return
@@ -1598,8 +1608,12 @@ private final class OrganizeCanvasView: NSView {
         let to: CGRect
         let start: CFTimeInterval
         let duration: CFTimeInterval
+        var usesInsertionEasing = false
     }
     private var iconMotions: [String: Motion] = [:]
+    private var iconPreviewDestination: Int?
+    private var iconPreviewSlots: [String: Int] = [:]
+    private var insertionHover = LaunchpadInsertionHover()
     private var pageMotions: [Int: Motion] = [:]
     private var animationTimer: Timer?
 
@@ -1623,6 +1637,17 @@ private final class OrganizeCanvasView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     deinit { animationTimer?.invalidate() }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window == nil else { return }
+        animationTimer?.invalidate()
+        animationTimer = nil
+        dragState = .idle
+        didDrag = false
+        initialClickItem = nil
+        clearDenseIconPreview()
+    }
 
     private var pageCount: Int { max(store.pageCount, 1) }
     private var cardCount: Int {
@@ -1919,6 +1944,9 @@ private final class OrganizeCanvasView: NSView {
         iconMotions = iconMotions.filter { now - $0.value.start < $0.value.duration }
         pageMotions = pageMotions.filter { now - $0.value.start < $0.value.duration }
         let isAutoScrolling = autoScrollIfNeeded()
+        if !isAutoScrolling, didDrag, case .draggingIcons(_, _, let point, let target) = dragState {
+            updateInsertionHover(at: point, destination: target?.reorderDestination, now: now)
+        }
         needsDisplay = true
         if iconMotions.isEmpty && pageMotions.isEmpty && !isAutoScrolling && !didDrag {
             animationTimer?.invalidate()
@@ -1928,7 +1956,9 @@ private final class OrganizeCanvasView: NSView {
 
     private func interpolatedRect(_ motion: Motion) -> CGRect {
         let t = CGFloat(min(max((CACurrentMediaTime() - motion.start) / motion.duration, 0), 1))
-        let ease = 1 - pow(1 - t, 3)
+        let ease = motion.usesInsertionEasing
+            ? LaunchpadInsertionHover.movementProgress(Double(t))
+            : 1 - pow(1 - t, 3)
         return CGRect(
             x: motion.from.origin.x + (motion.to.origin.x - motion.from.origin.x) * ease,
             y: motion.from.origin.y + (motion.to.origin.y - motion.from.origin.y) * ease,
@@ -1961,13 +1991,16 @@ private final class OrganizeCanvasView: NSView {
         guard newY != visible.origin.y else { return false }
         clip.scroll(to: CGPoint(x: visible.minX, y: newY))
         scroll.reflectScrolledClipView(clip)
+        if case .draggingIcons(let anchorID, let start, _, _) = dragState {
+            updateIconDrag(anchorID: anchorID, start: start, windowPoint: mouseInWindow)
+        }
         return true
     }
 
     // MARK: - Mouse Events
 
     override func mouseDown(with event: NSEvent) {
-        iconMotions.removeAll()
+        clearDenseIconPreview()
         pageMotions.removeAll()
         onHoverHideActionChanged?(false)
         onDragUpdate?(false, [], .zero, false)
@@ -2042,28 +2075,7 @@ private final class OrganizeCanvasView: NSView {
 
         case .draggingIcons(let anchorID, let start, _, _):
             if !didDrag && hypot(point.x - start.x, point.y - start.y) > 4 { didDrag = true }
-            let hoverTarget: DragHoverTarget?
-            let windowPoint = event.locationInWindow
-            let isOverHide = isPointOverHideAction?(windowPoint) ?? false
-            if didDrag {
-                if isOverHide {
-                    hoverTarget = .hideAction
-                } else if let groupTarget = groupingTarget(at: point, excluding: selectedIDs) {
-                    hoverTarget = .folderGroup(targetID: groupTarget.item.id, targetSlot: groupTarget.slot, isFolder: groupTarget.isFolder)
-                } else if let target = dropTarget(at: point, excluding: selectedIDs) {
-                    hoverTarget = target
-                } else {
-                    hoverTarget = nil
-                }
-            } else {
-                hoverTarget = nil
-            }
-            dragState = .draggingIcons(anchorID: anchorID, start: start, current: point, hoverTarget: hoverTarget)
-            onHoverHideActionChanged?(hoverTarget == .hideAction)
-            if didDrag {
-                let draggedItems = store.launchpadItems.filter { selectedIDs.contains($0.id) }
-                onDragUpdate?(true, draggedItems, windowPoint, hoverTarget == .hideAction)
-            }
+            updateIconDrag(anchorID: anchorID, start: start, windowPoint: event.locationInWindow)
 
         case .draggingPage(let source, let start, _, _):
             if !didDrag && hypot(point.x - start.x, point.y - start.y) > 4 { didDrag = true }
@@ -2079,6 +2091,61 @@ private final class OrganizeCanvasView: NSView {
             startAnimationTimer()
         }
         needsDisplay = true
+    }
+
+    private func iconDragTarget(
+        at point: CGPoint, windowPoint: CGPoint, anchorID: String, includingEmptyPage: Bool = false
+    ) -> DragHoverTarget? {
+        if isPointOverHideAction?(windowPoint) == true {
+            return .hideAction
+        }
+        if !store.usesFreePlacement, let boundary = denseInsertionBoundary(at: point, anchorID: anchorID) {
+            return .slot(boundary)
+        }
+        if let target = groupingTarget(at: point, excluding: selectedIDs) {
+            return .folderGroup(targetID: target.item.id, targetSlot: target.slot, isFolder: target.isFolder)
+        }
+        if store.usesFreePlacement { return dropTarget(at: point, excluding: selectedIDs) }
+        if includingEmptyPage, cardCount > pageCount,
+           gridRect(forCardRect: baseCardRect(pageCount)).contains(point) {
+            return .slot(store.launchpadItems.count)
+        }
+        return nil
+    }
+
+    private func denseInsertionBoundary(at point: CGPoint, anchorID: String) -> Int? {
+        guard let page = (0..<pageCount).first(where: { baseCardRect($0).contains(point) }) else {
+            return nil
+        }
+        let firstSlot = page * store.pageCapacity
+        let card = baseCardRect(page)
+        let grid = gridRect(forCardRect: card)
+        let first = iconRect(slot: firstSlot, card: card)
+        let count = min(store.pageCapacity, store.launchpadItems.count - firstSlot)
+        let cell = CGSize(width: grid.width / CGFloat(gridColumns), height: grid.height / CGFloat(gridRows))
+        if let previewSlot = iconPreviewSlots[anchorID], previewSlot / store.pageCapacity == page,
+           let held = insertionHover.retainedBoundary(
+               at: point, openSlotCenter: iconRect(slot: previewSlot, card: card).center, cellSize: cell
+           ) {
+            return held
+        }
+        return LaunchpadInsertionHover.boundary(
+            at: point, firstRowY: first.midY, cellSize: cell,
+            iconWidth: first.width, columns: gridColumns, itemCount: count,
+            retaining: insertionHover.activeBoundary.map { $0 - firstSlot }, leadingX: { _ in first.midX }
+        ).map { firstSlot + $0 }
+    }
+
+    private func updateIconDrag(anchorID: String, start: CGPoint, windowPoint: CGPoint) {
+        let point = convert(windowPoint, from: nil)
+        let target = didDrag ? iconDragTarget(at: point, windowPoint: windowPoint, anchorID: anchorID) : nil
+        dragState = .draggingIcons(anchorID: anchorID, start: start, current: point, hoverTarget: target)
+        updateInsertionHover(at: point, destination: target?.reorderDestination, now: CACurrentMediaTime())
+        onHoverHideActionChanged?(target == .hideAction)
+        if didDrag {
+            let draggedItems = store.launchpadItems.filter { selectedIDs.contains($0.id) }
+            onDragUpdate?(true, draggedItems, windowPoint, target == .hideAction)
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -2098,11 +2165,15 @@ private final class OrganizeCanvasView: NSView {
             }
         } else {
             switch dragState {
-            case .draggingIcons(let anchorID, let start, _, let hoverTarget):
+            case .draggingIcons(let anchorID, let start, _, _):
+                let hoverTarget = iconDragTarget(
+                    at: point, windowPoint: event.locationInWindow, anchorID: anchorID, includingEmptyPage: true
+                )
                 onHoverHideActionChanged?(false)
                 onDragUpdate?(false, [], .zero, false)
                 switch hoverTarget {
                 case .hideAction:
+                    clearDenseIconPreview()
                     let itemsToHide = selectedIDs
                     selectedIDs.removeAll()
                     onHideItems?(itemsToHide)
@@ -2110,6 +2181,7 @@ private final class OrganizeCanvasView: NSView {
                     needsDisplay = true
 
                 case .folderGroup(let targetID, _, let isFolder):
+                    clearDenseIconPreview()
                     let isAnchorFolder: Bool = {
                         if let item = store.launchpadItems.first(where: { $0.id == anchorID }),
                            case .folder = item { return true }
@@ -2584,10 +2656,56 @@ private final class OrganizeCanvasView: NSView {
         if !pageMotions.isEmpty { startAnimationTimer() }
     }
 
+    private func updateInsertionHover(at point: CGPoint, destination: Int?, now: CFTimeInterval) {
+        if !store.usesFreePlacement, let destination {
+            updateDenseIconPreview(destination: insertionHover.update(boundary: destination, point: point, now: now))
+        } else {
+            insertionHover.reset()
+            updateDenseIconPreview(destination: nil)
+        }
+    }
+
+    private func updateDenseIconPreview(destination: Int?) {
+        guard destination != iconPreviewDestination else { return }
+        iconPreviewDestination = destination
+        let items = store.launchpadItems
+        let order = destination.flatMap {
+            LaunchpadGridReorder.inserting(selectedIDs, in: items.map(\.id), at: $0)
+        }
+        let slots = order.map {
+            Dictionary(uniqueKeysWithValues: $0.enumerated().map { ($0.element, $0.offset) })
+        } ?? [:]
+        let now = CACurrentMediaTime()
+        for (index, item) in items.enumerated() where !selectedIDs.contains(item.id) {
+            let committedSlot = store.slot(for: item, fallback: index)
+            let oldSlot = iconPreviewSlots[item.id] ?? committedSlot
+            let newSlot = slots[item.id] ?? committedSlot
+            guard oldSlot != newSlot else { continue }
+            let from = iconMotions[item.id].map(interpolatedRect) ?? iconRect(slot: oldSlot)
+            iconMotions[item.id] = Motion(
+                from: from, to: iconRect(slot: newSlot), start: now,
+                duration: LaunchpadInsertionHover.movementDuration, usesInsertionEasing: true
+            )
+        }
+        iconPreviewSlots = slots
+    }
+
+    private func clearDenseIconPreview() {
+        insertionHover.reset()
+        iconPreviewDestination = nil
+        iconPreviewSlots.removeAll()
+        iconMotions.removeAll()
+    }
+
     private func animateIconDrop(anchorID: String, start: CGPoint, current: CGPoint, destination: Int) {
-        let oldRects = Dictionary(uniqueKeysWithValues: store.launchpadItems.enumerated().map {
-            ($0.element.id, iconRect(slot: store.slot(for: $0.element, fallback: $0.offset)))
+        let oldRects = Dictionary(uniqueKeysWithValues: store.launchpadItems.enumerated().map { index, item in
+            let slot = store.slot(for: item, fallback: index)
+            let rect = selectedIDs.contains(item.id)
+                ? iconRect(slot: slot)
+                : (iconMotions[item.id].map(interpolatedRect) ?? iconRect(slot: iconPreviewSlots[item.id] ?? slot))
+            return (item.id, rect)
         })
+        clearDenseIconPreview()
         let delta = CGSize(width: current.x - start.x, height: current.y - start.y)
         store.organizeMoveItems(selectedIDs, anchorID: anchorID, toSlot: destination)
         resize(to: enclosingScrollView?.contentSize ?? bounds.size)
@@ -2606,6 +2724,8 @@ private final class OrganizeCanvasView: NSView {
     }
 
     private func animateIconReturn(start: CGPoint, current: CGPoint) {
+        insertionHover.reset()
+        updateDenseIconPreview(destination: nil)
         let delta = CGSize(width: current.x - start.x, height: current.y - start.y)
         let now = CACurrentMediaTime()
         for (index, item) in store.launchpadItems.enumerated() where selectedIDs.contains(item.id) {
@@ -2639,8 +2759,10 @@ private final class OrganizeCanvasView: NSView {
 
         let isDraggingIcons: Bool = if didDrag, case .draggingIcons = dragState { true } else { false }
         let isDraggingPage: Bool = if didDrag, case .draggingPage = dragState { true } else { false }
-        let occupiedSlots = Set(store.launchpadItems.enumerated().map {
-            store.slot(for: $0.element, fallback: $0.offset)
+        let isPreviewing = isDraggingIcons && !iconPreviewSlots.isEmpty
+        let occupiedSlots = Set(store.launchpadItems.enumerated().compactMap { index, item -> Int? in
+            if isPreviewing, selectedIDs.contains(item.id) { return nil }
+            return iconPreviewSlots[item.id] ?? store.slot(for: item, fallback: index)
         })
 
         // Draw page cards
@@ -2728,7 +2850,8 @@ private final class OrganizeCanvasView: NSView {
 
             // Icons on this page
             for (index, item) in store.launchpadItems.enumerated() {
-                let itemSlot = store.slot(for: item, fallback: index)
+                if isPreviewing, selectedIDs.contains(item.id) { continue }
+                let itemSlot = iconPreviewSlots[item.id] ?? store.slot(for: item, fallback: index)
                 guard itemSlot / capacity == page else { continue }
                 let rect = iconMotions[item.id].map(interpolatedRect) ?? iconRect(slot: itemSlot, card: card)
                 let isItemSelected = selectedIDs.contains(item.id)
@@ -2771,7 +2894,8 @@ private final class OrganizeCanvasView: NSView {
 
         // Draw hover target indicator during icon drag (internal or from bottom shelf)
         let activeHoverTarget: DragHoverTarget? = {
-            if didDrag, case .draggingIcons(_, _, _, let ht) = dragState {
+            if didDrag, case .draggingIcons(let anchorID, _, _, let ht) = dragState {
+                if let previewSlot = iconPreviewSlots[anchorID] { return .slot(previewSlot) }
                 return ht
             }
             return externalDragHoverTarget

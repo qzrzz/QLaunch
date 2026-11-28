@@ -1,10 +1,14 @@
 import CoreGraphics
 import Foundation
 
-/// World-space geometry for the non-paged 16 × N canvas. Its unscaled cell
-/// pitch deliberately matches the existing 6 × 4 layout.
+/// World-space geometry for the non-paged canvas.
 public struct InfiniteCanvasMetrics: Equatable, Sendable {
-    public static let columns = 16
+    public enum Arrangement: String, CaseIterable, Sendable {
+        case grid
+        case starRing
+    }
+
+    public static let maximumColumns = 16
     public static let panBoundaryPadding: CGFloat = 200
 
     public let size: CGSize
@@ -17,47 +21,46 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
     public let viewportCenter: CGPoint
     public let availableSize: CGSize
     public let maximumScale: CGFloat
-
-    private let centersIncompleteLastRow: Bool
+    public let arrangement: Arrangement
+    private let starRing: StarRingLayout?
 
     public init(
         size: CGSize,
         itemCount: Int,
-        adaptsToItemCount: Bool = false,
-        maximumScale: CGFloat = 1
+        maximumScale: CGFloat = 1,
+        topInset: CGFloat = 120,
+        arrangement: Arrangement = .grid
     ) {
         self.size = size
         self.itemCount = max(itemCount, 0)
         self.maximumScale = max(maximumScale, 1)
-        centersIncompleteLastRow = adaptsToItemCount
+        self.arrangement = arrangement
 
         let iconSize: CGFloat = 128
         let hInset: CGFloat = 80
-        let vInsetTop: CGFloat = 120
         let vInsetBottom: CGFloat = 96
         let availableWidth = max(size.width - hInset * 2, 1)
-        let availableHeight = max(size.height - vInsetTop - vInsetBottom, 1)
+        let availableHeight = max(size.height - topInset - vInsetBottom, 1)
         availableSize = CGSize(width: availableWidth, height: availableHeight)
         viewportCenter = CGPoint(
             x: size.width * 0.5,
-            y: vInsetTop + availableHeight * 0.5
+            y: topInset + availableHeight * 0.5
         )
 
         let idealCellWidth = availableWidth / 6
         cellWidth = min(max(idealCellWidth, iconSize + 28), 220)
         let idealCellHeight = availableHeight / 4
         cellHeight = min(max(idealCellHeight, iconSize + 48), 220)
-        columnCount = adaptsToItemCount
-            ? Self.bestFittingColumnCount(
-                itemCount: itemCount,
-                availableSize: availableSize,
-                cellWidth: cellWidth,
-                cellHeight: cellHeight,
-                maximumScale: self.maximumScale
-            )
-            : Self.columns
+        columnCount = Self.bestFittingColumnCount(
+            itemCount: self.itemCount,
+            availableSize: availableSize,
+            cellWidth: cellWidth,
+            cellHeight: cellHeight
+        )
         rows = max(1, Int(ceil(Double(max(itemCount, 1)) / Double(columnCount))))
-        worldSize = CGSize(
+        starRing = arrangement == .starRing
+            ? StarRingLayout(itemCount: self.itemCount, cellWidth: cellWidth, cellHeight: cellHeight) : nil
+        worldSize = starRing?.size ?? CGSize(
             width: cellWidth * CGFloat(columnCount),
             height: cellHeight * CGFloat(rows)
         )
@@ -73,10 +76,11 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
         )
     }
 
-    /// Initial root-canvas scale: cover the usable viewport and extend slightly
-    /// beyond one axis. `fittedScale` remains the zoom-out floor for full overview.
+    /// Starting zoom for the root canvas. Rings start near their overview so
+    /// the pattern reads as a whole, with room to pinch in as well as out.
     public var viewportFillingScale: CGFloat {
-        min(
+        if arrangement == .starRing { return min(maximumScale, fittedScale * 1.08) }
+        return min(
             maximumScale,
             1.06 * max(
                 availableSize.width / max(worldSize.width, 1),
@@ -90,6 +94,7 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
         let upperIndex = max(lowerIndex, Int(ceil(globalIndex)))
         let fraction = CGFloat(globalIndex - floor(globalIndex))
         let lower = worldCenter(index: lowerIndex)
+        guard upperIndex != lowerIndex else { return lower }
         let upper = worldCenter(index: upperIndex)
         return CGPoint(
             x: lower.x + (upper.x - lower.x) * fraction,
@@ -107,6 +112,9 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
 
     public func itemIndex(atTopLeftPoint point: CGPoint, scale: CGFloat, pan: CGPoint) -> Int? {
         guard scale > 0 else { return nil }
+        if let starRing {
+            return starRing.nearestSlot(to: worldPoint(atScreenPoint: point, scale: scale, pan: pan))
+        }
         let worldX = (point.x - viewportCenter.x - pan.x) / scale + worldSize.width * 0.5
         let worldY = (point.y - viewportCenter.y - pan.y) / scale + worldSize.height * 0.5
         let column = Int(floor(worldX / cellWidth))
@@ -114,13 +122,20 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
         guard column >= 0, column < columnCount, row >= 0, row < rows else { return nil }
         let rowStart = row * columnCount
         let itemsInRow = min(columnCount, max(itemCount - rowStart, 0))
-        let rowOffset = centersIncompleteLastRow
-            ? CGFloat(columnCount - itemsInRow) * cellWidth * 0.5
-            : 0
+        let rowOffset = rowLeadingOffset(itemsInRow: itemsInRow)
         let adjustedColumn = Int(floor((worldX - rowOffset) / cellWidth))
         guard adjustedColumn >= 0, adjustedColumn < itemsInRow else { return nil }
         let index = rowStart + adjustedColumn
         return index < itemCount ? index : nil
+    }
+
+    public func starRingInsertionBoundary(at point: CGPoint, scale: CGFloat, pan: CGPoint) -> Int? {
+        guard scale > 0 else { return nil }
+        return starRing?.insertionBoundary(at: worldPoint(atScreenPoint: point, scale: scale, pan: pan))
+    }
+
+    public func starRingNeighbor(from index: Int, direction: CGVector) -> Int? {
+        starRing?.neighbor(from: index, direction: direction)
     }
 
     public func clampedPan(_ proposed: CGPoint, scale: CGFloat) -> CGPoint {
@@ -188,14 +203,16 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
     }
 
     func gridPoint(forWorldPoint world: CGPoint) -> CGPoint {
-        CGPoint(
-            x: world.x / max(cellWidth, 1),
-            y: world.y / max(cellHeight, 1)
+        let origin = starRing?.center(at: 0) ?? .zero
+        return CGPoint(
+            x: (world.x - origin.x) / max(cellWidth, 1),
+            y: (world.y - origin.y) / max(cellHeight, 1)
         )
     }
 
     func worldPoint(forGridPoint grid: CGPoint) -> CGPoint {
-        CGPoint(x: grid.x * cellWidth, y: grid.y * cellHeight)
+        let origin = starRing?.center(at: 0) ?? .zero
+        return CGPoint(x: origin.x + grid.x * cellWidth, y: origin.y + grid.y * cellHeight)
     }
 
     func pan(placing worldPoint: CGPoint, atScreenPoint screen: CGPoint, scale: CGFloat) -> CGPoint {
@@ -206,37 +223,57 @@ public struct InfiniteCanvasMetrics: Equatable, Sendable {
     }
 
     private func worldCenter(index: Int) -> CGPoint {
+        if let starRing { return starRing.center(at: index) }
         let row = index / columnCount
         let column = index % columnCount
         let rowStart = row * columnCount
         let itemsInRow = min(columnCount, max(itemCount - rowStart, 0))
-        let rowOffset = centersIncompleteLastRow
-            ? CGFloat(columnCount - itemsInRow) * cellWidth * 0.5
-            : 0
+        let rowOffset = rowLeadingOffset(itemsInRow: itemsInRow)
         return CGPoint(
             x: rowOffset + cellWidth * (CGFloat(column) + 0.5),
             y: cellHeight * (CGFloat(row) + 0.5)
         )
     }
 
+    private func rowLeadingOffset(itemsInRow: Int) -> CGFloat {
+        Self.leadingColumns(columns: columnCount, itemsInRow: itemsInRow) * cellWidth
+    }
+
+    private static func leadingColumns(columns: Int, itemsInRow: Int) -> CGFloat {
+        CGFloat(columns - itemsInRow) * 0.5
+    }
+
+    public static func verticalNeighbor(
+        from index: Int, rowOffset: Int, itemCount: Int, columns: Int
+    ) -> Int? {
+        let currentRow = index / columns
+        let currentStart = currentRow * columns
+        let nextStart = (currentRow + rowOffset) * columns
+        guard nextStart >= 0, nextStart < itemCount else { return nil }
+        let currentCount = min(columns, itemCount - currentStart)
+        let nextCount = min(columns, itemCount - nextStart)
+        let currentColumn = CGFloat(index - currentStart)
+            + leadingColumns(columns: columns, itemsInRow: currentCount)
+        let nextColumn = Int((currentColumn - leadingColumns(columns: columns, itemsInRow: nextCount)).rounded())
+        return nextStart + min(max(nextColumn, 0), nextCount - 1)
+    }
+
     private static func bestFittingColumnCount(
         itemCount: Int,
         availableSize: CGSize,
         cellWidth: CGFloat,
-        cellHeight: CGFloat,
-        maximumScale: CGFloat
+        cellHeight: CGFloat
     ) -> Int {
-        let maximum = min(max(itemCount, 1), columns)
+        let maximum = min(max(itemCount, 1), maximumColumns)
         var bestColumns = 1
         var bestScale: CGFloat = 0
         for candidate in 1...maximum {
             let candidateRows = max(1, Int(ceil(Double(max(itemCount, 1)) / Double(candidate))))
+            // Compare the grids before applying the icon size ceiling. Sparse
+            // grids can all hit that ceiling without using the space equally.
             let scale = min(
-                maximumScale,
-                0.92 * min(
-                    availableSize.width / max(cellWidth * CGFloat(candidate), 1),
-                    availableSize.height / max(cellHeight * CGFloat(candidateRows), 1)
-                )
+                availableSize.width / (cellWidth * CGFloat(candidate)),
+                availableSize.height / (cellHeight * CGFloat(candidateRows))
             )
             if scale > bestScale + 0.0001
                 || (abs(scale - bestScale) <= 0.0001 && candidate > bestColumns) {

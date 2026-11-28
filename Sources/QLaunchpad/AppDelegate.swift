@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import QLaunchpadCore
 import SwiftUI
 
@@ -55,6 +56,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isAnimating = false
     private var presentationGeneration: UInt = 0
     private var activeAnimationStyle: LaunchpadAnimationStyle = .fly
+    private struct TrackpadPresentation {
+        let direction: TrackpadPinchDirection
+        var isReady: Bool
+        var destination: CGFloat?
+    }
+    private var trackpadPresentation: TrackpadPresentation?
+    private var gesturePresentationSubscription: AnyCancellable?
     private var launchReason: LaunchpadLaunchReason = .user
     private var ignoreReopenUntil: Date?
     /// Ignore Dock reopen until the first homepage icons are on screen.
@@ -72,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        LaunchpadBackgroundPreferences.migrateLegacyMode()
         buildLaunchpadPanel()
         DistributedNotificationCenter.default().addObserver(
             self,
@@ -201,10 +210,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func screensChanged() {
-        guard let screen = NSScreen.main else { return }
-        if launchpadPanel.isVisible {
-            launchpadPanel.setFrame(screen.frame, display: true)
-        }
+        guard launchpadPanel.isVisible,
+              let screen = launchpadPanel.screen ?? NSScreen.main else { return }
+        launchpadPanel.setFrame(screen.frame, display: true)
+        containerView.background.prepare(for: screen)
+        containerView.updateSearchFieldLayout(on: screen)
     }
 
     private func buildLaunchpadPanel() {
@@ -216,7 +226,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         panel.level = .popUpMenu
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        // Keep the current Space when the overlay takes keyboard focus.
+        panel.collectionBehavior = [.moveToActiveSpace, .canJoinAllApplications, .fullScreenAuxiliary, .ignoresCycle]
+        if #available(macOS 27.0, *) {
+            panel.collectionBehavior.insert(.stationary)
+        }
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -243,8 +257,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let isLaunchpadSheet = self.launchpadPanel.attachedSheet != nil
                 || keyWindow?.sheetParent === self.launchpadPanel
             guard self.launchpadPanel.isVisible,
+                  !self.launchpadPanel.isKeyWindow,
                   self.store.presentation != .hidden,
                   self.settingsWindow?.isKeyWindow != true,
+                  self.trackpadPresentation == nil,
                   !isLaunchpadSheet else { return }
             self.dismissLaunchpad()
         }
@@ -259,7 +275,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard self.launchpadPanel?.isVisible == true, self.store.presentation != .hidden else { return }
-                NSApp.activate(ignoringOtherApps: true)
                 self.launchpadPanel?.makeKey()
             }
         }
@@ -297,10 +312,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installHotCorner() {
         let center = LaunchpadHotCornerCenter.shared
-        center.onTrigger = { [weak self] in
+        center.onTrigger = { [weak self] screen, corner in
             guard let self else { return }
             if !self.store.isPresented && self.launchpadPanel?.isVisible != true {
-                self.showLaunchpad()
+                self.showLaunchpad(on: screen, from: corner)
             }
         }
         center.install()
@@ -308,21 +323,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installTrackpadGesture() {
         let center = LaunchpadGestureCenter.shared
-        center.onTrigger = { [weak self] direction in
+        center.visibleLaunchpad = { [weak self] in
+            guard let self, self.launchpadPanel?.isVisible == true,
+                  self.store.presentation == .visible, !self.isAnimating,
+                  self.settingsWindow?.isKeyWindow != true,
+                  self.launchpadPanel.attachedSheet == nil,
+                  let screen = self.launchpadPanel.screen ?? NSScreen.main else { return nil }
+            return (self.presentationGeneration, screen)
+        }
+        center.launchpadGeneration = { [weak self] in self?.presentationGeneration }
+        center.onProgress = { [weak self] direction, progress, screen in
+            self?.updateTrackpadPresentation(direction: direction, progress: progress, on: screen) ?? false
+        }
+        center.onRelease = { [weak self] direction, completed in
+            guard let self, self.trackpadPresentation?.direction == direction else { return }
+            let shouldShow = direction == .inward ? completed : !completed
+            self.finishTrackpadPresentation(at: shouldShow ? 1 : 0)
+        }
+        center.onCanvasPinch = { [weak self] event in
             guard let self else { return }
-            switch direction {
-            case .inward:
-                guard !self.store.isPresented, self.launchpadPanel?.isVisible != true else { return }
-                self.showLaunchpad()
-            case .outward:
-                guard self.launchpadPanel?.isVisible == true,
-                      self.launchpadPanel.attachedSheet == nil else { return }
-                self.containerView.hideOrganizer()
-                self.dismissLaunchpad()
+            if event == .ended {
+                self.containerView?.metal.handleCanvasTrackpadPinch(.ended)
+            } else if self.store.presentation == .visible, !self.isAnimating,
+                      self.launchpadPanel.isVisible, !self.launchpadPanel.ignoresMouseEvents,
+                      self.settingsWindow?.isKeyWindow != true, self.launchpadPanel.attachedSheet == nil,
+                      !self.containerView.isOrganizing {
+                self.containerView.metal.handleCanvasTrackpadPinch(event)
             }
-            self.updateStatusMenu()
         }
         center.install()
+        gesturePresentationSubscription = store.$presentation.removeDuplicates().sink { presentation in
+            center.setDockPinchEnabled(presentation == .visible || presentation == .dismissing)
+            center.setCanvasPinchEnabled(presentation == .visible && GridLayoutPreset.current.isInfiniteCanvas)
+        }
     }
 
     @objc private func hotCornerChanged() {
@@ -548,6 +581,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func gridLayoutChanged() {
         store.applyGridLayoutChange()
+        LaunchpadGestureCenter.shared.setCanvasPinchEnabled(
+            store.presentation == .visible && GridLayoutPreset.current.isInfiniteCanvas
+        )
     }
 
     @objc private func toggleLaunchpad() {
@@ -561,14 +597,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Show / hide with correct fade
 
-    private func showLaunchpad() {
+    private func updateTrackpadPresentation(
+        direction: TrackpadPinchDirection, progress: CGFloat, on screen: NSScreen
+    ) -> Bool {
+        let phase = direction == .inward ? progress : 1 - progress
+        if let transition = trackpadPresentation {
+            guard transition.direction == direction, transition.destination == nil else { return false }
+            containerView.setTrackpadPresentationProgress(phase, direction: direction)
+            return true
+        }
+
+        guard !isAnimating, let panel = launchpadPanel, panel.attachedSheet == nil else { return false }
+        switch direction {
+        case .inward:
+            guard store.presentation == .hidden, !panel.isVisible else { return false }
+            isAnimating = true
+            presentationGeneration &+= 1
+            let generation = presentationGeneration
+            activeAnimationStyle = LaunchpadAnimationStyle.resolved()
+            trackpadPresentation = TrackpadPresentation(direction: direction, isReady: false)
+            panel.ignoresMouseEvents = true
+            store.beginPresenting()
+            containerView.metal.beginPresentationHold()
+            panel.setFrame(screen.frame, display: false)
+            panel.animationBehavior = .none
+            containerView.prepareForShow(on: screen, animationStyle: .fly)
+            containerView.setTrackpadPresentationProgress(phase, direction: direction)
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+            containerView.metal.submitFirstPresentationFrame(style: .fly) { [weak self] in
+                guard let self, self.presentationGeneration == generation,
+                      let transition = self.trackpadPresentation, transition.direction == .inward,
+                      transition.destination != 0 else { return }
+                self.trackpadPresentation?.isReady = true
+                self.containerView.revealPrimedTrackpadContent()
+                if let destination = transition.destination {
+                    self.settleTrackpadPresentation(at: destination)
+                }
+            }
+        case .outward:
+            guard store.presentation == .visible, panel.isVisible else { return false }
+            isAnimating = true
+            trackpadPresentation = TrackpadPresentation(direction: direction, isReady: true)
+            panel.ignoresMouseEvents = true
+            containerView.setTrackpadPresentationProgress(phase, direction: direction)
+        }
+        return true
+    }
+
+    private func finishTrackpadPresentation(at destination: CGFloat) {
+        guard let transition = trackpadPresentation, transition.destination == nil else { return }
+        trackpadPresentation?.destination = destination
+        if destination == 0 {
+            store.beginDismissing()
+        }
+        if transition.isReady || destination == 0 {
+            settleTrackpadPresentation(at: destination)
+        }
+    }
+
+    private func settleTrackpadPresentation(at destination: CGFloat) {
+        let generation = presentationGeneration
+        let isOpening = trackpadPresentation?.direction == .inward
+        let initialPosition: CGFloat = isOpening ? 0 : 1
+        let distance = abs(destination - containerView.displayedTrackpadProgress)
+        let duration: TimeInterval
+        if distance < 0.0001 {
+            duration = 0.01
+        } else if destination == initialPosition {
+            duration = 0.24 + 0.36 * distance
+        } else if isOpening {
+            duration = 0.16 + 0.45 * distance
+        } else {
+            duration = 0.18 + 0.2 * distance
+        }
+        containerView.settleTrackpadPresentation(at: destination, duration: duration) { [weak self] in
+            guard let self, self.presentationGeneration == generation,
+                  self.trackpadPresentation != nil else { return }
+            self.trackpadPresentation = nil
+            self.launchpadPanel.ignoresMouseEvents = false
+            self.ignoreLaunchReopen = false
+            if destination == 0 {
+                self.containerView.metal.hideTrackpadPresentation()
+                self.completeDismissal(generation: generation)
+            } else {
+                self.containerView.endTrackpadPresentation()
+                self.store.markVisible()
+                self.launchpadPanel.makeKey()
+                self.syncSettingsWindowLevel()
+                self.ignoreReopenUntil = Date().addingTimeInterval(0.8)
+                self.isAnimating = false
+                if isOpening {
+                    NotificationCenter.default.post(name: .qlaunchpadFocusSearch, object: nil)
+                    self.store.reloadCatalogIfChanged()
+                }
+                self.updateStatusMenu()
+            }
+        }
+    }
+
+    private func showLaunchpad(
+        on triggerScreen: NSScreen? = nil,
+        from corner: LaunchpadPresentationCorner? = nil
+    ) {
         guard !isAnimating else { return }
-        guard let screen = NSScreen.main else { return }
+        guard let screen = triggerScreen ?? NSScreen.main else { return }
 
         isAnimating = true
         presentationGeneration &+= 1
         let generation = presentationGeneration
-        let animationStyle = LaunchpadAnimationStyle.current
+        let animationStyle = LaunchpadAnimationStyle.resolved(forHotCorner: corner != nil)
         activeAnimationStyle = animationStyle
 
         store.beginPresenting()
@@ -583,11 +721,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if animationStyle == .none {
             containerView.showWallpaperImmediately()
         }
-        NSApp.activate(ignoringOtherApps: true)
+        // Borrow keyboard focus without moving the active app out of its Space.
         launchpadPanel.makeKey()
         syncSettingsWindowLevel()
 
-        containerView.metal.submitFirstPresentationFrame(style: animationStyle) { [weak self] in
+        containerView.metal.submitFirstPresentationFrame(style: animationStyle, from: corner) { [weak self] in
             self?.beginContentPresentation(
                 generation: generation,
                 animationStyle: animationStyle
@@ -623,14 +761,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "animationStyle": animationStyle.rawValue
             ]
         )
-        // Refresh the catalog after the open animation. The first-page bake
+        // Check the catalog after the open animation. The first-page bake
         // already waited for the initial scan so this pass does not block UI.
         DispatchQueue.main.asyncAfter(deadline: .now() + animationStyle.duration) { [weak self] in
             guard let self,
                   generation == self.presentationGeneration,
                   self.store.isPresented,
                   self.launchpadPanel.isVisible else { return }
-            self.store.load()
+            self.store.reloadCatalogIfChanged()
         }
         ignoreLaunchReopen = false
         ignoreReopenUntil = Date().addingTimeInterval(0.8)
@@ -647,6 +785,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func beginDismissal(openingAppID: String?) {
+        if trackpadPresentation != nil {
+            finishTrackpadPresentation(at: 0)
+            return
+        }
         if containerView.isOrganizing && openingAppID == nil {
             containerView.hideOrganizer()
             return

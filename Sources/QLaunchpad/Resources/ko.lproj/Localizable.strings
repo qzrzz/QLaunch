@@ -17,7 +17,21 @@
 "settings.menuBarIcon" = "메뉴 막대 아이콘";
 "settings.section.display" = "디스플레이";
 "settings.showAppNames" = "앱 이름 표시";
+"settings.appLabelSize" = "앱 이름 글자 크기";
+"settings.appLabelSize.small" = "작게";
+"settings.appLabelSize.medium" = "중간";
+"settings.appLabelSize.large" = "크게";
+"settings.searchFieldSize" = "검색 필드 크기";
+"settings.searchFieldSize.compact" = "작게";
+"settings.searchFieldSize.standard" = "중간";
+"settings.searchFieldSize.large" = "크게";
 "settings.layout" = "레이아웃";
+"settings.canvasHoverMagnification" = "포인터를 올리면 아이콘 확대";
+"settings.canvasArrangement" = "캔버스 배열";
+"settings.canvasArrangement.grid" = "격자";
+"settings.canvasArrangement.starRing" = "별 고리";
+"settings.iconArrangement" = "아이콘 배열";
+"settings.compactPlacement" = "빈칸 자동 채우기";
 "settings.freePlacement" = "아이콘 자유 배치";
 "organize.menu" = "페이지 정리…";
 "organize.title" = "페이지 정리";
@@ -54,7 +68,7 @@
 "settings.background.custom.unavailable" = "이 이미지를 사용할 수 없습니다. 다른 이미지를 선택하세요.";
 "settings.section.animation" = "애니메이션";
 "settings.animation" = "전환 애니메이션";
-"settings.animation.detail" = "페이지를 표시하거나 숨길 때 사용하는 아이콘 애니메이션입니다.";
+"settings.animation.detail" = "아이콘이 나타나고 사라지는 애니메이션을 선택합니다. 모션이 켜져 있으면 QLaunch를 열 때 사용한 핫 코너에서 아이콘이 날아옵니다.";
 "settings.section.keyboard" = "키보드";
 "settings.keyboard.toggle" = "열기 / 닫기";
 "settings.keyboard.close" = "닫기";
@@ -134,6 +148,7 @@
 "sources.rescan.accessibility" = "응용 프로그램 소스 다시 스캔";
 "launchpad.search" = "검색";
 "launchpad.searchApps" = "앱 검색";
+"launchpad.searchResultLocation" = "%1$@ 위치: %2$@";
 "launchpad.clearSearch" = "검색 지우기";
 "launchpad.openSettings" = "설정 열기";
 "launchpad.folder" = "폴더";
@@ -179,6 +194,7 @@
 "animation.fly" = "날아오기(iOS 홈 화면)";
 "animation.classic" = "클래식";
 "animation.zoom" = "확대";
+"animation.lift" = "떠오르기";
 "animation.fade" = "페이드";
 "animation.none" = "없음";
 "grid.infiniteCanvas.128" = "무한 캔버스 (128pt)";
@@ -234,6 +250,8 @@
 "settings.trackpad.three" = "세 손가락 오므리기";
 "settings.trackpad.five" = "다섯 손가락 오므리기";
 "settings.trackpad.compatibility" = "시스템 앱 목록도 열리면 세 손가락 또는 다섯 손가락을 사용해 보세요.";
+"settings.trackpad.desktopPermission" = "손쉬운 사용에서 QLaunch를 허용하면 런치패드가 열려 있을 때 손가락을 펼쳐 런치패드만 닫을 수 있습니다.";
+"settings.trackpad.openAccessibility" = "손쉬운 사용 설정 열기";
 "settings.trackpad.unavailable" = "호환되는 트랙패드를 찾을 수 없거나 이 시스템에서 지원하지 않습니다.";
 
 "appRename.description" = "사용자 지정 이름은 표시 및 검색에 사용됩니다.";

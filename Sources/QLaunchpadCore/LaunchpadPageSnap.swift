@@ -49,9 +49,9 @@ public enum LaunchpadPageSnap {
 
         let page: Double
         if delta > commitThreshold || flickedForward {
-            page = origin + max(1, delta.rounded())
+            page = origin.rounded() + max(1, delta.rounded())
         } else if delta < -commitThreshold || flickedBack {
-            page = origin - max(1, (-delta).rounded())
+            page = origin.rounded() - max(1, (-delta).rounded())
         } else {
             page = origin.rounded()
         }

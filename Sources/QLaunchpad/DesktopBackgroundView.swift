@@ -4,6 +4,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import Darwin
 import ImageIO
+import QLaunchpadCore
 
 private enum BackgroundVisualTokens {
     static let saturation: CGFloat = 1.16
@@ -196,8 +197,12 @@ private enum WallpaperFileSource {
         let count = CGImageSourceGetCount(source)
         guard count > 0 else { return nil }
         let index = (count > 1 && prefersDark) ? 1 : 0
-        let options = [kCGImageSourceShouldCache: false] as CFDictionary
-        return CGImageSourceCreateImageAtIndex(source, index, options)
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(BackgroundVisualTokens.maximumLongEdge)
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary)
     }
 
     private static func displayUUIDString(_ displayID: CGDirectDisplayID) -> String? {
@@ -244,6 +249,7 @@ private enum WallpaperFileSource {
 private actor PrivateWallpaperRenderer {
     private let context = CIContext(options: [
         .useSoftwareRenderer: false,
+        .cacheIntermediates: false,
         .priorityRequestLow: true
     ])
 
@@ -253,15 +259,15 @@ private actor PrivateWallpaperRenderer {
         blurRadius: CGFloat,
         saturation: CGFloat
     ) async -> CGImage? {
-        guard let capturedImage = await captureWallpaperPixels(displayID: displayID) else {
+        guard !Task.isCancelled,
+              let capturedImage = await captureWallpaperPixels(displayID: displayID),
+              !Task.isCancelled else {
             return nil
         }
 
-        return render(
-            image: capturedImage,
-            blurRadius: blurRadius,
-            saturation: saturation
-        )
+        return autoreleasepool {
+            render(image: capturedImage, blurRadius: blurRadius, saturation: saturation)
+        }
     }
 
     private func render(
@@ -340,18 +346,23 @@ private actor PrivateWallpaperRenderer {
                     saturation: BackgroundVisualTokens.saturation
                 )
             }
-            return render(
-                image: image,
-                blurRadius: blurRadius,
-                saturation: BackgroundVisualTokens.saturation
-            )
+            return autoreleasepool {
+                render(
+                    image: image,
+                    blurRadius: blurRadius,
+                    saturation: BackgroundVisualTokens.saturation
+                )
+            }
         }
     }
 
     private func captureWallpaperPixels(displayID: CGDirectDisplayID) async -> CGImage? {
         for windowID in WallpaperWindowLocator.candidates(for: displayID) {
-            if let image = PrivateWindowServerCapture.capture(windowID: windowID),
-               !isFailedBlackFrame(image) {
+            if let image = autoreleasepool(invoking: {
+                guard let image = PrivateWindowServerCapture.capture(windowID: windowID),
+                      !isFailedBlackFrame(image) else { return nil as CGImage? }
+                return image
+            }) {
                 return image
             }
         }
@@ -407,13 +418,22 @@ private actor PrivateWallpaperRenderer {
 @MainActor
 final class DesktopBackgroundView: NSView {
     private let visualEffectView = NSVisualEffectView()
-    private let wallpaperImageView = NSImageView()
+    private let wallpaperImageView = NSView()
+    private var wallpaperImage: CGImage? {
+        didSet {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            wallpaperImageView.layer?.contents = wallpaperImage
+            CATransaction.commit()
+        }
+    }
     private let tintView = NSView()
     private let vignetteView = GradientVignetteView()
     private let renderer = PrivateWallpaperRenderer()
     private var captureTask: Task<Void, Never>?
     private var captureGeneration = 0
     private var preparedScreenIdentifier: CGDirectDisplayID?
+    private var trackpadBlur: (progress: CGFloat, opening: Bool)?
 
     init(screen _: NSScreen?) {
         super.init(frame: .zero)
@@ -431,8 +451,11 @@ final class DesktopBackgroundView: NSView {
         visualEffectView.autoresizingMask = [.width, .height]
         addSubview(visualEffectView)
 
-        wallpaperImageView.imageScaling = .scaleAxesIndependently
-        wallpaperImageView.imageAlignment = .alignCenter
+        // Composite the downsampled image directly, without a screen-sized
+        // AppKit backing bitmap for the image view.
+        wallpaperImageView.wantsLayer = true
+        wallpaperImageView.layerContentsRedrawPolicy = .never
+        wallpaperImageView.layer?.contentsGravity = .resize
         wallpaperImageView.isHidden = true
         wallpaperImageView.autoresizingMask = [.width, .height]
         addSubview(wallpaperImageView)
@@ -490,7 +513,7 @@ final class DesktopBackgroundView: NSView {
     func clearCacheAndReload() {
         captureGeneration += 1
         captureTask?.cancel()
-        wallpaperImageView.image = nil
+        wallpaperImage = nil
         wallpaperImageView.isHidden = true
         visualEffectView.isHidden = false
         preparedScreenIdentifier = nil
@@ -515,7 +538,7 @@ final class DesktopBackgroundView: NSView {
             captureTask?.cancel()
             captureTask = nil
             preparedScreenIdentifier = screenIdentifier
-            wallpaperImageView.image = nil
+            wallpaperImage = nil
             wallpaperImageView.isHidden = true
             visualEffectView.isHidden = false
             visualEffectView.state = .active
@@ -526,11 +549,11 @@ final class DesktopBackgroundView: NSView {
 
         if screenChanged {
             preparedScreenIdentifier = screenIdentifier
-            wallpaperImageView.image = nil
+            wallpaperImage = nil
             wallpaperImageView.isHidden = true
             visualEffectView.isHidden = false
-        } else if !replaceExisting, mode != .screen,
-                  wallpaperImageView.image != nil || captureTask != nil {
+        } else if !replaceExisting,
+                  wallpaperImage != nil || captureTask != nil {
             // Reuse either the cached image or an in-flight capture for this display.
             return
         }
@@ -544,7 +567,7 @@ final class DesktopBackgroundView: NSView {
             : nil
         let blurRadius = LaunchpadBackgroundPreferences.blurAmount
         let backingScale = screen.backingScaleFactor
-        let keepPrevious = wallpaperImageView.image != nil
+        let keepPrevious = wallpaperImage != nil
         captureTask = Task { [weak self] in
             let image = await self?.renderer.render(
                 mode: mode,
@@ -571,17 +594,18 @@ final class DesktopBackgroundView: NSView {
             self.captureTask = nil
 
             if let accepted {
-                self.wallpaperImageView.image = NSImage(
-                    cgImage: accepted,
-                    size: NSSize(width: accepted.width, height: accepted.height)
-                )
+                self.wallpaperImage = accepted
                 self.wallpaperImageView.isHidden = false
-                self.visualEffectView.isHidden = true
+                if let blur = self.trackpadBlur {
+                    self.setTrackpadPresentationProgress(blur.progress, opening: blur.opening)
+                } else {
+                    self.visualEffectView.isHidden = true
+                }
                 return
             }
 
             guard !keepPrevious else { return }
-            self.wallpaperImageView.image = nil
+            self.wallpaperImage = nil
             self.wallpaperImageView.isHidden = true
             self.visualEffectView.isHidden = false
             self.applyLiveBlurRadius()
@@ -595,6 +619,33 @@ final class DesktopBackgroundView: NSView {
         alphaValue = 0
         wallpaperImageView.alphaValue = 1
         visualEffectView.alphaValue = 1
+    }
+
+    func setTrackpadPresentationProgress(_ progress: CGFloat, opening: Bool) {
+        alphaValue = progress
+        trackpadBlur = (progress, opening)
+
+        if wallpaperImage != nil {
+            // Use live blur under the wallpaper during entry. On exit the
+            // already rendered wallpaper fades as a single layer.
+            let showsLiveBlur = opening && progress < 1
+                && LaunchpadBackgroundPreferences.blurAmount > 0
+            wallpaperImageView.alphaValue = opening ? TrackpadPresentationCurve.blurProgress(progress) : 1
+            if visualEffectView.isHidden == showsLiveBlur {
+                visualEffectView.isHidden = !showsLiveBlur
+            }
+        }
+        if !visualEffectView.isHidden {
+            applyLiveBlurRadius()
+        }
+    }
+
+    func resetTrackpadBlur() {
+        guard trackpadBlur != nil else { return }
+        trackpadBlur = nil
+        wallpaperImageView.alphaValue = 1
+        visualEffectView.isHidden = wallpaperImage != nil
+        applyLiveBlurRadius()
     }
 
     func animateWallpaperIn(duration: CFTimeInterval = 0.64) {
@@ -616,9 +667,16 @@ final class DesktopBackgroundView: NSView {
     }
 
     private func applyLiveBlurRadius() {
-        guard let layer = gaussianBlurLayer(in: visualEffectView.layer) else { return }
-        layer.setValue(
-            NSNumber(value: Double(LaunchpadBackgroundPreferences.blurAmount)),
+        let progress = trackpadBlur?.progress ?? 1
+        let opening = trackpadBlur?.opening == true
+        let phase = opening ? TrackpadPresentationCurve.blurProgress(progress) : progress
+        let blurLayer = gaussianBlurLayer(in: visualEffectView.layer)
+        let radius = LaunchpadBackgroundPreferences.blurAmount * phase
+        // AppKit can attach its blur filter after the first visible frame.
+        // Fade that material in while waiting so its default radius can't flash.
+        visualEffectView.alphaValue = opening && blurLayer == nil ? phase : 1
+        blurLayer?.setValue(
+            NSNumber(value: Double(radius)),
             forKeyPath: "filters.gaussianBlur.inputRadius"
         )
     }

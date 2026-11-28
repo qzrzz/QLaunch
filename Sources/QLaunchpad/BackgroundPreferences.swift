@@ -26,6 +26,13 @@ enum LaunchpadBackgroundPreferences {
     static let minimumBlurAmount: Double = 0
     static let maximumBlurAmount: Double = 100
 
+    static func migrateLegacyMode() {
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: modeKey) == "actualScreen" {
+            defaults.set(LaunchpadBackgroundMode.screen.rawValue, forKey: modeKey)
+        }
+    }
+
     static var mode: LaunchpadBackgroundMode {
         guard let rawValue = UserDefaults.standard.string(forKey: modeKey),
               let mode = LaunchpadBackgroundMode(rawValue: rawValue) else {

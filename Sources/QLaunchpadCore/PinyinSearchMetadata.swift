@@ -28,7 +28,7 @@ public struct PinyinSearchMetadata: Hashable, Sendable {
     }
 
     public func matches(_ compactQuery: String) -> Bool {
-        guard !compactQuery.isEmpty else { return false }
+        guard !segments.isEmpty, !compactQuery.isEmpty else { return false }
         let query = Array(compactQuery)
         return matchesFull(query) || matchesInitials(query)
     }

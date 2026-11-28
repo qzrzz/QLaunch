@@ -20,6 +20,15 @@ final class AppSearchMatcherTests: XCTestCase {
         ), .existingMetadata)
     }
 
+    func testCapitalIUsesTheCurrentLocaleForCaseFolding() {
+        let name = "INDIGO"
+        let query = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        XCTAssertEqual(AppSearchMatcher(query: query).rank(
+            name: name, bundleIdentifier: "com.example.indigo", pinyin: .empty
+        ), .exactName)
+    }
+
     func testNameRankingIsPreservedWhenNoteAlsoMatches() {
         XCTAssertEqual(AppSearchMatcher(query: "Notes").rank(
             name: "Notes",
@@ -67,6 +76,23 @@ final class AppSearchMatcherTests: XCTestCase {
             bundleIdentifier: "com.adobe.photoshop",
             pinyin: .empty
         ))
+    }
+
+    func testOrderedMatchSkipsSeparatorsInTheOriginalNameAfterRenaming() {
+        XCTAssertEqual(AppSearchMatcher(query: "A-2").rank(
+            name: "Editor",
+            bundleIdentifier: "com.vendor.editor",
+            pinyin: .empty,
+            alternateName: "Álpha Studio 2"
+        ), .orderedCharacters)
+    }
+
+    func testOrderedMatchCompactsUnicodeGraphemeClusters() {
+        XCTAssertEqual(AppSearchMatcher(query: "가").rank(
+            name: "ᄀ-ᅡ",
+            bundleIdentifier: "com.vendor.editor",
+            pinyin: .empty
+        ), .orderedCharacters)
     }
 
     func testNameMatchesRankAheadOfExistingMetadata() {

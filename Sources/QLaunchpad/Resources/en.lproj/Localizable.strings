@@ -17,7 +17,21 @@
 "settings.menuBarIcon" = "Menu Bar Icon";
 "settings.section.display" = "Display";
 "settings.showAppNames" = "Show App Names";
+"settings.appLabelSize" = "App Name Size";
+"settings.appLabelSize.small" = "Small";
+"settings.appLabelSize.medium" = "Medium";
+"settings.appLabelSize.large" = "Large";
+"settings.searchFieldSize" = "Search Field Size";
+"settings.searchFieldSize.compact" = "Small";
+"settings.searchFieldSize.standard" = "Medium";
+"settings.searchFieldSize.large" = "Large";
 "settings.layout" = "Layout";
+"settings.canvasHoverMagnification" = "Magnify Icons on Hover";
+"settings.canvasArrangement" = "Canvas Arrangement";
+"settings.canvasArrangement.grid" = "Grid";
+"settings.canvasArrangement.starRing" = "Star Rings";
+"settings.iconArrangement" = "Icon Arrangement";
+"settings.compactPlacement" = "Automatically Fill Gaps";
 "settings.freePlacement" = "Freely arrange icons";
 "organize.menu" = "Organize Pages…";
 "organize.title" = "Organize Pages";
@@ -54,7 +68,7 @@
 "settings.background.custom.unavailable" = "This image is no longer available. Choose another one.";
 "settings.section.animation" = "Animation";
 "settings.animation" = "Transition Animation";
-"settings.animation.detail" = "The icon animation used when showing or hiding the page.";
+"settings.animation.detail" = "Choose how icons enter and exit. When motion is enabled, icons fly in from the hot corner that opens QLaunch.";
 "settings.section.keyboard" = "Keyboard";
 "settings.keyboard.toggle" = "Open / Close";
 "settings.keyboard.close" = "Close";
@@ -134,6 +148,7 @@
 "sources.rescan.accessibility" = "Rescan application sources";
 "launchpad.search" = "Search";
 "launchpad.searchApps" = "Search applications";
+"launchpad.searchResultLocation" = "Location of %1$@: %2$@";
 "launchpad.clearSearch" = "Clear search";
 "launchpad.openSettings" = "Open Settings";
 "launchpad.folder" = "Folder";
@@ -179,6 +194,7 @@
 "animation.fly" = "Fly In (iOS Home Screen)";
 "animation.classic" = "Classic";
 "animation.zoom" = "Zoom";
+"animation.lift" = "Rise";
 "animation.fade" = "Fade";
 "animation.none" = "None";
 "grid.infiniteCanvas.128" = "Infinite Canvas (128pt)";
@@ -234,6 +250,8 @@
 "settings.trackpad.three" = "Three-finger pinch";
 "settings.trackpad.five" = "Five-finger pinch";
 "settings.trackpad.compatibility" = "If the system app launcher also opens, try three or five fingers.";
+"settings.trackpad.desktopPermission" = "Allow QLaunch in Accessibility so spreading your fingers only closes Launchpad while it is open.";
+"settings.trackpad.openAccessibility" = "Open Accessibility Settings";
 "settings.trackpad.unavailable" = "No compatible trackpad was detected, or this system is unsupported.";
 
 "appRename.description" = "Custom names are used for display and search.";

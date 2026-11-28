@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import QLaunchpadCore
 import SwiftUI
 
 extension Notification.Name {
@@ -8,6 +9,7 @@ extension Notification.Name {
     static let qlaunchpadDismiss = Notification.Name("QLaunchpadDismiss")
     static let qlaunchpadPresentationChanged = Notification.Name("QLaunchpadPresentationChanged")
     static let qlaunchpadFocusSearch = Notification.Name("QLaunchpadFocusSearch")
+    static let qlaunchpadSearchFieldSizeChanged = Notification.Name("QLaunchpadSearchFieldSizeChanged")
     static let qlaunchpadGridLayoutChanged = Notification.Name("QLaunchpadGridLayoutChanged")
     static let qlaunchpadCacheClearRequested = Notification.Name("QLaunchpadCacheClearRequested")
     static let qlaunchpadRenderQualityChanged = Notification.Name("QLaunchpadRenderQualityChanged")
@@ -22,6 +24,7 @@ final class PassthroughHostingView<Content: View>: NSHostingView<Content>, NSGes
     var pageCount = 0
     var currentPage = 0
     var isSearching = false
+    var searchFieldLayout = LaunchpadSearchFieldLayout()
     var onSelectPageAt: ((NSPoint) -> Void)?
     private var isScrubbingPages = false
     private var touchPagePan: NSPanGestureRecognizer?
@@ -129,7 +132,7 @@ final class PassthroughHostingView<Content: View>: NSHostingView<Content>, NSGes
     }
 
     private var searchPadRect: NSRect {
-        LaunchpadFieldHitArea.rect(in: bounds, flipped: isFlipped)
+        searchFieldLayout.hitRect(in: bounds, flipped: isFlipped)
     }
 
     private var pageIndicatorRect: NSRect {
@@ -138,33 +141,6 @@ final class PassthroughHostingView<Content: View>: NSHostingView<Content>, NSGes
             pageCount: pageCount,
             currentPage: currentPage,
             flipped: isFlipped
-        )
-    }
-}
-
-/// Hit pad around the 320×38 glass field. Clicks here must not dismiss.
-enum LaunchpadFieldHitArea {
-    static let fieldSize = NSSize(width: 320, height: 38)
-    static let topInset: CGFloat = 36
-    static let horizontalSlop: CGFloat = 48
-    static let verticalSlop: CGFloat = 32
-
-    static var padSize: NSSize {
-        NSSize(
-            width: fieldSize.width + horizontalSlop * 2,
-            height: fieldSize.height + verticalSlop * 2
-        )
-    }
-
-    static func rect(in bounds: NSRect, flipped: Bool = false) -> NSRect {
-        let pad = padSize
-        let fromTop = topInset + fieldSize.height / 2 - pad.height / 2
-        let y = flipped ? fromTop : bounds.height - fromTop - pad.height
-        return NSRect(
-            x: (bounds.width - pad.width) / 2,
-            y: y,
-            width: pad.width,
-            height: pad.height
         )
     }
 }
@@ -292,23 +268,46 @@ enum LaunchpadPageIndicatorHitArea {
 }
 
 @MainActor
+final class LaunchpadSearchFieldState: ObservableObject {
+    @Published var layout = LaunchpadSearchFieldLayout()
+    @Published var trackpadProgress: CGFloat = 1
+}
+
+@MainActor
 final class LaunchpadContainerView: NSView {
     private let store: AppStore
     private let backgroundView: DesktopBackgroundView
     private let metalView: LaunchpadMetalView
     private let overlayView: PassthroughHostingView<LaunchpadOverlayView>
+    private let searchField: LaunchpadSearchFieldState
     private var organizeView: OrganizeModeView?
     private var cancellables = Set<AnyCancellable>()
+    private var trackpadDirection: TrackpadPinchDirection?
+    private var targetTrackpadProgress: CGFloat?
+    private var isTrackpadContentReady = false
+    private var previousTrackpadFrame: CFTimeInterval?
+    private struct TrackpadSettlement {
+        let from: CGFloat
+        let destination: CGFloat
+        let start: CFTimeInterval
+        let duration: TimeInterval
+        let completion: () -> Void
+    }
+    private var trackpadSettlement: TrackpadSettlement?
+    private var trackpadDisplayLink: CADisplayLink?
 
     var metal: LaunchpadMetalView { metalView }
     var background: DesktopBackgroundView { backgroundView }
     var isOrganizing: Bool { organizeView != nil }
+    var displayedTrackpadProgress: CGFloat { searchField.trackpadProgress }
 
     init(store: AppStore) {
         self.store = store
+        let searchField = LaunchpadSearchFieldState()
+        self.searchField = searchField
         backgroundView = DesktopBackgroundView(screen: NSScreen.main)
         metalView = LaunchpadMetalView(store: store)
-        overlayView = PassthroughHostingView(rootView: LaunchpadOverlayView(store: store))
+        overlayView = PassthroughHostingView(rootView: LaunchpadOverlayView(store: store, searchField: searchField))
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -333,7 +332,6 @@ final class LaunchpadContainerView: NSView {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                self.metalView.needsDisplay = true
                 NotificationCenter.default.post(name: .qlaunchpadStoreChanged, object: self)
                 self.syncOverlayAlpha()
                 self.syncPageIndicatorHitState()
@@ -367,6 +365,12 @@ final class LaunchpadContainerView: NSView {
             self,
             selector: #selector(showOrganizer),
             name: .qlaunchpadOpenOrganizer,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(searchFieldSizeChanged),
+            name: .qlaunchpadSearchFieldSizeChanged,
             object: nil
         )
     }
@@ -445,7 +449,7 @@ final class LaunchpadContainerView: NSView {
     }
 
     private func syncOverlayAlpha() {
-        guard !isOrganizing else { return }
+        guard !isOrganizing, trackpadDirection == nil else { return }
         // Keep overlay in sync if presentationProgress is driven from Metal.
         if store.presentation == .visible {
             overlayView.alphaValue = 1
@@ -470,6 +474,14 @@ final class LaunchpadContainerView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     override func becomeFirstResponder() -> Bool { true }
+
+    override func magnify(with event: NSEvent) {
+        if GridLayoutPreset.current.isInfiniteCanvas, !isOrganizing, window?.attachedSheet == nil {
+            metalView.magnify(with: event)
+        } else {
+            super.magnify(with: event)
+        }
+    }
 
     override func keyDown(with event: NSEvent) {
         // Esc
@@ -505,6 +517,7 @@ final class LaunchpadContainerView: NSView {
         on screen: NSScreen,
         animationStyle _: LaunchpadAnimationStyle
     ) {
+        updateSearchFieldLayout(on: screen)
         hideOrganizer()
         setPresentationScale(1)
         // Hide any drawable retained from the previous presentation until Metal
@@ -515,8 +528,129 @@ final class LaunchpadContainerView: NSView {
         backgroundView.prepareForPresentation()
     }
 
+    @objc private func searchFieldSizeChanged() {
+        if let screen = window?.screen ?? NSScreen.main {
+            updateSearchFieldLayout(on: screen)
+        }
+    }
+
+    func updateSearchFieldLayout(on screen: NSScreen) {
+        let rawValue = UserDefaults.standard.string(forKey: LaunchpadSearchFieldSize.defaultsKey)
+        let layout = LaunchpadSearchFieldLayout(
+            preset: rawValue.flatMap(LaunchpadSearchFieldSize.init(rawValue:)) ?? .defaultSize,
+            availableWidth: screen.frame.width,
+            displaySafeTop: screen.safeAreaInsets.top
+        )
+        guard searchField.layout != layout else { return }
+        overlayView.searchFieldLayout = layout
+        metalView.searchFieldLayout = layout
+        metalView.needsDisplay = true
+        searchField.layout = layout
+    }
+
     func revealPrimedMetalContent() {
         metalView.alphaValue = 1
+    }
+
+    func revealPrimedTrackpadContent() {
+        isTrackpadContentReady = true
+        revealPrimedMetalContent()
+    }
+
+    func setTrackpadPresentationProgress(_ progress: CGFloat, direction: TrackpadPinchDirection) {
+        if trackpadDirection == nil {
+            trackpadDirection = direction
+            isTrackpadContentReady = direction == .outward
+            if direction == .inward {
+                renderTrackpadPresentation(0)
+            } else {
+                metalView.beginTrackpadDismissal()
+            }
+        }
+        targetTrackpadProgress = progress
+        startTrackpadDisplayLink()
+    }
+
+    private func renderTrackpadPresentation(_ progress: CGFloat) {
+        guard let direction = trackpadDirection else { return }
+        if searchField.trackpadProgress != progress {
+            searchField.trackpadProgress = progress
+        }
+        if direction == .outward || metalView.alphaValue > 0 {
+            metalView.setTrackpadPresentationProgress(progress, direction: direction)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if direction == .outward {
+            // A retained drawable must not leave an icon visible at a held endpoint.
+            metalView.alphaValue = progress > 0 ? 1 : 0
+        }
+        overlayView.alphaValue = progress
+        organizeView?.alphaValue = progress
+        backgroundView.setTrackpadPresentationProgress(progress, opening: direction == .inward)
+        CATransaction.commit()
+    }
+
+    func settleTrackpadPresentation(
+        at progress: CGFloat, duration: TimeInterval, completion: @escaping () -> Void
+    ) {
+        targetTrackpadProgress = nil
+        trackpadSettlement = TrackpadSettlement(
+            from: searchField.trackpadProgress, destination: progress, start: CACurrentMediaTime(),
+            duration: duration, completion: completion
+        )
+        startTrackpadDisplayLink()
+    }
+
+    private func startTrackpadDisplayLink() {
+        guard trackpadDisplayLink == nil else { return }
+        let link = displayLink(target: self, selector: #selector(advanceTrackpadFrame(_:)))
+        trackpadDisplayLink = link
+        link.add(to: .main, forMode: .common)
+    }
+
+    @objc private func advanceTrackpadFrame(_ link: CADisplayLink) {
+        let frameTime = link.targetTimestamp
+        let elapsed = frameTime - (previousTrackpadFrame ?? link.timestamp)
+        previousTrackpadFrame = frameTime
+        guard let settlement = trackpadSettlement else {
+            if isTrackpadContentReady, let target = targetTrackpadProgress {
+                let progress = trackpadDirection == .inward
+                    ? TrackpadPresentationCurve.nextInwardProgress(
+                        from: displayedTrackpadProgress, toward: target, elapsed: elapsed
+                    )
+                    : target
+                renderTrackpadPresentation(progress)
+                if progress == target { targetTrackpadProgress = nil }
+            }
+            return
+        }
+        let t = CGFloat(min(1, max(0, (frameTime - settlement.start) / settlement.duration)))
+        let eased = t * t * (3 - 2 * t)
+        let progress = settlement.from + (settlement.destination - settlement.from) * eased
+        renderTrackpadPresentation(progress)
+        if t == 1 {
+            trackpadDisplayLink?.invalidate()
+            trackpadDisplayLink = nil
+            trackpadSettlement = nil
+            settlement.completion()
+        }
+    }
+
+    func endTrackpadPresentation() {
+        if trackpadDirection == .outward {
+            metalView.endTrackpadDismissal()
+        }
+        trackpadDisplayLink?.invalidate()
+        trackpadDisplayLink = nil
+        trackpadSettlement = nil
+        targetTrackpadProgress = nil
+        isTrackpadContentReady = false
+        previousTrackpadFrame = nil
+        trackpadDirection = nil
+        if searchField.trackpadProgress != 1 { searchField.trackpadProgress = 1 }
+        organizeView?.alphaValue = 1
+        backgroundView.resetTrackpadBlur()
     }
 
     func hideImmediately() {
@@ -525,6 +659,7 @@ final class LaunchpadContainerView: NSView {
             view.layer?.removeAllAnimations()
             view.alphaValue = 0
         }
+        endTrackpadPresentation()
         setPresentationScale(1)
     }
 
@@ -549,6 +684,7 @@ final class LaunchpadContainerView: NSView {
 
 struct LaunchpadOverlayView: View {
     @ObservedObject var store: AppStore
+    @ObservedObject var searchField: LaunchpadSearchFieldState
     @ObservedObject private var language = LocalizationManager.shared
 
     var body: some View {
@@ -558,10 +694,10 @@ struct LaunchpadOverlayView: View {
                     ZStack {
                         if let folderID = store.openedFolderID,
                            let folder = store.folder(withID: folderID) {
-                            FolderTitleField(store: store, folder: folder)
+                            FolderTitleField(store: store, folder: folder, layout: searchField.layout)
                                 .transition(.opacity)
                         } else {
-                            SearchField(store: store)
+                            SearchField(store: store, layout: searchField.layout)
                                 .transition(.opacity)
                         }
                     }
@@ -569,8 +705,8 @@ struct LaunchpadOverlayView: View {
                     .background {
                         Color.clear
                             .frame(
-                                width: LaunchpadFieldHitArea.padSize.width,
-                                height: LaunchpadFieldHitArea.padSize.height
+                                width: searchField.layout.hitSize.width,
+                                height: searchField.layout.hitSize.height
                             )
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -582,7 +718,9 @@ struct LaunchpadOverlayView: View {
                             }
                             .accessibilityHidden(true)
                     }
-                    .padding(.top, LaunchpadFieldHitArea.topInset)
+                    .padding(.top, searchField.layout.topInset)
+                    .offset(y: -(1 - searchField.trackpadProgress)
+                        * (searchField.layout.topInset + searchField.layout.size.height + 12))
                     Spacer(minLength: 0)
                     PageIndicator(store: store)
                         .padding(.bottom, LaunchpadPageIndicatorHitArea.bottomInset)
@@ -635,12 +773,14 @@ private struct FolderRemovalDropZone: View {
 private struct FolderTitleField: View {
     @ObservedObject var store: AppStore
     let folder: AppFolder
+    let layout: LaunchpadSearchFieldLayout
     @State private var draftName: String
     @FocusState private var isFocused: Bool
 
-    init(store: AppStore, folder: AppFolder) {
+    init(store: AppStore, folder: AppFolder, layout: LaunchpadSearchFieldLayout) {
         self.store = store
         self.folder = folder
+        self.layout = layout
         _draftName = State(initialValue: folder.name)
     }
 
@@ -657,8 +797,8 @@ private struct FolderTitleField: View {
         .focused($isFocused)
         .padding(.horizontal, 16)
         .frame(
-            width: LaunchpadFieldHitArea.fieldSize.width + 40,
-            height: LaunchpadFieldHitArea.fieldSize.height
+            width: min(layout.size.width + 40, layout.hitSize.width),
+            height: layout.size.height
         )
         .background {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -691,14 +831,26 @@ private struct FolderTitleField: View {
 
 private struct SearchField: View {
     @ObservedObject var store: AppStore
+    let layout: LaunchpadSearchFieldLayout
     @State private var isFocused = false
     /// Bumped to request first-responder; survives overlay reuse across presentations.
     @State private var focusRequestID = 0
 
+    private var scale: CGFloat { layout.fontSize / 16 }
+
+    private var focusedAppWithNameConflict: AppInfo? {
+        guard store.isSearching, let focused = store.focusedApp else { return nil }
+        let hasConflict = store.displayItems.contains { item in
+            guard case .app(let app) = item else { return false }
+            return app.id != focused.id && app.name == focused.name
+        }
+        return hasConflict ? focused : nil
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 15 * scale, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.72))
                 .symbolRenderingMode(.hierarchical)
 
@@ -711,7 +863,8 @@ private struct SearchField: View {
                 ),
                 isFocused: $isFocused,
                 focusRequestID: focusRequestID,
-                placeholder: L10n.tr("launchpad.search")
+                placeholder: L10n.tr("launchpad.search"),
+                fontSize: layout.fontSize
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
@@ -730,13 +883,13 @@ private struct SearchField: View {
                 }
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 14 * scale, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.45))
                     .symbolRenderingMode(.hierarchical)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 18 * scale, height: 18 * scale)
             }
             .buttonStyle(.plain)
-            .frame(width: 32, height: 32)
+            .frame(width: 32 * scale, height: 32 * scale)
             .contentShape(Rectangle())
             .opacity(store.searchText.isEmpty ? 0 : 1)
             .allowsHitTesting(!store.searchText.isEmpty)
@@ -747,10 +900,10 @@ private struct SearchField: View {
                 NotificationCenter.default.post(name: .qlaunchpadOpenSettings, object: nil)
             } label: {
                 Image(systemName: "gearshape.fill")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 14 * scale, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.68))
                     .symbolRenderingMode(.hierarchical)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 18 * scale, height: 18 * scale)
             }
             .buttonStyle(.plain)
             .padding(14)
@@ -759,30 +912,43 @@ private struct SearchField: View {
             .help(L10n.tr("launchpad.openSettings"))
             .accessibilityLabel(L10n.tr("launchpad.openSettings"))
         }
-        .launchpadGlassField(isEmphasized: !store.searchText.isEmpty)
+        .modifier(LaunchpadGlassFieldChrome(size: layout.size, isEmphasized: !store.searchText.isEmpty))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(L10n.tr("launchpad.searchApps"))
-    }
-}
-
-private extension View {
-    func launchpadGlassField(isEmphasized: Bool) -> some View {
-        modifier(LaunchpadGlassFieldChrome(isEmphasized: isEmphasized))
+        .overlay(alignment: .bottom) {
+            if let app = focusedAppWithNameConflict {
+                let path = (app.resourceSourcePath as NSString).abbreviatingWithTildeInPath
+                Label {
+                    Text(verbatim: path)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } icon: {
+                    Image(systemName: "folder")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 7)
+                .frame(height: 16)
+                .background(.black.opacity(0.58), in: .capsule)
+                .offset(y: 18)
+                .allowsHitTesting(false)
+                .accessibilityLabel(L10n.tr("launchpad.searchResultLocation", app.name, path))
+            }
+        }
     }
 }
 
 /// Clear liquid glass chip. Rim brightens when typing, not merely because
 /// the field holds first-responder (search is auto-focused on open).
 private struct LaunchpadGlassFieldChrome: ViewModifier {
+    let size: CGSize
     var isEmphasized: Bool
-    private let width: CGFloat = 320
-    private let height: CGFloat = 38
-    private let cornerRadius: CGFloat = 19
+    private var cornerRadius: CGFloat { size.height / 2 }
 
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 16)
-            .frame(width: width, height: height)
+            .frame(width: size.width, height: size.height)
             .background { glassBackground }
             .overlay { glassStroke }
             .shadow(color: .black.opacity(isEmphasized ? 0.20 : 0.12), radius: isEmphasized ? 18 : 14, y: 6)
@@ -858,17 +1024,7 @@ private struct AppKitSearchTextField: NSViewRepresentable {
     @Binding var isFocused: Bool
     var focusRequestID: Int
     var placeholder: String
-
-    private static let textFont: NSFont = {
-        let base = NSFont.systemFont(ofSize: 16, weight: .medium)
-        if let rounded = base.fontDescriptor.withDesign(.rounded) {
-            return NSFont(descriptor: rounded, size: 16) ?? base
-        }
-        return base
-    }()
-
-    private static let textColor = NSColor.white.withAlphaComponent(0.95)
-    private static let placeholderColor = NSColor.white.withAlphaComponent(0.55)
+    var fontSize: CGFloat
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -876,6 +1032,7 @@ private struct AppKitSearchTextField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> IMESearchTextView {
         let view = IMESearchTextView(frame: .zero)
+        view.setSearchFontSize(fontSize)
         view.setSearchText(text)
         view.placeholder = placeholder
         view.delegate = context.coordinator
@@ -889,6 +1046,7 @@ private struct AppKitSearchTextField: NSViewRepresentable {
         context.coordinator.parent = self
 
         // Never replace the text while IME marked text is active.
+        field.setSearchFontSize(fontSize)
         if !field.hasMarkedText(), field.string != text {
             field.setSearchText(text)
         }
@@ -1010,6 +1168,14 @@ private final class IMESearchTextView: NSTextView {
         typingAttributes = attributes
     }
 
+    func setSearchFontSize(_ size: CGFloat) {
+        guard !hasMarkedText(), font?.pointSize != size else { return }
+        let newFont = NSFont.systemFont(ofSize: size, weight: .medium)
+        font = newFont
+        typingAttributes[.font] = newFont
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
         // NSTextView defaults to a top-aligned text container. Center the
@@ -1059,7 +1225,7 @@ private final class IMESearchTextView: NSTextView {
         super.draw(dirtyRect)
         guard string.isEmpty, !hasMarkedText() else { return }
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 16, weight: .medium),
+            .font: font ?? NSFont.systemFont(ofSize: 16, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(0.55)
         ]
         let size = placeholder.size(withAttributes: attributes)

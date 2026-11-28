@@ -17,6 +17,19 @@ enum GridLayoutPreset: String, CaseIterable, Identifiable {
 
     static let defaultsKey = LaunchpadPersistence.gridLayoutPresetKey
     static let defaultPreset: Self = .sixByFour
+    static let canvasArrangementKey = "canvasArrangement"
+    static let canvasHoverMagnificationKey = "canvasHoverMagnification"
+    static let defaultCanvasHoverMagnification = true
+
+    static var canvasHoverMagnificationEnabled: Bool {
+        UserDefaults.standard.object(forKey: canvasHoverMagnificationKey) as? Bool
+            ?? defaultCanvasHoverMagnification
+    }
+
+    static var canvasArrangement: InfiniteCanvasMetrics.Arrangement {
+        UserDefaults.standard.string(forKey: canvasArrangementKey)
+            .flatMap(InfiniteCanvasMetrics.Arrangement.init(rawValue:)) ?? .grid
+    }
     static let menuGroups: [[Self]] = [
         [.fourByTwo, .infiniteCanvas256],
         [.fiveByFour, .sixByFour, .sevenByFive, .infiniteCanvas],
@@ -32,7 +45,7 @@ enum GridLayoutPreset: String, CaseIterable, Identifiable {
         case .sixByFour: 6
         case .sevenByFive, .sevenByFiveCompact: 7
         case .eightBySevenCompact: 8
-        case .infiniteCanvas, .infiniteCanvas256: 16
+        case .infiniteCanvas, .infiniteCanvas256: InfiniteCanvasMetrics.maximumColumns
         }
     }
 
@@ -143,33 +156,49 @@ struct GridMetrics {
     let gridLeft: CGFloat
     let gridTop: CGFloat
     let iconSize: CGFloat
+    let columnCount: Int
+    let rowCount: Int
+    var itemsPerPage: Int { columnCount * rowCount }
 
-    init(size: CGSize) {
+    init(size: CGSize, minimumGridTop: CGFloat) {
         self.size = size
-        iconSize = Self.iconPointSize
+        let preset = Self.current
+        columnCount = preset.columns
+        rowCount = preset.rows
+        let requestedIconSize = preset.layoutIconPointSize
+        let vertical = Self.verticalPlacement(
+            screenHeight: size.height, iconSize: requestedIconSize, minimumGridTop: minimumGridTop
+        )
+        let availableHeight = max(size.height - vertical.insetTop - vertical.insetBottom, 1)
+        let idealRow = availableHeight / CGFloat(rowCount)
+        let extraLabelHeight = AppLabelSize.current.pointSize - AppLabelSize.defaultSize.pointSize
+        let labelGap = min(26, vertical.minCellExtra * preset.spacingScale) + extraLabelHeight
+        iconSize = vertical.centerInChromeBand && !preset.isInfiniteCanvas
+            ? min(requestedIconSize, max(1, idealRow - labelGap))
+            : requestedIconSize
 
         // Horizontal: 128pt icon + breathing room for 6 columns on typical displays.
         let hInset: CGFloat = 80
         let availableWidth = max(size.width - hInset * 2, 1)
         let minGap: CGFloat = 28
-        let idealCell = availableWidth / CGFloat(Self.columns)
+        let idealCell = availableWidth / CGFloat(columnCount)
         let maxCellWidth = max(220, iconSize + minGap)
         let unscaledCellWidth = min(max(idealCell, iconSize + minGap), maxCellWidth)
         cellWidth = iconSize
-            + (unscaledCellWidth - iconSize) * Self.current.spacingScale
+            + (unscaledCellWidth - iconSize) * preset.spacingScale
 
-        let vertical = Self.verticalPlacement(screenHeight: size.height, iconSize: iconSize)
-        let availableHeight = max(size.height - vertical.insetTop - vertical.insetBottom, 1)
-        let idealRow = availableHeight / CGFloat(Self.rows)
         let unscaledCellHeight = min(
-            max(idealRow, iconSize + vertical.minCellExtra),
+            max(idealRow, iconSize + vertical.minCellExtra + extraLabelHeight),
             vertical.maxCell
         )
-        cellHeight = iconSize
-            + (unscaledCellHeight - iconSize) * Self.current.spacingScale
+        let preferredCellHeight = iconSize
+            + (unscaledCellHeight - iconSize) * preset.spacingScale
+        cellHeight = vertical.centerInChromeBand
+            ? max(iconSize, min(preferredCellHeight, idealRow))
+            : preferredCellHeight
 
-        gridWidth = cellWidth * CGFloat(Self.columns)
-        gridHeight = cellHeight * CGFloat(Self.rows)
+        gridWidth = cellWidth * CGFloat(columnCount)
+        gridHeight = cellHeight * CGFloat(rowCount)
         gridLeft = (size.width - gridWidth) / 2
         if vertical.centerInChromeBand {
             gridTop = Self.centeredGridTop(
@@ -199,32 +228,27 @@ struct GridMetrics {
 
     private static func verticalPlacement(
         screenHeight: CGFloat,
-        iconSize: CGFloat
+        iconSize: CGFloat,
+        minimumGridTop: CGFloat
     ) -> VerticalPlacement {
         let comfortable = VerticalPlacement(
-            insetTop: 120,
+            insetTop: max(120, minimumGridTop),
             insetBottom: 96,
             minCellExtra: 48,
             maxCell: max(220, iconSize + 48),
             opticalLift: 12,
             centerInChromeBand: false
         )
-        guard current == .sevenByFive else { return comfortable }
-
-        let comfortableBlock = (iconSize + comfortable.minCellExtra) * CGFloat(rows)
+        let comfortableBlock = (iconSize + comfortable.minCellExtra * current.spacingScale) * CGFloat(rows)
             + comfortable.insetTop
             + comfortable.insetBottom
         guard screenHeight + 0.5 < comfortableBlock else { return comfortable }
 
-        // Search field occupies 36…74; page capsule sits ~36pt from the bottom.
-        let chromeTop = LaunchpadFieldHitArea.topInset
-            + LaunchpadFieldHitArea.fieldSize.height
-            + 6
         let chromeBottom = LaunchpadPageIndicatorHitArea.bottomInset
             + LaunchpadPageIndicatorHitArea.dotHeight
             + LaunchpadPageIndicatorHitArea.verticalPadding * 2
         return VerticalPlacement(
-            insetTop: chromeTop,
+            insetTop: minimumGridTop,
             insetBottom: chromeBottom,
             minCellExtra: 40,
             maxCell: comfortable.maxCell,
@@ -254,7 +278,7 @@ struct GridMetrics {
 
     /// Icon center in **top-left** coordinates (y grows downward). Used by Metal.
     func iconCenter(localIndex: Int, page: Int, pageOffset: Double) -> CGPoint {
-        iconCenter(localIndex: Double(localIndex), page: page, pageOffset: pageOffset)
+        iconCenter(integerLocalIndex: max(localIndex, 0), page: page, pageOffset: pageOffset)
     }
 
     /// Icon center for a fractional local index. Interpolating the cell center
@@ -262,7 +286,7 @@ struct GridMetrics {
     /// columns and rows.
     func iconCenter(localIndex: Double, page: Int, pageOffset: Double) -> CGPoint {
         let lowerIndex = max(0, Int(floor(localIndex)))
-        let upperIndex = min(Self.pageCapacity - 1, Int(ceil(localIndex)))
+        let upperIndex = min(itemsPerPage - 1, Int(ceil(localIndex)))
         let fraction = CGFloat(localIndex - floor(localIndex))
         let lower = iconCenter(integerLocalIndex: lowerIndex, page: page, pageOffset: pageOffset)
         let upper = iconCenter(integerLocalIndex: upperIndex, page: page, pageOffset: pageOffset)
@@ -279,13 +303,13 @@ struct GridMetrics {
         let upperIndex = max(lowerIndex, Int(ceil(globalIndex)))
         let fraction = CGFloat(globalIndex - floor(globalIndex))
         let lower = iconCenter(
-            localIndex: lowerIndex % Self.pageCapacity,
-            page: lowerIndex / Self.pageCapacity,
+            localIndex: lowerIndex % itemsPerPage,
+            page: lowerIndex / itemsPerPage,
             pageOffset: pageOffset
         )
         let upper = iconCenter(
-            localIndex: upperIndex % Self.pageCapacity,
-            page: upperIndex / Self.pageCapacity,
+            localIndex: upperIndex % itemsPerPage,
+            page: upperIndex / itemsPerPage,
             pageOffset: pageOffset
         )
         return CGPoint(
@@ -295,8 +319,8 @@ struct GridMetrics {
     }
 
     private func iconCenter(integerLocalIndex: Int, page: Int, pageOffset: Double) -> CGPoint {
-        let column = integerLocalIndex % Self.columns
-        let row = integerLocalIndex / Self.columns
+        let column = integerLocalIndex % columnCount
+        let row = integerLocalIndex / columnCount
         let pageShift = CGFloat(Double(page) - pageOffset) * size.width
         return CGPoint(
             x: gridLeft + cellWidth * (CGFloat(column) + 0.5) + pageShift,
@@ -327,7 +351,7 @@ struct GridMetrics {
         let localY = topPoint.y - gridTop
         let column = Int(floor(localX / cellWidth))
         let row = Int(floor(localY / cellHeight))
-        guard row >= 0, row < Self.rows, column >= 0, column < Self.columns else { return nil }
+        guard row >= 0, row < rowCount, column >= 0, column < columnCount else { return nil }
 
         // Require hit near the icon (not the entire cell).
         let iconCx = cellWidth * (CGFloat(column) + 0.5)
@@ -336,6 +360,6 @@ struct GridMetrics {
         let dy = localY - iconCy
         let hitRadius = iconSize * hitRadiusScale
         guard (dx * dx + dy * dy) <= hitRadius * hitRadius else { return nil }
-        return (page, row * Self.columns + column)
+        return (page, row * columnCount + column)
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Match rank used to keep stronger search results ahead of fuzzy matches.
-public enum AppSearchMatchRank: Int, Comparable, Sendable {
+public enum AppSearchMatchRank: Int, CaseIterable, Comparable, Sendable {
     case exactName
     case namePrefix
     case nameSubstring
@@ -17,11 +17,16 @@ public enum AppSearchMatchRank: Int, Comparable, Sendable {
 public struct AppSearchMatcher: Sendable {
     private let query: String
     private let compactQuery: String
+    private let compactQueryIsASCII: Bool
+
+    public var isEmpty: Bool { query.isEmpty }
 
     public init(query: String) {
         let normalizedQuery = Self.normalize(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        let compactQuery = Self.compact(normalizedQuery)
         self.query = normalizedQuery
-        self.compactQuery = Self.compact(normalizedQuery)
+        self.compactQuery = compactQuery
+        self.compactQueryIsASCII = compactQuery.utf8.allSatisfy { $0 < 0x80 }
     }
 
     /// Ranks display/original names, note, bundle identifier and both names' pinyin.
@@ -37,7 +42,7 @@ public struct AppSearchMatcher: Sendable {
         alternateName: String? = nil,
         alternatePinyin: PinyinSearchMetadata = .empty
     ) -> AppSearchMatchRank? {
-        guard !query.isEmpty else { return nil }
+        guard !isEmpty else { return nil }
 
         let normalizedName = Self.normalize(name)
         let normalizedAlternate = alternateName.map(Self.normalize) ?? ""
@@ -59,8 +64,7 @@ public struct AppSearchMatcher: Sendable {
         }
 
         guard !compactQuery.isEmpty,
-              Self.containsInOrder(compactQuery, in: Self.compact(normalizedName))
-                || Self.containsInOrder(compactQuery, in: Self.compact(normalizedAlternate)) else {
+              containsInOrder(normalizedName) || containsInOrder(normalizedAlternate) else {
             return nil
         }
         return .orderedCharacters
@@ -69,7 +73,11 @@ public struct AppSearchMatcher: Sendable {
 
 private extension AppSearchMatcher {
     static func normalize(_ value: String) -> String {
-        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        // Capital I needs the locale-aware path for Turkic case folding.
+        if value.utf8.allSatisfy({ $0 < 0x80 && $0 != UInt8(ascii: "I") }) {
+            return value.lowercased()
+        }
+        return value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             .lowercased()
     }
 
@@ -77,16 +85,29 @@ private extension AppSearchMatcher {
         String(value.filter { $0.isLetter || $0.isNumber })
     }
 
-    static func containsInOrder(_ query: String, in value: String) -> Bool {
-        let queryCharacters = Array(query)
-        guard !queryCharacters.isEmpty else { return false }
+    func containsInOrder(_ value: String) -> Bool {
+        let isASCII = value.utf8.allSatisfy { $0 < 0x80 }
+        if compactQueryIsASCII, isASCII {
+            var queryBytes = compactQuery.utf8.makeIterator()
+            guard var wanted = queryBytes.next() else { return false }
+            for byte in value.utf8 where byte == wanted {
+                guard let next = queryBytes.next() else { return true }
+                wanted = next
+            }
+            return false
+        }
 
-        var queryIndex = 0
-        for character in value where character == queryCharacters[queryIndex] {
-            queryIndex += 1
-            if queryIndex == queryCharacters.count {
+        // ASCII separators never match a compact query. Keep the Unicode
+        // compaction because removing a separator can join grapheme clusters.
+        let candidate = isASCII ? value : Self.compact(value)
+        var queryIndex = compactQuery.startIndex
+        var nextCharacter = compactQuery[queryIndex]
+        for character in candidate where character == nextCharacter {
+            compactQuery.formIndex(after: &queryIndex)
+            if queryIndex == compactQuery.endIndex {
                 return true
             }
+            nextCharacter = compactQuery[queryIndex]
         }
         return false
     }
